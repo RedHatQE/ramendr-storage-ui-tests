@@ -1,0 +1,38 @@
+---
+# Override for DR cluster names and versions.
+# Set byoc: true to use pre-provisioned clusters (Bring Your Own Cluster).
+# In BYOC mode, the hub will not provision spokes via Hive � instead it imports
+# them using the kubeconfigs provided in values-secret.yaml (ocp-primary-kubeconfig
+# and ocp-secondary-kubeconfig). All install_config AWS details are handled
+# externally by openshift-install.
+
+# Top-level BYOC flag required by the chart template ($.Values.byoc).
+byoc: true
+
+costManagement:
+  ownerTag: storage-migration-qe
+  launchedByTag: automation-user
+  environmentTag: dev
+
+clusterOverrides:
+  primary:
+    name: ocp-primary
+    version: 4.20.6
+    byoc: true
+    install_config:
+      platform:
+        aws:
+          region: eu-central-1
+  secondary:
+    name: ocp-secondary
+    version: 4.20.6
+    byoc: true
+    install_config:
+      platform:
+        aws:
+          region: eu-west-1
+
+# DRPC overrides (preferredCluster defaults to primary if unset)
+drpc:
+  preferredCluster: ocp-primary
+

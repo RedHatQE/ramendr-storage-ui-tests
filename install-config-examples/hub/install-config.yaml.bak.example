@@ -1,0 +1,38 @@
+apiVersion: v1
+baseDomain: <BASE_DOMAIN>
+metadata:
+  name: hub
+controlPlane:
+  name: master
+  replicas: 3
+  platform:
+    aws:
+      type: m5.4xlarge
+compute:
+  - name: worker
+    replicas: 6
+    platform:
+      aws:
+        type: m5.2xlarge
+networking:
+  clusterNetwork:
+    - cidr: 10.128.0.0/14
+      hostPrefix: 23
+  machineNetwork:
+    - cidr: 10.0.0.0/16
+  networkType: OVNKubernetes
+  serviceNetwork:
+    - 172.30.0.0/16
+platform:
+  aws:
+    region: <HUB_REGION> # e.g. eu-north-1
+    userTags:
+      project: ValidatedPatterns
+      owner: <OWNER>
+      environment: <ENVIRONMENT> # e.g. dev
+publish: External
+
+# Secrets (do not commit real values)
+sshKey: "<SSH_PUBLIC_KEY>"
+pullSecret: '<PULL_SECRET_JSON>'
+

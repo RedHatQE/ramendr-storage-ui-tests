@@ -1,0 +1,32 @@
+---
+vms:
+  server:
+    count: 2
+    role: server
+    os: rhel9
+
+vmNamespace: gitops-vms
+
+vmDefaults:
+  sshsecret: secret/data/global/vm-ssh
+  cloudinitsecret: secret/data/global/cloud-init
+
+serviceAccountName: gitops-vms-sa
+rbac:
+  roleBindings:
+    - name: view-machine-api
+      createBinding: true
+      scope:
+        cluster: false
+        namespace: "openshift-machine-api"
+      subjects:
+        kind: ServiceAccount
+        name: gitops-vms-sa
+        namespace: gitops-vms
+        apiGroup: ""
+      roleRef:
+        kind: ClusterRole
+        name: view-machine-api
+
+#waitForMetalNode: false
+
