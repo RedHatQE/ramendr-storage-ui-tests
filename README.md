@@ -9,7 +9,7 @@ It contains:
 - Override values under `overrides/` that are copied on top of the upstream `overrides/` directory before installing the pattern.
 - (Planned) UI tests using **Playwright + Python** (to be added later).
 
-## What this repo does (today)
+## What this repo does
 
 `scripts/redeploy.sh` will:
 
@@ -17,8 +17,6 @@ It contains:
 2. Copy this repo's `overrides/*.yaml` into the cloned upstream `overrides/`, apply `upstream-overrides/values-hub.patch` on top of upstream `values-hub.yaml`, and patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal)
 3. Provision hub + two spokes on AWS (BYOC spokes)
 4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`
-
-This script **does not contain secrets**. Any required secrets are passed via files/environment variables on the machine/CI runner.
 
 ## Prerequisites
 
