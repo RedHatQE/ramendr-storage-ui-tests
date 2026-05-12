@@ -709,7 +709,7 @@ case "${1:-}" in
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $UPSTREAM_REPO)"
     echo " UPSTREAM_REF            Upstream git ref (default: $UPSTREAM_REF)"
-    echo " UPSTREAM_OVERRIDES_DIR  Dir with root-level overrides e.g. values-hub.yaml (default: $UPSTREAM_OVERRIDES_DIR)"
+    echo " UPSTREAM_OVERRIDES_DIR  Dir containing values-hub.patch (default: $UPSTREAM_OVERRIDES_DIR)"
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
