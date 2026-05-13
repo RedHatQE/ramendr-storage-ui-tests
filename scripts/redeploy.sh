@@ -202,13 +202,34 @@ release_orphaned_eips() {
 destroy_cluster() {
   local name="$1"
   local dir="$2"
-  if [[ -f "$dir/metadata.json" ]]; then
-    log "Destroying $name cluster..."
-    openshift-install destroy cluster --dir "$dir" --log-level=info 2>&1 \
-      || warn "$name destroy had errors (may already be destroyed)"
-  else
-    warn "No metadata found for $name � skipping (may already be destroyed)."
+
+  if [[ ! -f "$dir/metadata.json" ]]; then
+    warn "No metadata found for $name -- skipping (may already be destroyed)."
+    return
   fi
+
+  # Before invoking openshift-install (which retries for many minutes on
+  # orphaned resources), do a quick AWS check: if the cluster's VPC is already
+  # gone, the infrastructure has been cleaned up and there is nothing to destroy.
+  local infra_id region vpc_count
+  infra_id=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['infraID'])" 2>/dev/null || echo "")
+  region=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['aws']['region'])" 2>/dev/null || echo "")
+
+  if [[ -n "$infra_id" && -n "$region" ]]; then
+    vpc_count=$(aws ec2 describe-vpcs \
+      --region "$region" \
+      --filters "Name=tag:kubernetes.io/cluster/${infra_id},Values=owned" \
+      --query 'length(Vpcs)' \
+      --output text 2>/dev/null || echo "")
+    if [[ "$vpc_count" == "0" ]]; then
+      log "$name AWS infrastructure already gone ($infra_id in $region) -- skipping destroy."
+      return
+    fi
+  fi
+
+  log "Destroying $name cluster ($infra_id in $region)..."
+  openshift-install destroy cluster --dir "$dir" --log-level=info 2>&1 \
+    || warn "$name destroy had errors (may already be destroyed)"
 }
 
 destroy_managed_clusters() {
