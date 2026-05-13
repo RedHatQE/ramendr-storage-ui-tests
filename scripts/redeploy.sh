@@ -555,28 +555,35 @@ ensure_spoke_imports() {
 }
 
 fix_cluster_deployments_for_byoc() {
-  # The regional-dr Helm chart creates ClusterDeployment objects with spec fields
-  # sourced from Helm values that do NOT necessarily match the real cluster state:
+  # For BYOC clusters the regional-dr Helm chart creates ClusterDeployment objects
+  # whose spec fields do NOT match the real installed cluster state.  This causes the
+  # submariner-sg-tagger Ansible job (sync wave 8) to fail, blocking all downstream
+  # resources (odf-ramen-trusted-ca, DRPolicy, DRPlacementControl, edge-gitops-vms
+  # ConfigMap, …) and preventing VMs from ever being deployed.
   #
-  #   spec.clusterMetadata.infraID — set by Hive during its own (failed) provision
-  #     attempt, which assigns a different random suffix than openshift-install used.
+  # Two distinct problems — different fields, different root causes, different fixes:
   #
-  #   spec.platform.aws.region — comes from the upstream Helm defaults (e.g.
-  #     us-west-1 / us-east-1) rather than the actual deployed regions.
+  # Problem A — spec.clusterMetadata.infraID (wrong ID):
+  #   Hive makes one failed provision attempt before recognising the BYOC cluster and
+  #   stamps its own random suffix (e.g. ocp-primary-t7sqk) into spec.clusterMetadata.
+  #   infraID.  The real cluster was created by openshift-install with a different ID
+  #   (e.g. ocp-primary-vzkct), which is what AWS security groups are named after.
+  #   The sg-tagger script reads this field first ("Method 1"), searches for a security
+  #   group matching *<wrong-id>*submariner*, finds nothing, and fails.
+  #   Fix: oc patch clusterMetadata.infraID — Hive's webhook allows this field.
   #
-  # The submariner-sg-tagger Ansible job reads these fields first (ClusterDeployment
-  # Method 1 in the script) and therefore:
-  #   • searches for the Submariner AWS security group using the wrong infraID, AND
-  #   • queries the wrong AWS region — finding nothing in both cases.
-  # The job fails with BackoffLimitExceeded, which blocks ArgoCD sync wave 8 and
-  # prevents all downstream resources (odf-ramen-trusted-ca, DRPlacementControl,
-  # edge-gitops-vms ConfigMap, …) from ever being created — VMs are never deployed.
-  #
-  # Fix: patch both fields with the authoritative values before the sg-tagger job
-  # first runs.  infraID comes from openshift-install's metadata.json; region comes
-  # from the PRIMARY_REGION / SECONDARY_REGION variables already used elsewhere in
-  # this script.  If the job already failed we also delete it so ArgoCD recreates it.
-  log "[byoc-cd] Patching ClusterDeployment infraID+region with real installed values..."
+  # Problem B — spec.platform.aws.region (wrong region):
+  #   The upstream chart values.yaml has hardcoded defaults (us-west-1 / us-east-1).
+  #   Our clusterOverrides override should win but doesn't, due to a merge-order bug
+  #   in the chart's _helpers.tpl (merge $platformBase over $awsMerged instead of the
+  #   reverse, so the base region always wins).  The sg-tagger script again uses Method
+  #   1 (ClusterDeployment), gets us-west-1, queries the wrong AWS region, finds no SGs.
+  #   Fix: spec.platform.aws.region is IMMUTABLE via Hive's webhook.  We must:
+  #     (1) Inject the correct regions as explicit Helm --set parameters on the ArgoCD
+  #         Application (overrides the list-item value, bypassing the merge bug), then
+  #     (2) Delete the ClusterDeployments after removing their deprovision finalizer, so
+  #         ArgoCD recreates them with the now-correct Helm-rendered region.
+  log "[byoc-cd] Fixing ClusterDeployment infraID and region for BYOC spokes..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
   local -A CLUSTER_REGION=(
@@ -588,6 +595,34 @@ fix_cluster_deployments_for_byoc() {
     [ocp-secondary]="$SECONDARY_INSTALL_DIR"
   )
 
+  # ── Step 1: Inject correct base regions into the regional-dr ArgoCD App ───────
+  # This patches the Application spec so every future Helm render uses the correct
+  # region.  Must happen before any ClusterDeployment recreation so ArgoCD renders
+  # the right value.
+  local existing_params
+  existing_params=$(oc get applications.argoproj.io/regional-dr -n ramendr-starter-kit-hub \
+    -o jsonpath='{range .spec.sources[1].helm.parameters[*]}{.name}{"\n"}{end}' 2>/dev/null || echo "")
+  local any_region_param_added=false
+
+  for cluster in ocp-primary ocp-secondary; do
+    local role="${cluster#ocp-}"    # "primary" or "secondary"
+    local real_region="${CLUSTER_REGION[$cluster]}"
+    local param_name="regionalDR[0].clusters.${role}.install_config.platform.aws.region"
+    if ! echo "$existing_params" | grep -qF "$param_name"; then
+      if oc patch applications.argoproj.io/regional-dr -n ramendr-starter-kit-hub \
+        --type=json \
+        -p "[{\"op\":\"add\",\"path\":\"/spec/sources/1/helm/parameters/-\",
+              \"value\":{\"name\":\"$param_name\",\"value\":\"$real_region\"}}]" \
+        &>/dev/null; then
+        log "[byoc-cd] Injected $cluster base region ($real_region) into ArgoCD app Helm params."
+        any_region_param_added=true
+      else
+        warn "[byoc-cd] Failed to inject $cluster region into ArgoCD app params."
+      fi
+    fi
+  done
+
+  # ── Step 2: Per-cluster infraID + region fixes ────────────────────────────────
   local any_patched=false
 
   for cluster in ocp-primary ocp-secondary; do
@@ -624,42 +659,53 @@ fix_cluster_deployments_for_byoc() {
     current_region=$(oc get clusterdeployment "$cluster" -n "$cluster" \
       -o jsonpath='{.spec.platform.aws.region}' 2>/dev/null || echo "")
 
-    local need_patch=false
-    [[ "$current_infra_id" != "$real_infra_id" ]] && need_patch=true
-    [[ "$current_region"   != "$real_region"   ]] && need_patch=true
-
-    if [[ "$need_patch" == "false" ]]; then
-      log "[byoc-cd] $cluster ClusterDeployment already correct (infraID=$real_infra_id region=$real_region)"
-      continue
+    # Fix A: infraID — patch in-place (Hive allows clusterMetadata changes).
+    if [[ "$current_infra_id" != "$real_infra_id" ]]; then
+      log "[byoc-cd] $cluster infraID: $current_infra_id → $real_infra_id"
+      if oc patch clusterdeployment "$cluster" -n "$cluster" \
+        --type='merge' \
+        -p "{\"spec\":{\"clusterMetadata\":{\"infraID\":\"$real_infra_id\"}}}" &>/dev/null; then
+        log "[byoc-cd] $cluster infraID patched."
+        any_patched=true
+      else
+        warn "[byoc-cd] Failed to patch $cluster infraID."
+      fi
+    else
+      log "[byoc-cd] $cluster infraID already correct: $real_infra_id"
     fi
 
-    log "[byoc-cd] Patching $cluster: infraID $current_infra_id→$real_infra_id  region $current_region→$real_region"
-    if oc patch clusterdeployment "$cluster" -n "$cluster" \
-      --type='merge' \
-      -p "{\"spec\":{\"clusterMetadata\":{\"infraID\":\"$real_infra_id\"},\"platform\":{\"aws\":{\"region\":\"$real_region\"}}}}" \
-      &>/dev/null; then
-      log "[byoc-cd] $cluster ClusterDeployment patched."
+    # Fix B: region — immutable field.  Delete the ClusterDeployment so ArgoCD
+    # recreates it using the correct Helm params we injected in Step 1.
+    # We remove the hive.openshift.io/deprovision finalizer first so Hive doesn't
+    # block deletion trying to destroy AWS resources (none were actually created —
+    # Hive's provision attempt failed before any AWS API calls were made).
+    if [[ "$current_region" != "$real_region" ]]; then
+      log "[byoc-cd] $cluster region is wrong ($current_region ≠ $real_region) — immutable field."
+      log "[byoc-cd] Removing Hive finalizer and deleting ClusterDeployment for recreation..."
+      oc patch clusterdeployment "$cluster" -n "$cluster" \
+        --type=json -p '[{"op":"replace","path":"/metadata/finalizers","value":[]}]' \
+        &>/dev/null || true
+      oc delete clusterdeployment "$cluster" -n "$cluster" --ignore-not-found &>/dev/null || true
       any_patched=true
     else
-      warn "[byoc-cd] Failed to patch $cluster ClusterDeployment."
+      log "[byoc-cd] $cluster region already correct: $real_region"
     fi
   done
 
-  # If we patched anything and submariner-sg-tagger already hit BackoffLimitExceeded,
-  # delete it so ArgoCD recreates it on its next sync with the corrected values.
-  if [[ "$any_patched" == "true" ]]; then
+  # ── Step 3: Trigger ArgoCD sync + clean up any failed sg-tagger job ───────────
+  if [[ "$any_patched" == "true" ]] || [[ "$any_region_param_added" == "true" ]]; then
     local job_status
     job_status=$(oc get job submariner-sg-tagger -n open-cluster-management \
       -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}' 2>/dev/null || echo "")
     if [[ "$job_status" == "BackoffLimitExceeded" ]]; then
       log "[byoc-cd] Deleting failed submariner-sg-tagger job so ArgoCD recreates it..."
       oc delete job submariner-sg-tagger -n open-cluster-management &>/dev/null || true
-      oc patch applications.argoproj.io/regional-dr -n ramendr-starter-kit-hub \
-        --type merge \
-        -p '{"operation":{"initiatedBy":{"username":"redeploy-sh"},"sync":{}}}' \
-        &>/dev/null || true
-      log "[byoc-cd] regional-dr sync triggered."
     fi
+    oc patch applications.argoproj.io/regional-dr -n ramendr-starter-kit-hub \
+      --type merge \
+      -p '{"operation":{"initiatedBy":{"username":"redeploy-sh"},"sync":{}}}' \
+      &>/dev/null || true
+    log "[byoc-cd] regional-dr sync triggered."
   fi
 }
 
