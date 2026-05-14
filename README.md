@@ -60,7 +60,7 @@ Do not commit secrets to this repository.
 
 ## Fork parity: BYOC and `values-hub.yaml`
 
-Upstream `v1.1` ships a stock `[values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml)`. Your fork changes that file (for example **ODF subscription channels** `stable-4.20`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
+Upstream `v1.1` ships a stock `[values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml)`. Your fork changes that file (for example **ODF subscription channels** `stable-4.21`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
 
 This repo reproduces that without forking upstream:
 
