@@ -99,3 +99,5 @@ Run either a full redeploy or pattern-only on an existing hub, depending on your
 
 Local overlays live under `overrides/` and are copied into the upstream checkout before install.
 This keeps your changes reviewable and avoids long-lived forks of upstream.
+
+Test CodeRabbit integration
