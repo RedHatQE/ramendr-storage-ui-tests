@@ -1,28 +1,7 @@
-.cursor/
-.work/
-__pycache__/
-.pytest_cache/
 .venv/
-venv/
+__pycache__/
 *.pyc
-
-# Local kubeconfigs / installs (never commit)
-*.kubeconfig
-kubeconfig
-kubeconfigs/
-install-dir/
-install-dirs/
-
-# Agent context (local only)
-AGENT-HANDOFF.md
-
-# Local secrets (never commit)
-values-secret.yaml
-values-secret.yml
-*values-secret*.yaml
-*values-secret*.yml
 .env
-
-# Playwright artifacts (when added later)
 playwright-report/
 test-results/
+.DS_Store
