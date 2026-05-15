@@ -279,7 +279,6 @@ install_one_cluster() {
 }
 
 install_hub() {
-  ensure_openshift_install_version
   install_one_cluster "hub" "$HUB_INSTALL_DIR"
 
   log "Hub cluster installed. Setting up kubeconfig..."
@@ -684,6 +683,7 @@ full_redeploy() {
   destroy_hub
   cleanup_dns
 
+  ensure_openshift_install_version
   log "Starting parallel install of hub + ocp-primary + ocp-secondary..."
   install_hub &
   install_spokes &
