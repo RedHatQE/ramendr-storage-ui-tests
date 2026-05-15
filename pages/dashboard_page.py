@@ -3,5 +3,5 @@ from pages.base_page import BasePage
 
 
 class DashboardPage(BasePage):
-    def assert_loaded(self):
-        expect(self.page.locator("body")).to_be_visible()
+    def assert_page_loaded(self):
+        expect(self.page.locator("[data-testid='dashboard']")).to_be_visible()
