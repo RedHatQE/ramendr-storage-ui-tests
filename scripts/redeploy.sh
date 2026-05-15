@@ -35,7 +35,7 @@ SECONDARY_REGION="${SECONDARY_REGION:-eu-west-1}"
 
 # Target OCP version for all clusters � hub + spokes should use the same minor version
 # to avoid ODF Multicluster Orchestrator incompatibilities.
-HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.20.6}"
+HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.21.14}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -202,13 +202,34 @@ release_orphaned_eips() {
 destroy_cluster() {
   local name="$1"
   local dir="$2"
-  if [[ -f "$dir/metadata.json" ]]; then
-    log "Destroying $name cluster..."
-    openshift-install destroy cluster --dir "$dir" --log-level=info 2>&1 \
-      || warn "$name destroy had errors (may already be destroyed)"
-  else
-    warn "No metadata found for $name � skipping (may already be destroyed)."
+
+  if [[ ! -f "$dir/metadata.json" ]]; then
+    warn "No metadata found for $name -- skipping (may already be destroyed)."
+    return
   fi
+
+  # Before invoking openshift-install (which retries for many minutes on
+  # orphaned resources), do a quick AWS check: if the cluster's VPC is already
+  # gone, the infrastructure has been cleaned up and there is nothing to destroy.
+  local infra_id region vpc_count
+  infra_id=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['infraID'])" 2>/dev/null || echo "")
+  region=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['aws']['region'])" 2>/dev/null || echo "")
+
+  if [[ -n "$infra_id" && -n "$region" ]]; then
+    vpc_count=$(aws ec2 describe-vpcs \
+      --region "$region" \
+      --filters "Name=tag:kubernetes.io/cluster/${infra_id},Values=owned" \
+      --query 'length(Vpcs)' \
+      --output text 2>/dev/null || echo "")
+    if [[ "$vpc_count" == "0" ]]; then
+      log "$name AWS infrastructure already gone ($infra_id in $region) -- skipping destroy."
+      return
+    fi
+  fi
+
+  log "Destroying $name cluster ($infra_id in $region)..."
+  openshift-install destroy cluster --dir "$dir" --log-level=info 2>&1 \
+    || warn "$name destroy had errors (may already be destroyed)"
 }
 
 destroy_managed_clusters() {
@@ -258,7 +279,6 @@ install_one_cluster() {
 }
 
 install_hub() {
-  ensure_openshift_install_version
   install_one_cluster "hub" "$HUB_INSTALL_DIR"
 
   log "Hub cluster installed. Setting up kubeconfig..."
@@ -554,6 +574,7 @@ ensure_spoke_imports() {
   fi
 }
 
+
 deploy_pattern() {
   log "Deploying RamenDR pattern (upstream pinned, local overrides applied)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
@@ -621,6 +642,8 @@ wait_for_convergence() {
         oc patch applications.argoproj.io "$app" -n ramendr-starter-kit-hub --type merge \
           -p '{"operation":{"initiatedBy":{"automated":true},"sync":{}}}' 2>/dev/null || true
       done
+
+
     fi
   done
 }
@@ -660,6 +683,7 @@ full_redeploy() {
   destroy_hub
   cleanup_dns
 
+  ensure_openshift_install_version
   log "Starting parallel install of hub + ocp-primary + ocp-secondary..."
   install_hub &
   install_spokes &
@@ -709,14 +733,14 @@ case "${1:-}" in
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $UPSTREAM_REPO)"
     echo " UPSTREAM_REF            Upstream git ref (default: $UPSTREAM_REF)"
-    echo " UPSTREAM_OVERRIDES_DIR  Dir with root-level overrides e.g. values-hub.yaml (default: $UPSTREAM_OVERRIDES_DIR)"
+    echo " UPSTREAM_OVERRIDES_DIR  Dir containing values-hub.patch (default: $UPSTREAM_OVERRIDES_DIR)"
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
     echo " PRIMARY_INSTALL_DIR   Primary spoke install directory (default: ~/git/ocp-primary-install)"
     echo " SECONDARY_INSTALL_DIR Secondary spoke install directory (default: ~/git/ocp-secondary-install)"
     echo " VALUES_SECRET         Path to values-secret.yaml (default: ~/values-secret.yaml)"
-    echo " HUB_OCP_VERSION       OCP version for all clusters (default: 4.20.6)"
+    echo " HUB_OCP_VERSION       OCP version for all clusters (default: 4.21.14)"
     echo " HOSTED_ZONE_ID        Route53 hosted zone ID"
     echo " BASE_DOMAIN           Base domain for the clusters (required, no default)"
     ;;

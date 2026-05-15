@@ -17,7 +17,7 @@ costManagement:
 clusterOverrides:
   primary:
     name: ocp-primary
-    version: 4.20.6
+    version: 4.21.14
     byoc: true
     install_config:
       platform:
@@ -25,7 +25,7 @@ clusterOverrides:
           region: eu-central-1
   secondary:
     name: ocp-secondary
-    version: 4.20.6
+    version: 4.21.14
     byoc: true
     install_config:
       platform:

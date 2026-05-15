@@ -60,12 +60,12 @@ Do not commit secrets to this repository.
 
 ## Fork parity: BYOC and `values-hub.yaml`
 
-Upstream `v1.1` ships a stock `[values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml)`. Your fork changes that file (for example **ODF subscription channels** `stable-4.20`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
+Upstream `v1.1` ships a stock `[values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml)`. Your fork changes that file (for example **ODF subscription channels** `stable-4.21`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
 
 This repo reproduces that without forking upstream:
 
-- `**upstream-overrides/values-hub.yaml`** — copied over the upstream checkout's root `values-hub.yaml` during `prepare_upstream`.
-- `**overrides/values-cluster-names.yaml`** — `byoc: true` and spoke metadata (same role as your fork's overrides for BYOC).
+- `upstream-overrides/values-hub.patch` — applied with `git apply` to the upstream checkout's root `values-hub.yaml` during `prepare_upstream` (if the patch no longer applies after an upstream bump, regenerate it from a clean checkout as described in `scripts/redeploy.sh` error messages).
+- `overrides/values-cluster-names.yaml` — `byoc: true` and spoke metadata (same role as your fork's overrides for BYOC).
 
 Replace placeholders in `overrides/values-cluster-names.yaml` under `costManagement:` (`<OWNER_TAG>`, etc.) with real tag values for your account policy.
 
