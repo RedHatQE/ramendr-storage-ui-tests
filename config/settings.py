@@ -1,3 +1,5 @@
+"""Project settings loaded from environment variables."""
+
 import os
 
 
