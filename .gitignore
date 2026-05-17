@@ -5,3 +5,5 @@ __pycache__/
 playwright-report/
 test-results/
 .DS_Store
+.cursor/
+.work/
