@@ -7,6 +7,9 @@ from pages.base_page import BasePage
 class DashboardPage(BasePage):
     """Dashboard page actions and validations."""
 
-    def assert_loaded(self):
-        """Verify that the dashboard page is loaded."""
-        expect(self.page.locator("body")).to_be_visible()
+    # OpenShift Console lands on Overview after login (stable post-auth marker).
+    _OVERVIEW_HEADING = "Overview"
+
+    def assert_page_loaded(self):
+        """Verify that the dashboard (console overview) page is loaded."""
+        expect(self.page.get_by_role("heading", name=self._OVERVIEW_HEADING)).to_be_visible()
