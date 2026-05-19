@@ -37,22 +37,30 @@ log "Using spoke kubeconfig: $SPOKE_KC"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+mkdir -p "$TMP_DIR/ramendr_dr_validation"
+install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/records.py" "$TMP_DIR/ramendr_dr_validation/records.py"
+install -m 0644 "$TMP_DIR/ramendr_dr_validation/records.py" "$TMP_DIR/records.py"
+touch "$TMP_DIR/ramendr_dr_validation/__init__.py"
 install -m 0755 "$DR_VALIDATION_DIR/ramendr_dr_validation/writer.py" "$TMP_DIR/ramendr-dr-writer"
 cp "$DR_VALIDATION_DIR/systemd/ramendr-dr-writer.service" "$TMP_DIR/ramendr-dr-writer.service"
 
 installed=0
-while IFS=$'\t' read -r route_name host; do
+while IFS=$'\t' read -r route_name host port; do
   [[ -z "$route_name" ]] && continue
+  port="${port:-22}"
   if [[ -n "$FILTER" ]] && [[ "$route_name" != *"$FILTER"* ]]; then
     continue
   fi
-  log "Installing writer on $route_name ($host)..."
-  scp "${SSH_OPTS[@]}" "$TMP_DIR/ramendr-dr-writer" "$TMP_DIR/ramendr-dr-writer.service" \
-    "${SSH_USER}@${host}:/tmp/" || { warn "SCP failed for $host — skipping"; continue; }
+  log "Installing writer on $route_name (${host}:${port})..."
+  scp -P "$port" "${SSH_OPTS[@]}" \
+    "$TMP_DIR/ramendr-dr-writer" "$TMP_DIR/records.py" "$TMP_DIR/ramendr-dr-writer.service" \
+    "${SSH_USER}@${host}:/tmp/" || { warn "SCP failed for ${host}:${port} — skipping"; continue; }
 
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s <<EOF
+  ssh -p "$port" "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s <<EOF
 set -euo pipefail
-sudo mkdir -p /var/lib/ramendr-dr-validation /usr/local/bin
+sudo mkdir -p /var/lib/ramendr-dr-validation /usr/local/lib/ramendr_dr_validation /usr/local/bin
+sudo install -m 0644 /tmp/records.py /usr/local/lib/ramendr_dr_validation/records.py
+sudo touch /usr/local/lib/ramendr_dr_validation/__init__.py
 sudo install -m 0755 /tmp/ramendr-dr-writer /usr/local/bin/ramendr-dr-writer
 sudo install -m 0644 /tmp/ramendr-dr-writer.service /etc/systemd/system/ramendr-dr-writer.service
 sudo systemctl daemon-reload

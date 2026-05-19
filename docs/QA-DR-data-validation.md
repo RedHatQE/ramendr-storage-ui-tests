@@ -4,7 +4,7 @@
 
 | When | What |
 |------|------|
-| After `./scripts/redeploy.sh` | Timestamp writers on all edge VMs + log snapshot every **5 min** |
+| After `./scripts/redeploy.sh` | Timestamp writers (every **10 s**) + rolling baseline snapshot every **5 min** (latest only) |
 | After DR + UI cleanup message | Run **one** automation script (see below) |
 
 ---

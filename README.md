@@ -58,6 +58,16 @@ Do not commit secrets to this repository.
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
 - Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/validatedpatterns/ramendr-starter-kit/blob/main/values-secret.yaml.template)
+- For regional-dr cluster private-key ExternalSecrets, ensure `~/values-secret.yaml` includes hub `privatekey` paths (compare with your team's file via private DM), for example:
+
+```yaml
+- name: privatekey
+  fields:
+    - name: privatekey
+      path: ~/.ssh/id_ed25519
+    - name: publickey
+      path: ~/.ssh/id_ed25519.pub
+```
 
 ## Fork parity: BYOC and `values-hub.yaml`
 
@@ -144,8 +154,9 @@ PRs that fail the checks cannot be merged.
 
 ## RamenDR data validation
 
-A full `./scripts/redeploy.sh` run ends with timestamp writers **running on all edge VMs** and
-**automatic log snapshots every 5 minutes**. After failover/relocate and the UI cleanup step, run:
+A full `./scripts/redeploy.sh` run ends with timestamp writers **running on all edge VMs** (one
+record every **10 seconds**) and a **rolling baseline snapshot** refreshed every 5 minutes (only the
+latest snapshot is kept as the pre-failover baseline). After failover/relocate and the UI cleanup step, run:
 
 ```bash
 ./scripts/dr-validation/post-dr-automation.sh

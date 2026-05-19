@@ -65,7 +65,8 @@ writes (RPO breach); use `--interval` for a rough upper-bound estimate (`gap * i
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |
 | `DR_VALIDATION_STATUS_MAX_AGE_SEC` | `300` | Max log age for `status.sh` freshness check |
 | `DR_VALIDATION_LOG_PATH` | `/var/lib/ramendr-dr-validation/timestamps.log` | Log on VM |
-| `DR_VALIDATION_INTERVAL` | `1.0` | Seconds between records |
+| `DR_VALIDATION_INTERVAL` | `10.0` | Seconds between records |
+| `DR_VALIDATION_SNAPSHOT_KEEP` | `1` | Auto-snapshot dirs to retain (latest only; `latest` symlink always points at current baseline) |
 | `SKIP_DR_VALIDATION` | `0` | Set `1` in redeploy to skip automatic writer setup |
 | `REQUIRE_DR_VALIDATION` | `0` | Set `1` to fail redeploy if writers are not recording |
 | `HUB_INSTALL_DIR` | `~/git/hub-cluster-install` | Hub kubeconfig for DRPC lookup |

@@ -454,38 +454,9 @@ scale_hub_workers() {
   done
 }
 
-ensure_hub_privatekey_in_vault() {
-  # regional-dr ExternalSecrets read secret/hub/privatekey; pattern load-secrets
-  # may only populate global/vm-ssh. Copy when the hub path is missing.
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-  if ! oc get pod vault-0 -n vault &>/dev/null; then
-    return 0
-  fi
-  if oc exec -n vault vault-0 -- vault kv get secret/hub/privatekey &>/dev/null; then
-    log "[vault] secret/hub/privatekey already present."
-    return 0
-  fi
-  log "[vault] Populating secret/hub/privatekey from secret/global/vm-ssh..."
-  if oc exec -n vault vault-0 -- sh -c '
-    set -e
-    pk=$(vault kv get -field=privatekey secret/global/vm-ssh)
-    pub=$(vault kv get -field=publickey secret/global/vm-ssh)
-    vault kv put secret/hub/privatekey privatekey="$pk" publickey="$pub"
-  ' &>/dev/null; then
-    log "[vault] secret/hub/privatekey written."
-    for cluster in ocp-primary ocp-secondary; do
-      oc annotate externalsecret "${cluster}-cluster-private-key" \
-        -n "$cluster" force-sync="$(date +%s)" --overwrite 2>/dev/null || true
-    done
-    return 0
-  fi
-  warn "[vault] Could not populate secret/hub/privatekey — cluster private-key ExternalSecrets may fail."
-  return 1
-}
-
 finalize_byoc_cluster_deployments() {
-  # BYOC: clusters are already installed. Hive still provisions when private-key
-  # secrets appear; mark deployments installed using openshift-install metadata.
+  # BYOC: clusters are already installed. Hive may still run provision jobs when
+  # private-key secrets appear; mark deployments installed from openshift-install metadata.
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
   local entries=(
     "ocp-primary:$PRIMARY_INSTALL_DIR"
@@ -508,8 +479,12 @@ finalize_byoc_cluster_deployments() {
         \"installed\": true,
         \"clusterMetadata\": {
           \"clusterID\": \"${cluster_id}\",
-          \"infraID\": \"${infra_id}\",
-          \"platform\": {\"aws\": {\"region\": \"${region}\"}}
+          \"infraID\": \"${infra_id}\"
+        },
+        \"platform\": {
+          \"aws\": {
+            \"region\": \"${region}\"
+          }
         }
       }
     }" &>/dev/null || warn "[byoc] Could not patch ClusterDeployment $cluster."
@@ -748,7 +723,6 @@ deploy_pattern() {
   # This catches any spoke that was skipped because the namespace appeared after
   # the background job's per-cluster timeout.
   ensure_spoke_imports
-  ensure_hub_privatekey_in_vault || true
   finalize_byoc_cluster_deployments
 
   log "Force-refreshing kubeconfig ExternalSecrets..."

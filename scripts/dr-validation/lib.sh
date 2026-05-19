@@ -13,9 +13,9 @@ PLACEMENT_NAME="${PLACEMENT_NAME:-gitops-vm-protection-placement-1}"
 SSH_USER="${SSH_USER:-cloud-user}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-$HOME/.ssh/id_rsa}"
 DR_VALIDATION_LOG_PATH="${DR_VALIDATION_LOG_PATH:-/var/lib/ramendr-dr-validation/timestamps.log}"
-DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-1.0}"
+DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 DR_VALIDATION_SNAPSHOT_INTERVAL="${DR_VALIDATION_SNAPSHOT_INTERVAL:-300}"
-DR_VALIDATION_SNAPSHOT_KEEP="${DR_VALIDATION_SNAPSHOT_KEEP:-48}"
+DR_VALIDATION_SNAPSHOT_KEEP="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
 AUTO_SNAPSHOT_ROOT="${REPO_ROOT}/.work/dr-validation-logs/auto"
 SNAPSHOT_DAEMON_PID_FILE="${REPO_ROOT}/.work/dr-validation-snapshot-daemon.pid"
 SNAPSHOT_DAEMON_LOG="${REPO_ROOT}/.work/dr-validation-snapshot-daemon.log"
@@ -92,7 +92,7 @@ for route in routes:
 
 if hosts:
     for name, host in sorted(hosts.items()):
-        print(f'{name}\t{host}')
+        print(f'{name}\t{host}\t22')
     sys.exit(0)
 
 # No Routes (common with NodePort-only gitops-vms): use node IP + NodePort on the VMI node.
@@ -135,7 +135,7 @@ for svc in services:
     node = node_ips.get(name, '')
     ip = node_addr.get(node, '')
     if ip:
-        print(f'{name}\t{ip}:{nodeport}')
+        print(f'{name}\t{ip}\t{nodeport}')
 "
 }
 
@@ -156,6 +156,29 @@ ssh_extra_opts() {
   if [[ -f "$SSH_IDENTITY_FILE" ]]; then
     SSH_OPTS+=(-i "$SSH_IDENTITY_FILE")
   fi
+}
+
+# Seconds since the last valid record in a timestamp log (-1 if missing/empty).
+log_last_record_age_seconds() {
+  local log_file="$1"
+  PYTHONPATH="${DR_VALIDATION_DIR}${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+from datetime import datetime, timezone
+from pathlib import Path
+from ramendr_dr_validation.records import parse_line
+import sys
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    print(-1)
+    sys.exit(0)
+lines = [ln for ln in path.read_text().splitlines() if ln.strip() and not ln.startswith('#')]
+if not lines:
+    print(-1)
+    sys.exit(0)
+rec = parse_line(lines[-1], len(lines))
+age = (datetime.now(timezone.utc) - rec.timestamp).total_seconds()
+print(int(age))
+" "$log_file"
 }
 
 wait_for_edge_vms() {
@@ -221,13 +244,14 @@ collect_logs_to_dir() {
   spoke_kc="$(resolve_spoke_kubeconfig "$primary")"
 
   local collected=0
-  while IFS=$'\t' read -r route_name host; do
+  while IFS=$'\t' read -r route_name host port; do
     [[ -z "$route_name" ]] && continue
+    port="${port:-22}"
     local dest="${out_dir}/${route_name}.timestamps.log"
-    if scp "${SSH_OPTS[@]}" "${SSH_USER}@${host}:${DR_VALIDATION_LOG_PATH}" "$dest" 2>/dev/null; then
+    if scp -P "$port" "${SSH_OPTS[@]}" "${SSH_USER}@${host}:${DR_VALIDATION_LOG_PATH}" "$dest" 2>/dev/null; then
       collected=$((collected + 1))
     else
-      warn "Could not fetch log from ${host}"
+      warn "Could not fetch log from ${host}:${port}"
     fi
   done < <(list_vm_ssh_hosts "$spoke_kc")
 
@@ -249,7 +273,7 @@ META
 }
 
 prune_auto_snapshots() {
-  local keep="${DR_VALIDATION_SNAPSHOT_KEEP:-48}"
+  local keep="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
   [[ -d "$AUTO_SNAPSHOT_ROOT" ]] || return 0
   local dirs=()
   while IFS= read -r d; do
@@ -318,19 +342,20 @@ verify_writers_recording() {
   spoke_kc="$(resolve_spoke_kubeconfig "$primary")"
 
   local ok=0 fail=0
-  while IFS=$'\t' read -r route_name host; do
+  while IFS=$'\t' read -r route_name host port; do
     [[ -z "$route_name" ]] && continue
-    if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s <<'CHECK' 2>/dev/null
+    port="${port:-22}"
+    if ssh -p "$port" "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s <<'CHECK' 2>/dev/null
 set -euo pipefail
 systemctl is-active --quiet ramendr-dr-writer.service
 test -s /var/lib/ramendr-dr-validation/timestamps.log
 tail -n 1 /var/lib/ramendr-dr-validation/timestamps.log | grep -qE '^[0-9]+,'
 CHECK
     then
-      log "  OK ${route_name} (${host})"
+      log "  OK ${route_name} (${host}:${port})"
       ok=$((ok + 1))
     else
-      warn "  FAIL ${route_name} (${host})"
+      warn "  FAIL ${route_name} (${host}:${port})"
       fail=$((fail + 1))
     fi
   done < <(list_vm_ssh_hosts "$spoke_kc")

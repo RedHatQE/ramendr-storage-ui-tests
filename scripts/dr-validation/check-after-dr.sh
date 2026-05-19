@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 export PYTHONPATH="${DR_VALIDATION_DIR}:${PYTHONPATH:-}"
-INTERVAL="${DR_VALIDATION_INTERVAL:-1.0}"
+INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 CHECK_ROOT="${REPO_ROOT}/.work/dr-validation-logs/checks"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 AFTER_DIR="${CHECK_ROOT}/${STAMP}"

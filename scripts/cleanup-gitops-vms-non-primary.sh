@@ -23,6 +23,12 @@ DRPC_NAMESPACE="openshift-dr-ops"
 DRPC_NAME="gitops-vm-protection"
 PLACEMENT_NAME="gitops-vm-protection-placement-1"
 
+# Colors for output (before arg parsing — used in Unknown option messages under set -u)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
 AUTO_CONFIRM="${AUTO_CONFIRM:-no}"
 CLEANUP_FORCE=0
 CLUSTER_OVERRIDE=""
@@ -49,12 +55,6 @@ done
 
 # shellcheck source=lib/drpc-guards.sh
 source "${REPO_ROOT}/scripts/lib/drpc-guards.sh"
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
 
 # Initialize variables
 PRIMARY_CLUSTER=""
@@ -502,16 +502,20 @@ for item in data.get('items', []):
     deleted_count=$((deleted_count + 1))
   done <<< "$pvs"
 
-  local remaining
-  remaining=$(oc --kubeconfig="$KUBECONFIG" get pv -o json 2>/dev/null \
-    | python3 -c "
+  local remaining=0 try
+  for try in 1 2 3 4 5 6; do
+    remaining=$(oc --kubeconfig="$KUBECONFIG" get pv -o json 2>/dev/null \
+      | python3 -c "
 import json, sys
 ns = sys.argv[1]
 data = json.load(sys.stdin)
 print(sum(1 for i in data.get('items', [])
     if (i.get('spec', {}).get('claimRef') or {}).get('namespace') == ns))
 " "$VM_NAMESPACE" 2>/dev/null || echo 0)
-  remaining=${remaining:-0}
+    remaining=${remaining:-0}
+    [[ "$remaining" -eq 0 ]] && break
+    [[ "$try" -lt 6 ]] && sleep 5
+  done
   if [[ "$remaining" -gt 0 ]]; then
     echo -e "${YELLOW} ⚠️ $remaining PV(s) still reference $VM_NAMESPACE (may need manual cleanup)${NC}"
     return 1

@@ -4,7 +4,7 @@ set -euo pipefail
 # Validate collected timestamp log(s) for sequence continuity (post-failover check).
 #
 # Usage:
-#   ./scripts/dr-validation/validate.sh <log-or-dir> [--compare before.log] [--interval 1.0]
+#   ./scripts/dr-validation/validate.sh <log-or-dir> [--compare before.log] [--interval 10.0]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh

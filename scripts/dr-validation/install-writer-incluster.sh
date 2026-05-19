@@ -107,11 +107,9 @@ spec:
                 "${SSH_USER}@${host}:/tmp/"
               sshpass -p "$PASS" ssh -n -p "$port" -o StrictHostKeyChecking=no "${SSH_USER}@${host}" "$remote_install"
             }
-            while IFS=$'\t' read -r name endpoint; do
+            while IFS=$'\t' read -r name host port; do
               [[ -z "$name" ]] && continue
-              host="${endpoint%%:*}"
-              port="${endpoint##*:}"
-              [[ "$port" == "$host" ]] && port=22
+              port="${port:-22}"
               echo "=== $name @ $host:$port ==="
               install_on_vm "$host" "$port" || { echo "FAILED $name"; exit 1; }
             done < /tmp/hosts.tsv

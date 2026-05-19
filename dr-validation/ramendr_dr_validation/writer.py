@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--interval",
         type=float,
-        default=float(os.environ.get("DR_VALIDATION_INTERVAL", "1.0")),
+        default=float(os.environ.get("DR_VALIDATION_INTERVAL", "10.0")),
         help="Seconds between records (default: %(default)s)",
     )
     parser.add_argument(

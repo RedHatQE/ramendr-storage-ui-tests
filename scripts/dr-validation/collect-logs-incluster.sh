@@ -71,11 +71,9 @@ spec:
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             PASS="$(tr -d '\n' < /ssh/password)"
             cp /ssh/hosts.tsv /tmp/hosts.tsv
-            while IFS=\$'\t' read -r name endpoint; do
+            while IFS=\$'\t' read -r name host port; do
               [[ -z "\$name" ]] && continue
-              host="\${endpoint%%:*}"
-              port="\${endpoint##*:}"
-              [[ "\$port" == "\$host" || -z "\$port" ]] && port=22
+              port="\${port:-22}"
               echo "===FILE:\${name}==="
               sshpass -p "\$PASS" ssh -n -p "\$port" -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \

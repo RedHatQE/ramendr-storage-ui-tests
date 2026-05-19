@@ -46,7 +46,8 @@ if [[ "${DR_VALIDATION_INCLUSTER_COLLECT:-1}" == "1" ]]; then
       overall_fail=1
       continue
     fi
-    if ! find "$f" -newermt "-${max_age} seconds" -print -quit 2>/dev/null | grep -q .; then
+    age="$(log_last_record_age_seconds "$f")"
+    if [[ "$age" -lt 0 ]] || [[ "$age" -gt "$max_age" ]]; then
       warn "  FAIL ${name} (log older than ${max_age}s)"
       overall_fail=1
       continue
