@@ -60,7 +60,10 @@ writes (RPO breach); use `--interval` for a rough upper-bound estimate (`gap * i
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SSH_USER` | `cloud-user` | VM SSH user |
-| `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key matching Vault `vm-ssh` |
+| `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key for direct/laptop SSH (`install-writer.sh`, non-in-cluster collect) |
+| `DR_VALIDATION_SSH_PASSWORD` | (from Vault) | Password for in-cluster install/collect Jobs (private keys are not copied to spokes) |
+| `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |
+| `DR_VALIDATION_STATUS_MAX_AGE_SEC` | `300` | Max log age for `status.sh` freshness check |
 | `DR_VALIDATION_LOG_PATH` | `/var/lib/ramendr-dr-validation/timestamps.log` | Log on VM |
 | `DR_VALIDATION_INTERVAL` | `1.0` | Seconds between records |
 | `SKIP_DR_VALIDATION` | `0` | Set `1` in redeploy to skip automatic writer setup |

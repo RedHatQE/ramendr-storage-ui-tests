@@ -71,7 +71,7 @@ resolve_spoke_kubeconfig() {
 list_vm_ssh_hosts() {
   local kubeconfig="$1"
   KUBECONFIG="$kubeconfig" VM_NAMESPACE="$VM_NAMESPACE" python3 -c "
-import json, os, subprocess
+import json, os, subprocess, sys
 
 raw = subprocess.check_output(
     ['oc', 'get', 'route,service,vmi', '-n', os.environ['VM_NAMESPACE'], '-o', 'json'],
@@ -164,8 +164,9 @@ wait_for_edge_vms() {
   local max_tries="${DR_VALIDATION_WAIT_MAX_TRIES:-60}"
   local sleep_sec="${DR_VALIDATION_WAIT_SLEEP:-30}"
 
-  if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}/auth/kubeconfig" ]]; then
-    export KUBECONFIG="${HUB_INSTALL_DIR}/auth/kubeconfig"
+  local hub_install_dir="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
+  if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${hub_install_dir}/auth/kubeconfig" ]]; then
+    export KUBECONFIG="${hub_install_dir}/auth/kubeconfig"
   fi
 
   log "Waiting for ${expected} edge VM(s) and SSH routes in ${VM_NAMESPACE}..."
@@ -201,8 +202,9 @@ wait_for_edge_vms() {
 }
 
 ensure_hub_kubeconfig() {
-  if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}/auth/kubeconfig" ]]; then
-    export KUBECONFIG="${HUB_INSTALL_DIR}/auth/kubeconfig"
+  local hub_install_dir="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
+  if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${hub_install_dir}/auth/kubeconfig" ]]; then
+    export KUBECONFIG="${hub_install_dir}/auth/kubeconfig"
   fi
 }
 

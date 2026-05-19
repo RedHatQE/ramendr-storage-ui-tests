@@ -13,6 +13,7 @@ wait_for_primary_vms_healthy
 
 if [[ "${DR_VALIDATION_INCLUSTER_INSTALL:-1}" == "1" ]]; then
   # Spokes use NodePort on private workers; install from a pod on the primary spoke.
+  wait_for_edge_vms
   "$SCRIPT_DIR/install-writer-incluster.sh"
 else
   wait_for_edge_vms

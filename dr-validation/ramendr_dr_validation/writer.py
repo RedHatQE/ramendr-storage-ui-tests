@@ -14,6 +14,7 @@ from ramendr_dr_validation.records import format_record
 
 
 def read_last_seq(log_path: Path) -> int:
+    """Return the highest sequence number in an existing log, or 0 if missing or empty."""
     if not log_path.exists():
         return 0
     last_seq = 0
@@ -36,6 +37,7 @@ def append_record(
     *,
     fsync: bool,
 ) -> None:
+    """Append one timestamp record to the log, creating parent directories if needed."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     line = format_record(seq, socket.gethostname(), os.getpid())
     with log_path.open("a", encoding="utf-8") as handle:
@@ -52,6 +54,7 @@ def run_writer(
     fsync: bool,
     max_records: int | None,
 ) -> int:
+    """Write records at a fixed interval until max_records is reached or interrupted."""
     seq = read_last_seq(log_path) + 1
     written = 0
     while max_records is None or written < max_records:
@@ -65,6 +68,7 @@ def run_writer(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint: run the continuous timestamp writer loop."""
     parser = argparse.ArgumentParser(
         description="Continuously append sequence+timestamp records to a DR-protected log file.",
     )
@@ -97,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     log_path = Path(args.log_path)
     if args.interval <= 0:
         print("interval must be positive", file=sys.stderr)
+        return 2
+    if args.max_records is not None and args.max_records <= 0:
+        print("max-records must be positive", file=sys.stderr)
         return 2
     try:
         run_writer(

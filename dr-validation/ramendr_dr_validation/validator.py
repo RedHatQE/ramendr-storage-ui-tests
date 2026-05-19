@@ -15,6 +15,8 @@ from ramendr_dr_validation.records import TimestampRecord, parse_line
 
 @dataclass
 class SeqGap:
+    """One discontinuity in the monotonic sequence number stream."""
+
     expected: int
     actual: int
     at_line: int
@@ -22,6 +24,8 @@ class SeqGap:
 
 @dataclass
 class ValidationReport:
+    """Structured result of validating a timestamp log file."""
+
     log_path: str
     record_count: int
     first_seq: int | None
@@ -36,9 +40,16 @@ class ValidationReport:
 
     @property
     def ok(self) -> bool:
-        return not self.seq_gaps and not self.duplicate_seqs and not self.parse_errors
+        """True when the log has no sequence gaps, duplicates, parse errors, or timestamp regressions."""
+        return (
+            not self.seq_gaps
+            and not self.duplicate_seqs
+            and not self.parse_errors
+            and not self.timestamp_regressions
+        )
 
     def max_seq_gap(self) -> int:
+        """Return the largest missing run length between consecutive sequence numbers."""
         if not self.seq_gaps:
             return 0
         return max(g.actual - g.expected for g in self.seq_gaps)
@@ -52,6 +63,7 @@ class ValidationReport:
 
 
 def load_records(path: Path) -> tuple[list[TimestampRecord], list[str]]:
+    """Load all valid records from a log file; collect per-line parse errors."""
     records: list[TimestampRecord] = []
     errors: list[str] = []
     with path.open(encoding="utf-8") as handle:
@@ -64,6 +76,7 @@ def load_records(path: Path) -> tuple[list[TimestampRecord], list[str]]:
 
 
 def validate_records(records: list[TimestampRecord], log_path: str) -> ValidationReport:
+    """Check sequence continuity, duplicates, and timestamp ordering in parsed records."""
     report = ValidationReport(
         log_path=log_path,
         record_count=len(records),
@@ -127,6 +140,7 @@ def compare_logs(
 
 
 def print_report(report: ValidationReport, *, interval: float | None, verbose: bool) -> None:
+    """Print a JSON validation report to stdout (and PASS/FAIL to stderr if verbose)."""
     data = asdict(report)
     if interval is not None and report.max_seq_gap() > 0:
         data["estimated_rpo_seconds_upper_bound"] = report.max_seq_gap() * interval
@@ -140,6 +154,7 @@ def print_report(report: ValidationReport, *, interval: float | None, verbose: b
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint: validate one log file, optionally compare against a pre-failover baseline."""
     parser = argparse.ArgumentParser(description="Validate a DR timestamp log for sequence gaps.")
     parser.add_argument("log_path", type=Path, help="Path to timestamps.log")
     parser.add_argument(

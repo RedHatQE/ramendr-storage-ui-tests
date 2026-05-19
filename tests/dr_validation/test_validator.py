@@ -31,6 +31,19 @@ def test_validate_continuous_log(tmp_path: Path) -> None:
     assert report.last_seq == 10
 
 
+def test_validate_detects_timestamp_regression(tmp_path: Path) -> None:
+    log = tmp_path / "timestamps.log"
+    log.write_text(
+        format_record(1, "vm-0", 1, when=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
+        + format_record(2, "vm-0", 1, when=datetime(2026, 1, 1, 11, 0, 0, tzinfo=timezone.utc)),
+        encoding="utf-8",
+    )
+    records, _ = load_records(log)
+    report = validate_records(records, str(log))
+    assert not report.ok
+    assert report.timestamp_regressions
+
+
 def test_validate_detects_gap(tmp_path: Path) -> None:
     log = tmp_path / "timestamps.log"
     log.write_text(

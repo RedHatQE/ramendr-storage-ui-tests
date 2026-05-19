@@ -17,17 +17,27 @@ SPOKE_KC="$(resolve_spoke_kubeconfig "$PRIMARY")"
 HOSTS="$(list_vm_ssh_hosts "$SPOKE_KC")"
 [[ -n "$HOSTS" ]] || { err "No SSH endpoints"; exit 1; }
 
+PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
+if [[ -z "$PASS" ]]; then
+  PASS="$(cloud_init_password_from_vault)"
+fi
+if [[ -z "$PASS" ]]; then
+  err "In-cluster log collect requires a password (DR_VALIDATION_SSH_PASSWORD or Vault cloud-init password)."
+  err "Private keys are not copied into the spoke cluster."
+  exit 1
+fi
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
 
-SSH_KEY="${SSH_IDENTITY_FILE:-}"
-[[ -z "$SSH_KEY" || ! -f "$SSH_KEY" ]] && [[ -f "$HOME/.ssh/id_ed25519" ]] && SSH_KEY="$HOME/.ssh/id_ed25519"
-[[ -f "$SSH_KEY" ]] || { err "SSH key not found for in-cluster collect"; exit 1; }
+cleanup_collect_secret() {
+  KUBECONFIG="$SPOKE_KC" oc delete secret ramendr-dr-collect-ssh -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+}
 
 KUBECONFIG="$SPOKE_KC" oc create secret generic ramendr-dr-collect-ssh \
   --from-file=hosts.tsv="$TMP_DIR/hosts.tsv" \
-  --from-file=id_ed25519="$SSH_KEY" \
+  --from-literal=password="$PASS" \
   -n "$VM_NAMESPACE" --dry-run=client -o yaml | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 KUBECONFIG="$SPOKE_KC" oc delete job ramendr-dr-collect-logs -n "$VM_NAMESPACE" --ignore-not-found
@@ -47,7 +57,7 @@ spec:
         image: quay.io/validatedpatterns/utility-container:latest
         env:
         - name: SSH_USER
-          value: cloud-user
+          value: "${SSH_USER}"
         - name: LOG_PATH
           value: "${DR_VALIDATION_LOG_PATH}"
         volumeMounts:
@@ -58,15 +68,16 @@ spec:
         args:
           - |
             set -uo pipefail
-            dnf install -y openssh-clients >/dev/null 2>&1 || true
-            cp /ssh/id_ed25519 /tmp/key && chmod 600 /tmp/key
+            dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
+            PASS="$(tr -d '\n' < /ssh/password)"
             cp /ssh/hosts.tsv /tmp/hosts.tsv
             while IFS=\$'\t' read -r name endpoint; do
               [[ -z "\$name" ]] && continue
               host="\${endpoint%%:*}"
               port="\${endpoint##*:}"
+              [[ "\$port" == "\$host" || -z "\$port" ]] && port=22
               echo "===FILE:\${name}==="
-              ssh -n -p "\$port" -i /tmp/key -o StrictHostKeyChecking=no \
+              sshpass -p "\$PASS" ssh -n -p "\$port" -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
                 "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null
             done < /tmp/hosts.tsv
@@ -76,16 +87,32 @@ spec:
           secretName: ramendr-dr-collect-ssh
 EOF
 
+collect_failed=0
+job_done=0
 for _ in $(seq 1 40); do
   if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-collect-logs -n "$VM_NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -q 1; then
+    job_done=1
     break
   fi
   if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-collect-logs -n "$VM_NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null | grep -q 1; then
     KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-collect-logs
-    exit 1
+    collect_failed=1
+    job_done=1
+    break
   fi
   sleep 10
 done
+
+cleanup_collect_secret
+
+if [[ "$collect_failed" -eq 1 ]]; then
+  exit 1
+fi
+if [[ "$job_done" -ne 1 ]]; then
+  err "Timed out waiting for ramendr-dr-collect-logs job to complete."
+  KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-collect-logs 2>/dev/null || true
+  exit 1
+fi
 
 mkdir -p "$OUT_DIR"
 KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-collect-logs > "$TMP_DIR/collect.raw"

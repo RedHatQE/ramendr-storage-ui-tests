@@ -12,6 +12,13 @@ fi
 
 mkdir -p "$(dirname "$SNAPSHOT_DAEMON_PID_FILE")" "$AUTO_SNAPSHOT_ROOT"
 
+SNAPSHOT_DAEMON_LOCK_DIR="${REPO_ROOT}/.work/dr-validation-snapshot-daemon.lock.d"
+if ! mkdir "$SNAPSHOT_DAEMON_LOCK_DIR" 2>/dev/null; then
+  log "Another start-snapshot-daemon invocation holds the lock; exiting."
+  exit 0
+fi
+trap 'rmdir "$SNAPSHOT_DAEMON_LOCK_DIR" 2>/dev/null || true' EXIT
+
 if [[ -f "$SNAPSHOT_DAEMON_PID_FILE" ]]; then
   old_pid=$(cat "$SNAPSHOT_DAEMON_PID_FILE")
   if kill -0 "$old_pid" 2>/dev/null; then

@@ -726,11 +726,13 @@ deploy_pattern() {
   local import_pid=$!
 
   log "Running upstream pattern install (this takes time for operators to settle)..."
-  (
+  if ! (
     cd "$UPSTREAM_DIR"
-    VALUES_SECRET="$VALUES_SECRET" ./pattern.sh make install 2>&1 \
-      || warn "Pattern install exited with warnings (Argo may still be converging; wait_for_convergence continues)"
-  )
+    VALUES_SECRET="$VALUES_SECRET" ./pattern.sh make install 2>&1
+  ); then
+    err "Pattern install failed (pattern.sh make install returned non-zero)."
+    exit 1
+  fi
 
   if ! wait "$store_pid"; then
     warn "store_spoke_kubeconfigs_in_vault background job failed -- retrying synchronously..."

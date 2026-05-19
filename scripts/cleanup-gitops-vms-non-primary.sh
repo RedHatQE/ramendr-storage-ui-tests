@@ -25,10 +25,25 @@ PLACEMENT_NAME="gitops-vm-protection-placement-1"
 
 AUTO_CONFIRM="${AUTO_CONFIRM:-no}"
 CLEANUP_FORCE=0
-for arg in "$@"; do
-  case "$arg" in
-    --yes | -y) AUTO_CONFIRM=yes ;;
-    --force) CLEANUP_FORCE=1 ;;
+CLUSTER_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes | -y) AUTO_CONFIRM=yes; shift ;;
+    --force) CLEANUP_FORCE=1; shift ;;
+    --) shift; break ;;
+    -*)
+      echo -e "${RED}Unknown option: $1${NC}" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$CLUSTER_OVERRIDE" ]]; then
+        CLUSTER_OVERRIDE="$1"
+      else
+        echo -e "${RED}Unexpected argument: $1${NC}" >&2
+        exit 1
+      fi
+      shift
+      ;;
   esac
 done
 
@@ -139,7 +154,7 @@ echo "DRPC: $DRPC_NAME (namespace: $DRPC_NAMESPACE)"
 echo ""
 
 if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}/auth/kubeconfig" ]]; then
-  export KUBECONFIG="${HUB_INSTALL_DIR}/auth/kubeconfig"
+  export KUBECONFIG="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}/auth/kubeconfig"
 fi
 
 if ! oc get managedclusters &>/dev/null; then
@@ -158,8 +173,8 @@ echo ""
 if ! determine_primary_cluster; then
   echo -e "${YELLOW} ⚠️ Warning: Could not determine primary cluster from DRPC${NC}"
   echo " You can specify the non-primary cluster as an argument: $0 <cluster-name>"
-  if [[ -n "${1:-}" ]]; then
-    NON_PRIMARY_CLUSTER="$1"
+  if [[ -n "${CLUSTER_OVERRIDE:-}" ]]; then
+    NON_PRIMARY_CLUSTER="$CLUSTER_OVERRIDE"
     echo " Using provided cluster: $NON_PRIMARY_CLUSTER"
   else
     echo -e "${RED} ❌ Error: Cannot proceed without determining clusters${NC}"
@@ -168,8 +183,8 @@ if ! determine_primary_cluster; then
 else
   if ! determine_non_primary_cluster; then
     echo -e "${YELLOW} ⚠️ Warning: Could not determine non-primary cluster${NC}"
-    if [[ -n "${1:-}" ]]; then
-      NON_PRIMARY_CLUSTER="$1"
+    if [[ -n "${CLUSTER_OVERRIDE:-}" ]]; then
+      NON_PRIMARY_CLUSTER="$CLUSTER_OVERRIDE"
       echo " Using provided cluster: $NON_PRIMARY_CLUSTER"
     else
       echo -e "${RED} ❌ Error: Cannot proceed without determining non-primary cluster${NC}"
@@ -580,6 +595,7 @@ main() {
 
   if ! cleanup_gitops_pvs; then
     echo -e "${YELLOW}Warning: Some orphan PVs may remain on $NON_PRIMARY_CLUSTER${NC}"
+    exit 1
   fi
 
   echo ""

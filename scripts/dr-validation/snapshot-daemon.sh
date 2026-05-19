@@ -24,8 +24,12 @@ while true; do
     collect_ok=0
   fi
   if [[ "$collect_ok" -eq 1 ]]; then
-    update_latest_snapshot_link "$dest"
-    prune_auto_snapshots
+    if ! update_latest_snapshot_link "$dest" 2>>"$SNAPSHOT_DAEMON_LOG"; then
+      echo "[$(date -u +%H:%M:%S)] WARN update_latest_snapshot_link failed for ${dest}" >>"$SNAPSHOT_DAEMON_LOG"
+    fi
+    if ! prune_auto_snapshots 2>>"$SNAPSHOT_DAEMON_LOG"; then
+      echo "[$(date -u +%H:%M:%S)] WARN prune_auto_snapshots failed" >>"$SNAPSHOT_DAEMON_LOG"
+    fi
     echo "[$(date -u +%H:%M:%S)] Auto-snapshot saved: ${dest}" >>"$SNAPSHOT_DAEMON_LOG"
   else
     echo "[$(date -u +%H:%M:%S)] WARN Auto-snapshot failed at ${stamp}" >>"$SNAPSHOT_DAEMON_LOG"

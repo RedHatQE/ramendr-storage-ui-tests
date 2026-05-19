@@ -17,13 +17,9 @@ PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
 if [[ -z "$PASS" ]]; then
   PASS="$(cloud_init_password_from_vault)"
 fi
-SSH_KEY="${SSH_IDENTITY_FILE:-}"
-if [[ -z "$SSH_KEY" || ! -f "$SSH_KEY" ]]; then
-  [[ -f "$HOME/.ssh/id_ed25519" ]] && SSH_KEY="$HOME/.ssh/id_ed25519"
-  [[ -f "$HOME/.ssh/id_rsa" ]] && SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
-fi
-if [[ -z "$PASS" && ( -z "$SSH_KEY" || ! -f "$SSH_KEY" ) ]]; then
-  err "Need SSH key or password (values-secret vm-ssh / cloud-init in Vault)."
+if [[ -z "$PASS" ]]; then
+  err "In-cluster writer install requires a password (DR_VALIDATION_SSH_PASSWORD or Vault cloud-init password)."
+  err "Private keys are not copied into the spoke cluster. Use install-writer.sh from a host that can reach NodePorts, or set a password."
   exit 1
 fi
 
@@ -45,26 +41,28 @@ cp "$DR_VALIDATION_DIR/systemd/ramendr-dr-writer.service" "$TMP_DIR/ramendr-dr-w
 printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
 log "SSH targets: $(wc -l < "$TMP_DIR/hosts.tsv" | tr -d ' ') VM(s)"
 
+cleanup_writer_install_secret() {
+  KUBECONFIG="$SPOKE_KC" oc delete secret ramendr-dr-writer-ssh -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+}
+
 KUBECONFIG="$SPOKE_KC" oc create configmap ramendr-dr-writer-install \
   --from-file=ramendr-dr-writer="$TMP_DIR/ramendr-dr-writer" \
   --from-file=records.py="$TMP_DIR/ramendr_dr_validation/records.py" \
   --from-file=ramendr-dr-writer.service="$TMP_DIR/ramendr-dr-writer.service" \
   -n "$VM_NAMESPACE" --dry-run=client -o yaml | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
-SECRET_ARGS=(--from-file=hosts.tsv="$TMP_DIR/hosts.tsv")
-[[ -n "$PASS" ]] && SECRET_ARGS+=(--from-literal=password="$PASS")
-[[ -n "$SSH_KEY" && -f "$SSH_KEY" ]] && SECRET_ARGS+=(--from-file=id_ed25519="$SSH_KEY")
 KUBECONFIG="$SPOKE_KC" oc create secret generic ramendr-dr-writer-ssh \
-  "${SECRET_ARGS[@]}" \
+  --from-file=hosts.tsv="$TMP_DIR/hosts.tsv" \
+  --from-literal=password="$PASS" \
   -n "$VM_NAMESPACE" --dry-run=client -o yaml | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 KUBECONFIG="$SPOKE_KC" oc delete job ramendr-dr-writer-install -n "$VM_NAMESPACE" --ignore-not-found
-KUBECONFIG="$SPOKE_KC" oc apply -f - <<'EOF'
+KUBECONFIG="$SPOKE_KC" oc apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: ramendr-dr-writer-install
-  namespace: gitops-vms
+  namespace: ${VM_NAMESPACE}
 spec:
   backoffLimit: 0
   template:
@@ -75,7 +73,7 @@ spec:
         image: quay.io/validatedpatterns/utility-container:latest
         env:
         - name: SSH_USER
-          value: cloud-user
+          value: "${SSH_USER}"
         volumeMounts:
         - name: payload
           mountPath: /payload
@@ -92,13 +90,7 @@ spec:
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             cp /hosts/hosts.tsv /tmp/hosts.tsv
             echo "hosts count: $(wc -l < /tmp/hosts.tsv)"
-            USE_KEY=0
-            if [[ -f /ssh/id_ed25519 ]]; then
-              cp /ssh/id_ed25519 /tmp/ssh-key && chmod 600 /tmp/ssh-key
-              USE_KEY=1
-            elif [[ -f /ssh/password ]]; then
-              PASS="$(tr -d '\n' < /ssh/password)"
-            fi
+            PASS="$(tr -d '\n' < /ssh/password)"
             install_on_vm() {
               local host="$1" port="$2"
               # shellcheck disable=SC2016
@@ -110,17 +102,10 @@ spec:
                 sudo systemctl daemon-reload && sudo systemctl enable --now ramendr-dr-writer.service && \
                 sleep 3 && systemctl is-active ramendr-dr-writer.service && \
                 tail -n 2 /var/lib/ramendr-dr-validation/timestamps.log'
-              if [[ "$USE_KEY" -eq 1 ]]; then
-                scp -P "$port" -i /tmp/ssh-key -o StrictHostKeyChecking=no \
-                  /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
-                  "${SSH_USER}@${host}:/tmp/"
-                ssh -n -p "$port" -i /tmp/ssh-key -o StrictHostKeyChecking=no "${SSH_USER}@${host}" "$remote_install"
-              else
-                sshpass -p "$PASS" scp -P "$port" -o StrictHostKeyChecking=no \
-                  /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
-                  "${SSH_USER}@${host}:/tmp/"
-                sshpass -p "$PASS" ssh -n -p "$port" -o StrictHostKeyChecking=no "${SSH_USER}@${host}" "$remote_install"
-              fi
+              sshpass -p "$PASS" scp -P "$port" -o StrictHostKeyChecking=no \
+                /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
+                "${SSH_USER}@${host}:/tmp/"
+              sshpass -p "$PASS" ssh -n -p "$port" -o StrictHostKeyChecking=no "${SSH_USER}@${host}" "$remote_install"
             }
             while IFS=$'\t' read -r name endpoint; do
               [[ -z "$name" ]] && continue
@@ -150,24 +135,28 @@ for _ in $(seq 1 40); do
   if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-writer-install -n "$VM_NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -q 1; then
     logs="$(KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-writer-install --tail=120 2>/dev/null || true)"
     echo "$logs"
+    cleanup_writer_install_secret
+    expected_vms="${DR_VALIDATION_EXPECTED_VMS:-4}"
     if echo "$logs" | grep -qE 'Permission denied \(publickey|ssh: connect to host.*Permission denied'; then
       err "SSH to edge VMs failed. Ensure values-secret vm-ssh/cloud-init match Vault and VMs were provisioned with cloud-init."
       exit 1
     fi
-    installed=$(echo "$logs" | grep -c '^=== rhel9-node' || true)
+    installed=$(echo "$logs" | grep -cE '^=== ' || true)
     ts_lines=$(echo "$logs" | grep -cE '^[0-9]+,20[0-9]{2}-' || true)
-    if [[ "$installed" -lt 4 ]] || [[ "$ts_lines" -lt 4 ]]; then
-      err "Writer install incomplete: ${installed}/4 VMs, ${ts_lines} timestamp samples in job log."
+    if [[ "$installed" -lt "$expected_vms" ]] || [[ "$ts_lines" -lt "$expected_vms" ]]; then
+      err "Writer install incomplete: ${installed}/${expected_vms} VMs, ${ts_lines}/${expected_vms} timestamp samples in job log."
       exit 1
     fi
-    log "In-cluster writer install completed on all ${installed} VM(s)."
+    log "In-cluster writer install completed on all ${installed}/${expected_vms} VM(s)."
     exit 0
   fi
   if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-writer-install -n "$VM_NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null | grep -q 1; then
     KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-writer-install --tail=50
+    cleanup_writer_install_secret
     exit 1
   fi
   sleep 15
 done
+cleanup_writer_install_secret
 err "Timed out waiting for ramendr-dr-writer-install job."
 exit 1

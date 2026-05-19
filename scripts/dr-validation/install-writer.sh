@@ -19,8 +19,9 @@ FILTER="${1:-}"
 require_cmd oc python3 scp ssh
 ssh_extra_opts
 
-if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}/auth/kubeconfig" ]]; then
-  export KUBECONFIG="${HUB_INSTALL_DIR}/auth/kubeconfig"
+hub_install_dir="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
+if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${hub_install_dir}/auth/kubeconfig" ]]; then
+  export KUBECONFIG="${hub_install_dir}/auth/kubeconfig"
 fi
 
 PRIMARY="$(determine_primary_cluster)"

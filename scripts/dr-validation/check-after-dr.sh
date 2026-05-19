@@ -17,7 +17,10 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 AFTER_DIR="${CHECK_ROOT}/${STAMP}"
 SUMMARY="${AFTER_DIR}/summary.txt"
 
-require_cmd python3 oc scp ssh
+require_cmd python3 oc
+if [[ "${DR_VALIDATION_INCLUSTER_COLLECT:-1}" != "1" ]]; then
+  require_cmd scp ssh
+fi
 
 echo ""
 echo "=============================================="
@@ -73,7 +76,12 @@ overall_fail=0
 } >"$SUMMARY"
 
 shopt -s nullglob
-for after_file in "$AFTER_DIR"/*.timestamps.log; do
+log_files=("$AFTER_DIR"/*.timestamps.log)
+if [[ ${#log_files[@]} -eq 0 ]] || [[ ! -e "${log_files[0]}" ]]; then
+  overall_fail=1
+  printf "%-28s %-8s %s\n" "(none)" "FAIL" "no timestamp logs collected in ${AFTER_DIR}" | tee -a "$SUMMARY"
+else
+for after_file in "${log_files[@]}"; do
   name=$(basename "$after_file" .timestamps.log)
   result="PASS"
   notes="no sequence gaps"
@@ -97,6 +105,7 @@ for after_file in "$AFTER_DIR"/*.timestamps.log; do
 
   printf "%-28s %-8s %s\n" "$name" "$result" "$notes" | tee -a "$SUMMARY"
 done
+fi
 
 echo ""
 if [[ "$overall_fail" -eq 0 ]]; then

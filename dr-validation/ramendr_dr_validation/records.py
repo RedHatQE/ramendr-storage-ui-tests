@@ -18,12 +18,14 @@ class TimestampRecord:
 
 
 def parse_timestamp(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp string (Z suffix allowed) into a timezone-aware datetime."""
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
 
 
 def parse_line(line: str, line_no: int) -> TimestampRecord:
+    """Parse one CSV log line into a TimestampRecord; raise ValueError on bad input."""
     line = line.strip()
     if not line or line.startswith("#"):
         raise ValueError(f"line {line_no}: empty or comment")
@@ -47,7 +49,12 @@ def parse_line(line: str, line_no: int) -> TimestampRecord:
 
 
 def format_record(seq: int, hostname: str, pid: int, when: datetime | None = None) -> str:
+    """Format a single log record as a CSV line with trailing newline."""
     when = when or datetime.now(timezone.utc)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    else:
+        when = when.astimezone(timezone.utc)
     ts = when.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     buf = StringIO()
     csv.writer(buf, lineterminator="").writerow([seq, ts, hostname, pid])

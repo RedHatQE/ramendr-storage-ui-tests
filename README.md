@@ -1,7 +1,7 @@
 # ramendr-storage-ui-tests
 
 This repository is a **consumer test harness** for the upstream validated pattern
-`[validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit)`.
+[validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit).
 
 It contains:
 
@@ -57,11 +57,11 @@ Do not commit secrets to this repository.
 
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
-- Use the upstream template as a reference: `[values-secret.yaml.template](https://github.com/validatedpatterns/ramendr-starter-kit/blob/main/values-secret.yaml.template)`
+- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/validatedpatterns/ramendr-starter-kit/blob/main/values-secret.yaml.template)
 
 ## Fork parity: BYOC and `values-hub.yaml`
 
-Upstream `v1.1` ships a stock `[values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml)`. Your fork changes that file (for example **ODF subscription channels** `stable-4.21`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
+Upstream v1.1 ships a stock [values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml). Your fork changes that file (for example **ODF subscription channels** `stable-4.21`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
 
 This repo reproduces that without forking upstream:
 

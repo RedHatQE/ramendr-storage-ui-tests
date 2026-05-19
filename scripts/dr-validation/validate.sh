@@ -22,11 +22,27 @@ fi
 export PYTHONPATH="${DR_VALIDATION_DIR}:${PYTHONPATH:-}"
 INTERVAL="${DR_VALIDATION_INTERVAL}"
 
+require_option_value() {
+  local opt="$1" val="${2:-}"
+  if [[ -z "$val" ]] || [[ "$val" == -* ]]; then
+    err "Option ${opt} requires a value"
+    exit 1
+  fi
+}
+
 ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --interval) INTERVAL="$2"; shift 2 ;;
-    --compare) ARGS+=(--compare "$2"); shift 2 ;;
+    --interval)
+      require_option_value "$1" "${2:-}"
+      INTERVAL="$2"
+      shift 2
+      ;;
+    --compare)
+      require_option_value "$1" "${2:-}"
+      ARGS+=(--compare "$2")
+      shift 2
+      ;;
     *) ARGS+=("$1"); shift ;;
   esac
 done
@@ -40,7 +56,15 @@ validate_one() {
 failures=0
 if [[ -d "$TARGET" ]]; then
   shopt -s nullglob
-  logs=("$TARGET"/*.log "$TARGET"/*.timestamps.log)
+  logs=()
+  for f in "$TARGET"/*.timestamps.log; do
+    [[ -f "$f" ]] && logs+=("$f")
+  done
+  for f in "$TARGET"/*.log; do
+    [[ -f "$f" ]] || continue
+    case "$f" in *.timestamps.log) continue ;; esac
+    logs+=("$f")
+  done
   if [[ ${#logs[@]} -eq 0 ]]; then
     err "No .log files in $TARGET"
     exit 1
@@ -49,7 +73,7 @@ if [[ -d "$TARGET" ]]; then
     validate_one "$f" || failures=$((failures + 1))
   done
 else
-  validate_one "$TARGET" || failures=$?
+  validate_one "$TARGET" || failures=$((failures + 1))
 fi
 
 if [[ "$failures" -gt 0 ]]; then
