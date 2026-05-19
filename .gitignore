@@ -1,3 +1,6 @@
+.work/dr-validation-logs/
+.work/dr-validation-snapshot-daemon.pid
+.work/dr-validation-snapshot-daemon.log
 .venv/
 .pytest_cache/
 __pycache__/

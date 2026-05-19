@@ -8,6 +8,7 @@ It contains:
 - Deployment automation (`scripts/redeploy.sh`) that **pins upstream to `v1.1`**, applies the local customization overlays, and executes the same deployment flow currently used in the `redeploy.sh` from the forked starter-kit.
 - Override values under `overrides/` that are copied on top of the upstream `overrides/` directory before installing the pattern.
 - (Planned) UI tests using **Playwright + Python** (to be added later).
+- **RamenDR data validation** — continuous timestamp writer + post-failover log checks ([`dr-validation/README.md`](dr-validation/README.md)).
 
 ## What this repo does
 
@@ -140,3 +141,20 @@ This checks only the files you have staged. Pass `--all-files` if you want to sc
 
 The same checks run automatically on every pull request via `.github/workflows/pre-commit.yaml`.
 PRs that fail the checks cannot be merged.
+
+## RamenDR data validation
+
+A full `./scripts/redeploy.sh` run ends with timestamp writers **running on all edge VMs** and
+**automatic log snapshots every 5 minutes**. After failover/relocate and the UI cleanup step, run:
+
+```bash
+./scripts/dr-validation/post-dr-automation.sh
+```
+
+That single command runs cleanup (with safety guards), waits for healthy VMs, and validates data — no other manual steps.
+
+See [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md) for the Jira-ready procedure.
+
+Set `SKIP_DR_VALIDATION=1` to skip writers and snapshots, or `REQUIRE_DR_VALIDATION=1` to fail redeploy if writers are not recording.
+
+See [`dr-validation/README.md`](dr-validation/README.md) for the full workflow.

@@ -1,0 +1,16 @@
+[Unit]
+Description=RamenDR continuous timestamp writer for data validation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/usr/local/lib
+Environment=DR_VALIDATION_LOG_PATH=/var/lib/ramendr-dr-validation/timestamps.log
+Environment=DR_VALIDATION_INTERVAL=1.0
+ExecStart=/usr/local/bin/ramendr-dr-writer --log-path ${DR_VALIDATION_LOG_PATH} --interval ${DR_VALIDATION_INTERVAL}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

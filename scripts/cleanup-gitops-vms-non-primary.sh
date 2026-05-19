@@ -2,17 +2,38 @@
 set -euo pipefail
 
 # Script to manually cleanup gitops-vms namespace on the non-primary cluster
+#
+# DR validation note: run ONLY after failover/relocate is complete. This deletes VM
+# resources on the non-primary spoke (orphaned copies). Active VMs and timestamp logs
+# live on the current primary — do not run if primary detection is wrong. For data
+# checks after DR, use: ./scripts/dr-validation/check-after-dr.sh
+#
 # This script will:
 # 1. Determine the non-primary cluster (discovered from DR policy; override with PRIMARY_CLUSTER/SECONDARY_CLUSTER env if needed)
 # 2. List VM-related resources directly from the non-primary cluster
 # 3. Delete them from the gitops-vms namespace
+# 4. Delete all PVCs in gitops-vms (including stuck Terminating PVCs held by Ramen DR finalizers)
+# 5. Remove orphan PVs that were bound to gitops-vms (Retain reclaim policy)
 
 # Configuration
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="/tmp/edge-gitops-vms-cleanup"
 VM_NAMESPACE="gitops-vms"
 DRPC_NAMESPACE="openshift-dr-ops"
 DRPC_NAME="gitops-vm-protection"
 PLACEMENT_NAME="gitops-vm-protection-placement-1"
+
+AUTO_CONFIRM="${AUTO_CONFIRM:-no}"
+CLEANUP_FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes | -y) AUTO_CONFIRM=yes ;;
+    --force) CLEANUP_FORCE=1 ;;
+  esac
+done
+
+# shellcheck source=lib/drpc-guards.sh
+source "${REPO_ROOT}/scripts/lib/drpc-guards.sh"
 
 # Colors for output
 RED='\033[0;31m'
@@ -30,13 +51,6 @@ mkdir -p "$WORK_DIR"
 # Function to determine current primary cluster from DRPC
 determine_primary_cluster() {
   echo "Determining current primary cluster from DRPC..."
-
-  # Check if DRPC exists
-  if ! oc get drplacementcontrol "$DRPC_NAME" -n "$DRPC_NAMESPACE" &>/dev/null; then
-    echo -e "${YELLOW} ⚠️ Warning: DRPC $DRPC_NAME not found in namespace $DRPC_NAMESPACE${NC}"
-    echo " Cannot determine primary cluster from DRPC"
-    return 1
-  fi
 
   # First, check PlacementDecision - this is the most reliable way to determine current primary
   # The PlacementDecision shows which cluster is currently selected by the Placement
@@ -122,6 +136,22 @@ echo "=========================================="
 echo "GitOps VMs Cleanup Script"
 echo "=========================================="
 echo "DRPC: $DRPC_NAME (namespace: $DRPC_NAMESPACE)"
+echo ""
+
+if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}/auth/kubeconfig" ]]; then
+  export KUBECONFIG="${HUB_INSTALL_DIR}/auth/kubeconfig"
+fi
+
+if ! oc get managedclusters &>/dev/null; then
+  echo -e "${RED}Error: Not connected to hub cluster (set KUBECONFIG to hub).${NC}"
+  exit 1
+fi
+
+echo "Running DRPC safety checks before cleanup..."
+if ! assert_safe_to_cleanup_non_primary "$CLEANUP_FORCE"; then
+  echo -e "${RED}Cleanup blocked. Wait for DR to finish or use --force if you accept the risk.${NC}"
+  exit 1
+fi
 echo ""
 
 # Determine primary and non-primary clusters
@@ -218,7 +248,7 @@ list_cluster_resources() {
 
   : > "$WORK_DIR/resources-list.txt"
 
-  local resource_types=("VirtualMachine" "Service" "Route" "ExternalSecret" "DataVolume" "DataSource")
+  local resource_types=("VirtualMachine" "VirtualMachineInstance" "Service" "Route" "ExternalSecret" "DataVolume" "DataSource")
 
   for res_type in "${resource_types[@]}"; do
     local items
@@ -229,29 +259,35 @@ list_cluster_resources() {
     fi
   done
 
-  local VM_COUNT SERVICE_COUNT ROUTE_COUNT ES_COUNT DV_COUNT DS_COUNT
+  local VM_COUNT VMI_COUNT SERVICE_COUNT ROUTE_COUNT ES_COUNT DV_COUNT DS_COUNT PVC_COUNT
   VM_COUNT=$(grep -c "^VirtualMachine|" "$WORK_DIR/resources-list.txt" 2>/dev/null || true)
+  VMI_COUNT=$(grep -c "^VirtualMachineInstance|" "$WORK_DIR/resources-list.txt" 2>/dev/null || true)
   SERVICE_COUNT=$(grep -c "^Service|" "$WORK_DIR/resources-list.txt" 2>/dev/null || true)
   ROUTE_COUNT=$(grep -c "^Route|" "$WORK_DIR/resources-list.txt" 2>/dev/null || true)
   ES_COUNT=$(grep -c "^ExternalSecret|" "$WORK_DIR/resources-list.txt" 2>/dev/null || true)
   DV_COUNT=$(grep -c "^DataVolume|" "$WORK_DIR/resources-list.txt" 2>/dev/null || true)
   DS_COUNT=$(grep -c "^DataSource|" "$WORK_DIR/resources-list.txt" 2>/dev/null || true)
+  PVC_COUNT=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
   VM_COUNT=${VM_COUNT:-0}
+  VMI_COUNT=${VMI_COUNT:-0}
   SERVICE_COUNT=${SERVICE_COUNT:-0}
   ROUTE_COUNT=${ROUTE_COUNT:-0}
   ES_COUNT=${ES_COUNT:-0}
   DV_COUNT=${DV_COUNT:-0}
   DS_COUNT=${DS_COUNT:-0}
+  PVC_COUNT=${PVC_COUNT:-0}
 
   echo " Found resources on cluster:"
   echo " - VirtualMachines: $VM_COUNT"
+  echo " - VirtualMachineInstances: $VMI_COUNT"
   echo " - Services: $SERVICE_COUNT"
   echo " - Routes: $ROUTE_COUNT"
   echo " - ExternalSecrets: $ES_COUNT"
   echo " - DataVolumes: $DV_COUNT"
   echo " - DataSources: $DS_COUNT"
+  echo " - PersistentVolumeClaims: $PVC_COUNT"
 
-  local total=$(( VM_COUNT + SERVICE_COUNT + ROUTE_COUNT + ES_COUNT + DV_COUNT + DS_COUNT ))
+  local total=$(( VM_COUNT + VMI_COUNT + SERVICE_COUNT + ROUTE_COUNT + ES_COUNT + DV_COUNT + DS_COUNT + PVC_COUNT ))
   if [[ $total -eq 0 ]]; then
     echo -e "${YELLOW} ⚠️ No resources found in namespace $VM_NAMESPACE${NC}"
     echo " Nothing to clean up"
@@ -348,6 +384,128 @@ cleanup_virt_launcher_pods() {
   fi
 }
 
+# Delete all PVCs in gitops-vms. Ramen DR finalizers often leave PVCs stuck in Terminating
+# after VM/DataVolume deletion on the non-primary spoke; clear finalizers when needed.
+cleanup_pvcs() {
+  echo ""
+  echo "Step 4: Deleting all PVCs in namespace $VM_NAMESPACE..."
+
+  local pvcs deleted_count=0 error_count=0
+  pvcs=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+  if [[ -z "$pvcs" ]]; then
+    echo " No PVCs found"
+    return 0
+  fi
+
+  while IFS= read -r pvc; do
+    [[ -z "$pvc" ]] && continue
+    echo " Deleting PVC: $pvc"
+    if oc --kubeconfig="$KUBECONFIG" delete pvc "$pvc" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null; then
+      echo -e " ${GREEN}✅ Delete requested: $pvc${NC}"
+      deleted_count=$((deleted_count + 1))
+    else
+      echo -e " ${RED}❌ Failed to delete PVC: $pvc${NC}"
+      error_count=$((error_count + 1))
+    fi
+  done <<< "$pvcs"
+
+  local pass stuck
+  for pass in 1 2 3 4 5 6; do
+    stuck=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" -o json 2>/dev/null \
+      | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for item in data.get('items', []):
+    print(item['metadata']['name'])
+" 2>/dev/null || true)
+    if [[ -z "$stuck" ]]; then
+      break
+    fi
+    if [[ $pass -gt 1 ]]; then
+      echo " Pass $pass — $(echo "$stuck" | grep -c .) PVC(s) still present"
+    fi
+    while IFS= read -r pvc; do
+      [[ -z "$pvc" ]] && continue
+      local phase
+      phase=$(oc --kubeconfig="$KUBECONFIG" get pvc "$pvc" -n "$VM_NAMESPACE" \
+        -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)
+      if [[ -n "$phase" ]] || [[ $pass -ge 3 ]]; then
+        echo " Clearing finalizers on stuck PVC: $pvc"
+        oc --kubeconfig="$KUBECONFIG" patch pvc "$pvc" -n "$VM_NAMESPACE" \
+          --type=merge -p '{"metadata":{"finalizers":null}}' &>/dev/null || true
+      fi
+    done <<< "$stuck"
+    sleep 5
+  done
+
+  local remaining
+  remaining=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  remaining=${remaining:-0}
+  if [[ "$remaining" -gt 0 ]]; then
+    echo -e "${RED} ❌ $remaining PVC(s) still remain in $VM_NAMESPACE${NC}"
+    oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" 2>/dev/null || true
+    return 1
+  fi
+
+  echo -e "${GREEN} ✅ All PVCs removed from $VM_NAMESPACE ($deleted_count delete requests)${NC}"
+  [[ $error_count -eq 0 ]]
+}
+
+# Remove cluster-scoped PVs that were bound to gitops-vms (common with Retain reclaim policy).
+cleanup_gitops_pvs() {
+  echo ""
+  echo "Step 5: Removing orphan PVs for namespace $VM_NAMESPACE..."
+
+  local pvs deleted_count=0
+  pvs=$(oc --kubeconfig="$KUBECONFIG" get pv -o json 2>/dev/null \
+    | python3 -c "
+import json, sys
+ns = sys.argv[1]
+data = json.load(sys.stdin)
+for item in data.get('items', []):
+    ref = item.get('spec', {}).get('claimRef') or {}
+    if ref.get('namespace') == ns:
+        print(item['metadata']['name'])
+" "$VM_NAMESPACE" 2>/dev/null || true)
+
+  if [[ -z "$pvs" ]]; then
+    echo " No PVs bound to $VM_NAMESPACE"
+    return 0
+  fi
+
+  while IFS= read -r pv; do
+    [[ -z "$pv" ]] && continue
+    echo " Deleting PV: $pv"
+    oc --kubeconfig="$KUBECONFIG" delete pv "$pv" --ignore-not-found &>/dev/null || true
+    if oc --kubeconfig="$KUBECONFIG" get pv "$pv" &>/dev/null; then
+      echo " Clearing finalizers on stuck PV: $pv"
+      oc --kubeconfig="$KUBECONFIG" patch pv "$pv" \
+        --type=merge -p '{"metadata":{"finalizers":null}}' &>/dev/null || true
+    fi
+    deleted_count=$((deleted_count + 1))
+  done <<< "$pvs"
+
+  local remaining
+  remaining=$(oc --kubeconfig="$KUBECONFIG" get pv -o json 2>/dev/null \
+    | python3 -c "
+import json, sys
+ns = sys.argv[1]
+data = json.load(sys.stdin)
+print(sum(1 for i in data.get('items', [])
+    if (i.get('spec', {}).get('claimRef') or {}).get('namespace') == ns))
+" "$VM_NAMESPACE" 2>/dev/null || echo 0)
+  remaining=${remaining:-0}
+  if [[ "$remaining" -gt 0 ]]; then
+    echo -e "${YELLOW} ⚠️ $remaining PV(s) still reference $VM_NAMESPACE (may need manual cleanup)${NC}"
+    return 1
+  fi
+
+  echo -e "${GREEN} ✅ Removed $deleted_count orphan PV(s)${NC}"
+  return 0
+}
+
 # Main execution
 main() {
   # Check if we're connected to a hub cluster
@@ -378,7 +536,7 @@ main() {
     exit 0
   fi
 
-  # List resources directly from the target cluster
+  # List resources directly from the target cluster (including orphaned PVCs)
   if ! list_cluster_resources; then
     exit 0
   fi
@@ -389,21 +547,40 @@ main() {
   echo -e "${YELLOW}WARNING: This will delete resources from namespace $VM_NAMESPACE on cluster $NON_PRIMARY_CLUSTER${NC}"
   echo "=========================================="
   echo ""
-  read -p "Do you want to proceed with deletion? (yes/no): " confirm
+  if [[ "$AUTO_CONFIRM" == "yes" ]]; then
+    echo "AUTO_CONFIRM=yes — proceeding with deletion (non-interactive)."
+    confirm="yes"
+  else
+    read -p "Do you want to proceed with deletion? (yes/no): " confirm
+  fi
 
   if [[ "$confirm" != "yes" ]]; then
     echo "Deletion cancelled"
     exit 0
   fi
 
-  # Delete resources
-  if ! delete_resources; then
-    echo -e "${RED}Error: Some resources failed to delete${NC}"
-    exit 1
+  # Delete VM-related namespaced resources (PVCs handled in a dedicated step below)
+  if [[ -s "$WORK_DIR/resources-list.txt" ]]; then
+    if ! delete_resources; then
+      echo -e "${RED}Error: Some resources failed to delete${NC}"
+      exit 1
+    fi
+  else
+    echo " No namespaced VM resources in list; proceeding with PVC/PV cleanup..."
   fi
 
   # Force-delete any leftover virt-launcher pods not in Running state
   cleanup_virt_launcher_pods
+
+  # Always remove PVCs and gitops-vms PVs on the non-primary spoke
+  if ! cleanup_pvcs; then
+    echo -e "${RED}Error: PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
+    exit 1
+  fi
+
+  if ! cleanup_gitops_pvs; then
+    echo -e "${YELLOW}Warning: Some orphan PVs may remain on $NON_PRIMARY_CLUSTER${NC}"
+  fi
 
   echo ""
   echo -e "${GREEN}✅ Cleanup completed successfully!${NC}"
@@ -411,6 +588,7 @@ main() {
   echo "Resources were deleted from:"
   echo " - Cluster: $NON_PRIMARY_CLUSTER"
   echo " - Namespace: $VM_NAMESPACE"
+  echo " (includes all PVCs and gitops-vms-bound PVs)"
 }
 
 # Run main function
