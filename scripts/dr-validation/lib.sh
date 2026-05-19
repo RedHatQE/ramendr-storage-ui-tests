@@ -341,15 +341,16 @@ verify_writers_recording() {
   [[ -z "$primary" ]] && primary="ocp-primary"
   spoke_kc="$(resolve_spoke_kubeconfig "$primary")"
 
-  local ok=0 fail=0
+  local ok=0 fail=0 log_path="${DR_VALIDATION_LOG_PATH}"
   while IFS=$'\t' read -r route_name host port; do
     [[ -z "$route_name" ]] && continue
     port="${port:-22}"
-    if ssh -p "$port" "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s <<'CHECK' 2>/dev/null
+    if ssh -p "$port" "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s "$log_path" <<'CHECK' 2>/dev/null
 set -euo pipefail
+log_path="$1"
 systemctl is-active --quiet ramendr-dr-writer.service
-test -s /var/lib/ramendr-dr-validation/timestamps.log
-tail -n 1 /var/lib/ramendr-dr-validation/timestamps.log | grep -qE '^[0-9]+,'
+test -s "$log_path"
+tail -n 1 "$log_path" | grep -qE '^[0-9]+,'
 CHECK
     then
       log "  OK ${route_name} (${host}:${port})"

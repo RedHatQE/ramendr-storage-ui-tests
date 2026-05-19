@@ -443,10 +443,10 @@ for item in data.get('items', []):
     fi
     while IFS= read -r pvc; do
       [[ -z "$pvc" ]] && continue
-      local phase
-      phase=$(oc --kubeconfig="$KUBECONFIG" get pvc "$pvc" -n "$VM_NAMESPACE" \
+      local deletionTimestamp
+      deletionTimestamp=$(oc --kubeconfig="$KUBECONFIG" get pvc "$pvc" -n "$VM_NAMESPACE" \
         -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)
-      if [[ -n "$phase" ]] || [[ $pass -ge 3 ]]; then
+      if [[ -n "$deletionTimestamp" ]] || [[ $pass -ge 3 ]]; then
         echo " Clearing finalizers on stuck PVC: $pvc"
         oc --kubeconfig="$KUBECONFIG" patch pvc "$pvc" -n "$VM_NAMESPACE" \
           --type=merge -p '{"metadata":{"finalizers":null}}' &>/dev/null || true

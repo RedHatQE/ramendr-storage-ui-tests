@@ -14,6 +14,10 @@ PRIMARY="$(determine_primary_cluster)"
 [[ -z "$PRIMARY" ]] && PRIMARY="ocp-primary"
 SPOKE_KC="$(resolve_spoke_kubeconfig "$PRIMARY")"
 
+cleanup_collect_secret() {
+  KUBECONFIG="$SPOKE_KC" oc delete secret ramendr-dr-collect-ssh -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+}
+
 HOSTS="$(list_vm_ssh_hosts "$SPOKE_KC")"
 [[ -n "$HOSTS" ]] || { err "No SSH endpoints"; exit 1; }
 
@@ -28,12 +32,13 @@ if [[ -z "$PASS" ]]; then
 fi
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
 printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
 
-cleanup_collect_secret() {
-  KUBECONFIG="$SPOKE_KC" oc delete secret ramendr-dr-collect-ssh -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+collect_logs_cleanup() {
+  [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"
+  cleanup_collect_secret
 }
+trap collect_logs_cleanup EXIT
 
 KUBECONFIG="$SPOKE_KC" oc create secret generic ramendr-dr-collect-ssh \
   --from-file=hosts.tsv="$TMP_DIR/hosts.tsv" \

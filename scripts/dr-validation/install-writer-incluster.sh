@@ -13,6 +13,17 @@ PRIMARY="$(determine_primary_cluster)"
 [[ -z "$PRIMARY" ]] && PRIMARY="ocp-primary"
 SPOKE_KC="$(resolve_spoke_kubeconfig "$PRIMARY")"
 
+cleanup_writer_install_secret() {
+  KUBECONFIG="$SPOKE_KC" oc delete secret ramendr-dr-writer-ssh -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+}
+
+cleanup_writer_install_resources() {
+  [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"
+  cleanup_writer_install_secret
+  KUBECONFIG="$SPOKE_KC" oc delete configmap ramendr-dr-writer-install -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+}
+trap cleanup_writer_install_resources EXIT INT TERM
+
 PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
 if [[ -z "$PASS" ]]; then
   PASS="$(cloud_init_password_from_vault)"
@@ -32,7 +43,6 @@ fi
 log "Installing writers in-cluster on $PRIMARY (${VM_NAMESPACE})..."
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
 mkdir -p "$TMP_DIR/ramendr_dr_validation"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/records.py" "$TMP_DIR/ramendr_dr_validation/records.py"
 touch "$TMP_DIR/ramendr_dr_validation/__init__.py"
@@ -40,10 +50,6 @@ install -m 0755 "$DR_VALIDATION_DIR/ramendr_dr_validation/writer.py" "$TMP_DIR/r
 cp "$DR_VALIDATION_DIR/systemd/ramendr-dr-writer.service" "$TMP_DIR/ramendr-dr-writer.service"
 printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
 log "SSH targets: $(wc -l < "$TMP_DIR/hosts.tsv" | tr -d ' ') VM(s)"
-
-cleanup_writer_install_secret() {
-  KUBECONFIG="$SPOKE_KC" oc delete secret ramendr-dr-writer-ssh -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
-}
 
 KUBECONFIG="$SPOKE_KC" oc create configmap ramendr-dr-writer-install \
   --from-file=ramendr-dr-writer="$TMP_DIR/ramendr-dr-writer" \
