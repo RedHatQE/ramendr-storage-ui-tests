@@ -25,11 +25,6 @@ PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
 if [[ -z "$PASS" ]]; then
   PASS="$(cloud_init_password_from_vault)"
 fi
-if [[ -z "$PASS" ]]; then
-  err "In-cluster log collect requires a password (DR_VALIDATION_SSH_PASSWORD or Vault cloud-init password)."
-  err "Private keys are not copied into the spoke cluster."
-  exit 1
-fi
 
 TMP_DIR="$(mktemp -d)"
 printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
@@ -40,10 +35,18 @@ collect_logs_cleanup() {
 }
 trap collect_logs_cleanup EXIT
 
-KUBECONFIG="$SPOKE_KC" oc create secret generic ramendr-dr-collect-ssh \
-  --from-file=hosts.tsv="$TMP_DIR/hosts.tsv" \
-  --from-literal=password="$PASS" \
-  -n "$VM_NAMESPACE" --dry-run=client -o yaml | KUBECONFIG="$SPOKE_KC" oc apply -f -
+COLLECT_SECRET_CREATE=(oc create secret generic ramendr-dr-collect-ssh
+  --from-file=hosts.tsv="$TMP_DIR/hosts.tsv"
+  -n "$VM_NAMESPACE" --dry-run=client -o yaml)
+[[ -n "$PASS" ]] && COLLECT_SECRET_CREATE+=(--from-literal=password="$PASS")
+SSH_KEY_FILE="${SSH_IDENTITY_FILE:-}"
+if [[ -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ]]; then
+  [[ -f "$HOME/.ssh/id_ed25519" ]] && SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
+fi
+if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
+  COLLECT_SECRET_CREATE+=(--from-file=ssh-privatekey="$SSH_KEY_FILE")
+fi
+KUBECONFIG="$SPOKE_KC" "${COLLECT_SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 KUBECONFIG="$SPOKE_KC" oc delete job ramendr-dr-collect-logs -n "$VM_NAMESPACE" --ignore-not-found
 KUBECONFIG="$SPOKE_KC" oc apply -f - <<EOF
@@ -74,16 +77,23 @@ spec:
           - |
             set -uo pipefail
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
-            PASS="$(tr -d '\n' < /ssh/password)"
+            PASS="\$(tr -d '\n' < /ssh/password 2>/dev/null || true)"
+            test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
             cp /ssh/hosts.tsv /tmp/hosts.tsv
-            while IFS=\$'\t' read -r name host port; do
+            cat /tmp/hosts.tsv | while IFS=\$'\t' read -r name host port; do
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
               echo "===FILE:\${name}==="
-              sshpass -p "\$PASS" ssh -n -p "\$port" -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-                "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null
-            done < /tmp/hosts.tsv
+              if [[ -f /tmp/ssh-privatekey ]]; then
+                ssh -i /tmp/ssh-privatekey -n -p "\$port" -o StrictHostKeyChecking=no \
+                  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+                  "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null
+              else
+                sshpass -p "\$PASS" ssh -n -p "\$port" -o StrictHostKeyChecking=no \
+                  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+                  "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null
+              fi
+            done
       volumes:
       - name: ssh
         secret:

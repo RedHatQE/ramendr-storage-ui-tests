@@ -28,9 +28,16 @@ PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
 if [[ -z "$PASS" ]]; then
   PASS="$(cloud_init_password_from_vault)"
 fi
-if [[ -z "$PASS" ]]; then
-  err "In-cluster writer install requires a password (DR_VALIDATION_SSH_PASSWORD or Vault cloud-init password)."
-  err "Private keys are not copied into the spoke cluster. Use install-writer.sh from a host that can reach NodePorts, or set a password."
+SSH_KEY_FILE="${SSH_IDENTITY_FILE:-}"
+if [[ -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ]]; then
+  if [[ -f "$HOME/.ssh/id_ed25519" ]]; then
+    SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
+  elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
+    SSH_KEY_FILE="$HOME/.ssh/id_rsa"
+  fi
+fi
+if [[ -z "$PASS" && ( -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ) ]]; then
+  err "In-cluster writer install needs DR_VALIDATION_SSH_PASSWORD, Vault cloud-init password, or a local SSH key (SSH_IDENTITY_FILE)."
   exit 1
 fi
 
@@ -57,10 +64,15 @@ KUBECONFIG="$SPOKE_KC" oc create configmap ramendr-dr-writer-install \
   --from-file=ramendr-dr-writer.service="$TMP_DIR/ramendr-dr-writer.service" \
   -n "$VM_NAMESPACE" --dry-run=client -o yaml | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
-KUBECONFIG="$SPOKE_KC" oc create secret generic ramendr-dr-writer-ssh \
-  --from-file=hosts.tsv="$TMP_DIR/hosts.tsv" \
-  --from-literal=password="$PASS" \
-  -n "$VM_NAMESPACE" --dry-run=client -o yaml | KUBECONFIG="$SPOKE_KC" oc apply -f -
+SECRET_CREATE=(oc create secret generic ramendr-dr-writer-ssh
+  --from-file=hosts.tsv="$TMP_DIR/hosts.tsv"
+  -n "$VM_NAMESPACE" --dry-run=client -o yaml)
+[[ -n "$PASS" ]] && SECRET_CREATE+=(--from-literal=password="$PASS")
+if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
+  SECRET_CREATE+=(--from-file=ssh-privatekey="$SSH_KEY_FILE")
+  log "Using ephemeral install Job secret with SSH key (removed after install)."
+fi
+KUBECONFIG="$SPOKE_KC" "${SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 KUBECONFIG="$SPOKE_KC" oc delete job ramendr-dr-writer-install -n "$VM_NAMESPACE" --ignore-not-found
 KUBECONFIG="$SPOKE_KC" oc apply -f - <<EOF
@@ -95,10 +107,11 @@ spec:
             set -uo pipefail
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             cp /hosts/hosts.tsv /tmp/hosts.tsv
-            echo "hosts count: $(wc -l < /tmp/hosts.tsv)"
-            PASS="$(tr -d '\n' < /ssh/password)"
+            echo "hosts count: \$(wc -l < /tmp/hosts.tsv)"
+            PASS="\$(tr -d '\n' < /ssh/password 2>/dev/null || true)"
+            test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
             install_on_vm() {
-              local host="$1" port="$2"
+              local host="\$1" port="\$2"
               # shellcheck disable=SC2016
               local remote_install='sudo mkdir -p /var/lib/ramendr-dr-validation /usr/local/lib/ramendr_dr_validation /usr/local/bin && \
                 sudo install -m 0644 /tmp/records.py /usr/local/lib/ramendr_dr_validation/records.py && \
@@ -108,17 +121,26 @@ spec:
                 sudo systemctl daemon-reload && sudo systemctl enable --now ramendr-dr-writer.service && \
                 sleep 3 && systemctl is-active ramendr-dr-writer.service && \
                 tail -n 2 /var/lib/ramendr-dr-validation/timestamps.log'
-              sshpass -p "$PASS" scp -P "$port" -o StrictHostKeyChecking=no \
-                /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
-                "${SSH_USER}@${host}:/tmp/"
-              sshpass -p "$PASS" ssh -n -p "$port" -o StrictHostKeyChecking=no "${SSH_USER}@${host}" "$remote_install"
+              local scp_opts="-P \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              if [[ -f /tmp/ssh-privatekey ]]; then
+                scp -i /tmp/ssh-privatekey \$scp_opts \
+                  /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
+                  "\${SSH_USER}@\${host}:/tmp/"
+                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote_install"
+              else
+                sshpass -p "\$PASS" scp \$scp_opts \
+                  /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
+                  "\${SSH_USER}@\${host}:/tmp/"
+                sshpass -p "\$PASS" ssh -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote_install"
+              fi
             }
-            while IFS=$'\t' read -r name host port; do
-              [[ -z "$name" ]] && continue
-              port="${port:-22}"
-              echo "=== $name @ $host:$port ==="
-              install_on_vm "$host" "$port" || { echo "FAILED $name"; exit 1; }
-            done < /tmp/hosts.tsv
+            cat /tmp/hosts.tsv | while IFS=\$'\t' read -r name host port; do
+              [[ -z "\$name" ]] && continue
+              port="\${port:-22}"
+              echo "=== \$name @ \$host:\$port ==="
+              install_on_vm "\$host" "\$port" || { echo "FAILED \$name"; exit 1; }
+            done
             echo "All writers installed."
       volumes:
       - name: payload
