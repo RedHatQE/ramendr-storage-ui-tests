@@ -84,12 +84,14 @@ spec:
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
               echo "===FILE:\${name}==="
-              if [[ -f /tmp/ssh-privatekey ]]; then
-                ssh -i /tmp/ssh-privatekey -n -p "\$port" -o StrictHostKeyChecking=no \
+              if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n -p "\$port" -o StrictHostKeyChecking=no \
                   -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-                  "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null
-              else
+                  "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null; then
+                continue
+              fi
+              if [[ -n "\$PASS" ]]; then
                 sshpass -p "\$PASS" ssh -n -p "\$port" -o StrictHostKeyChecking=no \
+                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
                   "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null
               fi

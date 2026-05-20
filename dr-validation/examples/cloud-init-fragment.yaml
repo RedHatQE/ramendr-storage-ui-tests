@@ -2,7 +2,12 @@
 # Installs the timestamp writer on first boot. Adjust username and paths as needed.
 #
 #cloud-config
-# ... existing user/password/ssh keys ...
+# user: cloud-user
+# password: <set-in-values-secret>
+# chpasswd: { expire: False }
+# ssh_pwauth: true   # required for password SSH from in-cluster install/collect Jobs
+# ssh_authorized_keys:
+#   - <contents-of-vm-ssh-publickey>
 #
 #write_files:
 #  - path: /usr/local/bin/ramendr-dr-writer

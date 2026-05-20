@@ -29,12 +29,16 @@ if [[ -z "$PASS" ]]; then
   PASS="$(cloud_init_password_from_vault)"
 fi
 SSH_KEY_FILE="${SSH_IDENTITY_FILE:-}"
-if [[ -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ]]; then
-  if [[ -f "$HOME/.ssh/id_ed25519" ]]; then
-    SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
-  elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
-    SSH_KEY_FILE="$HOME/.ssh/id_rsa"
+if [[ "${DR_VALIDATION_INCLUSTER_SSH_KEY:-1}" == "1" ]]; then
+  if [[ -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ]]; then
+    if [[ -f "$HOME/.ssh/id_ed25519" ]]; then
+      SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
+    elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
+      SSH_KEY_FILE="$HOME/.ssh/id_rsa"
+    fi
   fi
+else
+  SSH_KEY_FILE=""
 fi
 if [[ -z "$PASS" && ( -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ) ]]; then
   err "In-cluster writer install needs DR_VALIDATION_SSH_PASSWORD, Vault cloud-init password, or a local SSH key (SSH_IDENTITY_FILE)."
@@ -123,16 +127,21 @@ spec:
                 tail -n 2 /var/lib/ramendr-dr-validation/timestamps.log'
               local scp_opts="-P \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-              if [[ -f /tmp/ssh-privatekey ]]; then
-                scp -i /tmp/ssh-privatekey \$scp_opts \
+              if [[ -f /tmp/ssh-privatekey ]] && scp -i /tmp/ssh-privatekey \$scp_opts \
                   /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
-                  "\${SSH_USER}@\${host}:/tmp/"
-                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote_install"
-              else
+                  "\${SSH_USER}@\${host}:/tmp/" && \
+                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote_install"; then
+                return 0
+              fi
+              if [[ -n "\$PASS" ]]; then
                 sshpass -p "\$PASS" scp \$scp_opts \
                   /payload/ramendr-dr-writer /payload/records.py /payload/ramendr-dr-writer.service \
-                  "\${SSH_USER}@\${host}:/tmp/"
-                sshpass -p "\$PASS" ssh -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote_install"
+                  "\${SSH_USER}@\${host}:/tmp/" && \
+                sshpass -p "\$PASS" ssh -n \$ssh_opts \
+                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                  "\${SSH_USER}@\${host}" "\$remote_install"
+              else
+                return 1
               fi
             }
             cat /tmp/hosts.tsv | while IFS=\$'\t' read -r name host port; do
