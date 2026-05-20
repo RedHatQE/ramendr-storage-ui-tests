@@ -63,9 +63,9 @@ Do not commit secrets to this repository.
 ```yaml
 - name: privatekey
   fields:
-    - name: privatekey
+    - name: ssh-privatekey
       path: ~/.ssh/id_ed25519
-    - name: publickey
+    - name: ssh-publickey
       path: ~/.ssh/id_ed25519.pub
 ```
 
