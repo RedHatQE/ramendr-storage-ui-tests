@@ -25,6 +25,9 @@ replicated with the protected KubeVirt workload.
 1. **Deploy environment** — `./scripts/redeploy.sh` (four `edgenode` RHEL VMs in `gitops-vms`).
    When redeploy finishes, it **automatically** waits for VMs, installs the timestamp writer on
    each edge VM, and verifies recording (unless `SKIP_DR_VALIDATION=1`).
+   Edge VMs need **cloud-init** from Vault: keep `disableExternalSecrets: false` in
+   `overrides/values-egv-dr.yaml`, and include `ssh_pwauth: true` in `~/values-secret.yaml`
+   `cloud-init` userData (see `examples/cloud-init-fragment.yaml`).
 2. **Optional manual install** — if bootstrap was skipped or failed:
 
    ```bash
