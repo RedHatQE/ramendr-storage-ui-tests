@@ -805,11 +805,63 @@ deploy_pattern() {
   ensure_spoke_imports
   finalize_byoc_cluster_deployments
 
+  # The upstream values-egv-dr.yaml at v1.1 has disableExternalSecrets: true.
+  # Our overrides/values-egv-dr.yaml sets it to false, but ArgoCD reads value files
+  # from $patternref which resolves to the upstream GitHub repo — not our repo.
+  # The only reliable way to override a upstream value file setting in a running
+  # ArgoCD multi-source app is to add an explicit Helm --set parameter, which takes
+  # precedence over all value files.
+  # Without this patch: the edge-gitops-vms chart never creates the cloud-init
+  # ExternalSecret, VMs have no cloud-init disk, no password login, no SSH key injection.
+  override_disable_external_secrets
+
   log "Force-refreshing kubeconfig ExternalSecrets..."
   for cluster in ocp-primary ocp-secondary; do
     oc annotate externalsecret -n "$cluster" --all \
       force-sync="$(date +%s)" --overwrite 2>/dev/null || true
   done
+}
+
+override_disable_external_secrets() {
+  # Add disableExternalSecrets=false as an explicit Helm parameter on the regional-dr
+  # ArgoCD app, then trigger a sync so the edge-gitops-vms chart creates the
+  # cloud-init and authorizedsshkeys ExternalSecrets on the spoke clusters.
+  log "Overriding disableExternalSecrets=false on regional-dr ArgoCD app..."
+
+  # Wait up to 5 min for the app to exist (it's created by pattern.sh during install).
+  local tries=0
+  until oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub &>/dev/null \
+      || [[ $tries -ge 10 ]]; do
+    tries=$((tries + 1)); sleep 30
+  done
+  if ! oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub &>/dev/null; then
+    warn "regional-dr ArgoCD app not found after waiting -- skipping disableExternalSecrets override."
+    return
+  fi
+
+  # Remove any pre-existing disableExternalSecrets parameter to avoid duplicates,
+  # then add the correct one. We do this with a Python one-liner to keep it atomic.
+  local app_json patched
+  app_json=$(oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub -o json)
+  patched=$(echo "$app_json" | python3 -c "
+import json, sys
+app = json.load(sys.stdin)
+src = app['spec']['sources'][1]
+params = src.setdefault('helm', {}).setdefault('parameters', [])
+src['helm']['parameters'] = [p for p in params if p.get('name') != 'disableExternalSecrets']
+src['helm']['parameters'].append({'name': 'disableExternalSecrets', 'value': 'false'})
+print(json.dumps(app))
+") || { warn "Could not build patched regional-dr app JSON."; return; }
+
+  echo "$patched" | oc apply -f - &>/dev/null \
+    && log "disableExternalSecrets=false applied to regional-dr." \
+    || { warn "Failed to apply disableExternalSecrets override to regional-dr."; return; }
+
+  # Trigger a sync so the chart picks up the parameter change immediately.
+  oc patch application.argoproj.io regional-dr -n ramendr-starter-kit-hub \
+    --type merge \
+    -p '{"operation":{"initiatedBy":{"username":"redeploy-sh"},"sync":{}}}' \
+    &>/dev/null || true
 }
 
 wait_for_convergence() {
