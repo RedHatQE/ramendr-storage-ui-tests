@@ -427,6 +427,80 @@ wait_for_spoke_metal_nodes() {
   done
 }
 
+prepull_odf_images() {
+  # Pre-pull the large ODF CSI image (~1.4 GB) on all hub workers before ArgoCD
+  # deploys ODF DaemonSets. Concurrent pulls from registry.redhat.io across 6 nodes
+  # frequently stall TCP connections on 1-2 nodes, blocking Nooba initialization
+  # for hours (AWS NAT gateway 350s idle TCP timeout kills long-running downloads).
+  # The image is pulled into each node's local cache here so the ODF DaemonSet
+  # finds it already present (imagePullPolicy: IfNotPresent skips the pull).
+  log "Pre-pulling ODF CSI image on all hub workers (prevents concurrent-pull stalls)..."
+  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+
+  local image="registry.redhat.io/odf4/cephcsi-rhel9:latest"
+  local ns="odf-prepull"
+
+  # Use a temporary namespace so this works before openshift-storage exists.
+  oc create namespace "$ns" 2>/dev/null || true
+
+  oc apply -n "$ns" -f - <<EOF
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: odf-image-prepull
+  namespace: ${ns}
+  labels:
+    app: odf-image-prepull
+spec:
+  selector:
+    matchLabels:
+      app: odf-image-prepull
+  template:
+    metadata:
+      labels:
+        app: odf-image-prepull
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/worker: ""
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: pull
+          image: ${image}
+          command: ["/bin/true"]
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: done
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["sleep", "infinity"]
+          imagePullPolicy: IfNotPresent
+      terminationGracePeriodSeconds: 5
+EOF
+
+  log "Waiting up to 20 min for ODF image pre-pull to complete on all nodes..."
+  local tries=0
+  while [[ $tries -lt 40 ]]; do
+    local desired ready
+    desired=$(oc get daemonset odf-image-prepull -n "$ns" \
+      -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo 0)
+    ready=$(oc get daemonset odf-image-prepull -n "$ns" \
+      -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)
+    if [[ "$desired" -gt 0 && "$ready" -ge "$desired" ]]; then
+      log "ODF image pre-pull complete on all $ready nodes."
+      break
+    fi
+    # Restart pods stuck in ContainerCreating for >5 min (stalled pull).
+    oc get pods -n "$ns" -l app=odf-image-prepull --no-headers 2>/dev/null \
+      | awk '$4~/^([5-9][0-9]|[1-9][0-9]{2,})m/ && $3=="ContainerCreating" {print $1}' \
+      | xargs -r oc delete pod -n "$ns" 2>/dev/null || true
+    log "  $ready/$desired nodes ready (attempt $((tries+1))/40)..."
+    sleep 30
+    tries=$((tries + 1))
+  done
+
+  oc delete namespace "$ns" --wait=false 2>/dev/null || true
+}
+
 scale_hub_workers() {
   log "Scaling hub workers to 6 (required for ODF)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
@@ -452,6 +526,12 @@ scale_hub_workers() {
   for node in $(oc get nodes -l node-role.kubernetes.io/worker -o name 2>/dev/null); do
     oc label "$node" cluster.ocs.openshift.io/openshift-storage="" --overwrite 2>/dev/null
   done
+
+  # Pre-pull the large ODF CSI image on every hub node before ArgoCD deploys the
+  # ODF DaemonSets. Without this, all 6 nodes pull the ~1.4 GB cephcsi image
+  # simultaneously; nodes that get slow/stalled TCP connections to registry.redhat.io
+  # can hang for hours, blocking Nooba and downstream apps (opp-policy, regional-dr).
+  prepull_odf_images
 }
 
 finalize_byoc_cluster_deployments() {
