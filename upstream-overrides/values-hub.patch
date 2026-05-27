@@ -7,12 +7,12 @@ index 55e8760..3acf1ce 100644
        name: odf-multicluster-orchestrator
        namespace: openshift-operators
 +      channel: stable-4.21
- 
+
      openshift-data-foundation:
        name: odf-operator
        namespace: openshift-storage
 +      channel: stable-4.21
- 
+
    argoCD:
      resourceTrackingMethod: annotation
 @@ -129,6 +131,7 @@ clusterGroup:

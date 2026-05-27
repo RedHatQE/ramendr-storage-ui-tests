@@ -35,4 +35,3 @@ publish: External
 # Secrets (do not commit real values)
 sshKey: "<SSH_PUBLIC_KEY>"
 pullSecret: '<PULL_SECRET_JSON>'
-

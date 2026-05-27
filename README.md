@@ -100,4 +100,43 @@ Run either a full redeploy or pattern-only on an existing hub, depending on your
 Local overlays live under `overrides/` and are copied into the upstream checkout before install.
 This keeps your changes reviewable and avoids long-lived forks of upstream.
 
-Test CodeRabbit integration
+## Code quality (pre-commit)
+
+This repo uses [pre-commit](https://pre-commit.com/) to enforce linting and formatting on every commit (Python via ruff, shell via shellcheck, YAML via yamllint, plus general hygiene hooks).
+
+### Install
+
+```bash
+pip install pre-commit
+```
+
+Or, using the repo's virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pre-commit
+```
+
+### Activate the hooks
+
+Run once after cloning to install the git hook:
+
+```bash
+pre-commit install
+```
+
+After this, hooks run automatically on every `git commit`.
+
+### Run manually before pushing
+
+```bash
+pre-commit run
+```
+
+This checks only the files you have staged. Pass `--all-files` if you want to scan the entire repository at once.
+
+### CI enforcement
+
+The same checks run automatically on every pull request via `.github/workflows/pre-commit.yaml`.
+PRs that fail the checks cannot be merged.

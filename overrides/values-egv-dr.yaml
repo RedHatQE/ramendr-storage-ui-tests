@@ -72,4 +72,3 @@ vms:
 # registryCredentialExternalSecrets:
 #   windows-registry-creds:
 #     vaultKey: secret/data/global/privatevm-credentials
-

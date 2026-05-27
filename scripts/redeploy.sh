@@ -748,4 +748,3 @@ case "${1:-}" in
     full_redeploy
     ;;
 esac
-

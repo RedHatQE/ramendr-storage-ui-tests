@@ -222,4 +222,3 @@ fi
 echo ""
 log "Done. Billing for EC2, NAT gateways, and LBs stops within minutes."
 log "Run 'tail -f /tmp/destroy-*.log' to monitor full infrastructure cleanup."
-
