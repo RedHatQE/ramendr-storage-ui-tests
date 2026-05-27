@@ -43,24 +43,31 @@ class DRPCPage(BasePage):
             self.page.wait_for_load_state("domcontentloaded")
 
         # Expand "Data Services" in the left nav if collapsed.
+        # Wait for the button to be present — React may not have rendered it yet.
         data_services_btn = self.page.get_by_role("button", name="Data Services")
+        data_services_btn.wait_for(timeout=15_000)
         if data_services_btn.get_attribute("aria-expanded") == "false":
             data_services_btn.click()
 
         self.page.get_by_role("link", name="Disaster recovery").click()
-        self.page.wait_for_load_state("domcontentloaded")
+        # Wait for the horizontal tab bar to confirm the DR page has loaded.
+        self.page.locator("[data-test-id='horizontal-link-Policies']").wait_for(
+            timeout=15_000
+        )
 
     def navigate_policies_tab(self):
         """Switch to the Policies horizontal tab."""
         self.page.locator("[data-test-id='horizontal-link-Policies']").click()
-        self.page.wait_for_load_state("domcontentloaded")
+        # Wait for the table to render before assertions.
+        self.page.locator("tr[role='row']").first.wait_for(timeout=15_000)
 
     def navigate_protected_applications_tab(self):
         """Switch to the Protected applications horizontal tab."""
         self.page.locator(
             "[data-test-id='horizontal-link-Protected applications']"
         ).click()
-        self.page.wait_for_load_state("domcontentloaded")
+        # Wait for the table to render before assertions.
+        self.page.locator("tr").first.wait_for(timeout=15_000)
 
     # ------------------------------------------------------------------
     # Assertions — Policies tab
@@ -79,7 +86,9 @@ class DRPCPage(BasePage):
         data-label attributes (lowercase) for stable column matching.
         """
         row = self.page.locator("tr[role='row']").filter(
-            has=self.page.locator("td[data-label='name']", has_text=policy_name)
+            has=self.page.locator("td[data-label='name']").filter(
+                has_text=re.compile(rf"^\s*{re.escape(policy_name)}\s*$")
+            )
         )
         expect(
             row,
