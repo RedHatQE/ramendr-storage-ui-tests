@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import os
 
 import pytest
 
@@ -25,6 +26,10 @@ from utils.oc import run_oc
 _KNOWN_OUTOFSYNC_APPS = {"regional-dr"}
 
 HUB_NAMESPACE = "ramendr-starter-kit-hub"
+
+# Minimum number of VMs expected in gitops-vms on ocp-primary after a full
+# deployment. Override with RAMENDR_MIN_VM_COUNT.
+_MIN_VM_COUNT = int(os.getenv("RAMENDR_MIN_VM_COUNT", "4"))
 
 
 @pytest.mark.smoke
@@ -153,7 +158,10 @@ class TestInfraSmoke:
             primary_kubeconfig,
         )
         vms = json.loads(raw)["items"]
-        assert vms, "No VirtualMachines found in namespace gitops-vms on ocp-primary"
+        assert len(vms) >= _MIN_VM_COUNT, (
+            f"Expected at least {_MIN_VM_COUNT} VirtualMachines in gitops-vms on ocp-primary, "
+            f"found {len(vms)}. Partial deploy? Override with RAMENDR_MIN_VM_COUNT."
+        )
 
         failures = []
         for vm in vms:
@@ -173,7 +181,7 @@ class TestInfraSmoke:
     # ExternalSecrets on primary spoke
     # ------------------------------------------------------------------
 
-    @pytest.mark.skip(reason="disableExternalSecrets=true bug not yet resolved")
+    @pytest.mark.skip(reason="ExternalSecrets not created in gitops-vms — see MBP-1098")
     def test_vm_external_secrets_present(self, primary_kubeconfig):
         """At least one ExternalSecret exists in gitops-vms on ocp-primary.
 
@@ -346,7 +354,11 @@ class TestInfraSmoke:
 
 
 def _require_ui_credentials():
-    """Skip the calling test if HUB_USERNAME or HUB_PASSWORD are unset."""
+    """Skip the calling test if BASE_URL, HUB_USERNAME, or HUB_PASSWORD are unset."""
+    if not BASE_URL:
+        pytest.skip(
+            "BASE_URL is empty — set BASE_DOMAIN or RAMENDR_BASE_URL before running UI tests"
+        )
     missing = [
         name
         for name, val in [
