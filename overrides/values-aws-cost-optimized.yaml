@@ -20,4 +20,3 @@
 # - Bare-metal instances (c5n.metal, c5.metal) are required for KubeVirt VM
 # scheduling (/dev/kvm support).
 # - Keep spot for non-production testing only unless your SLOs accept this risk.
-

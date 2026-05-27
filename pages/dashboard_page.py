@@ -12,4 +12,6 @@ class DashboardPage(BasePage):
 
     def assert_page_loaded(self):
         """Verify that the dashboard (console overview) page is loaded."""
-        expect(self.page.get_by_role("heading", name=self._OVERVIEW_HEADING)).to_be_visible()
+        expect(
+            self.page.get_by_role("heading", name=self._OVERVIEW_HEADING)
+        ).to_be_visible()

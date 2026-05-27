@@ -216,7 +216,7 @@ list_cluster_resources() {
   echo ""
   echo "Step 1: Listing VM resources in namespace $VM_NAMESPACE on cluster $NON_PRIMARY_CLUSTER..."
 
-  > "$WORK_DIR/resources-list.txt"
+  : > "$WORK_DIR/resources-list.txt"
 
   local resource_types=("VirtualMachine" "Service" "Route" "ExternalSecret" "DataVolume" "DataSource")
 
@@ -415,4 +415,3 @@ main() {
 
 # Run main function
 main "$@"
-

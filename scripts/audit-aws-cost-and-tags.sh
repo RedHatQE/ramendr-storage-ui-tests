@@ -44,13 +44,14 @@ fi
 echo ""
 
 echo "## 1) EC2 compute cost grouped by owner tag"
-aws ce get-cost-and-usage \
+_ce_out1=$(aws ce get-cost-and-usage \
   --time-period "Start=${START_DATE},End=${END_DATE}" \
   --granularity MONTHLY \
   --metrics UnblendedCost \
   --group-by "Type=TAG,Key=${OWNER_TAG_KEY}" \
   --filter '{"Dimensions":{"Key":"SERVICE","Values":["Amazon Elastic Compute Cloud - Compute"]}}' \
-  --output json | python3 - <<'PY'
+  --output json)
+echo "$_ce_out1" | python3 <(cat <<'PY'
 import json
 import sys
 
@@ -71,10 +72,11 @@ for g in groups:
     unit = g.get("Metrics", {}).get("UnblendedCost", {}).get("Unit", "USD")
     print(f"{key}: {amount} {unit}")
 PY
+)
 
 echo ""
 echo "## 2) EC2 compute cost where owner tag is missing"
-aws ce get-cost-and-usage \
+_ce_out2=$(aws ce get-cost-and-usage \
   --time-period "Start=${START_DATE},End=${END_DATE}" \
   --granularity MONTHLY \
   --metrics UnblendedCost \
@@ -87,7 +89,8 @@ aws ce get-cost-and-usage \
 }
 EOF
 )" \
-  --output json | python3 - <<'PY'
+  --output json)
+echo "$_ce_out2" | python3 <(cat <<'PY'
 import json
 import sys
 
@@ -102,16 +105,18 @@ amount = total.get("Amount", "0")
 unit = total.get("Unit", "USD")
 print(f"untagged-owner EC2 compute: {amount} {unit}")
 PY
+)
 
 echo ""
 echo "## 3) Running instances missing owner tag"
 regions="$(aws ec2 describe-regions --query 'Regions[].RegionName' --output text)"
 
 for region in $regions; do
-  aws ec2 describe-instances \
+  _ec2_out=$(aws ec2 describe-instances \
     --region "$region" \
     --filters "Name=instance-state-name,Values=running,pending,stopping,stopped" \
-    --output json | python3 - "$region" "$OWNER_TAG_KEY" "$LAUNCHED_BY_TAG_KEY" "$LAUNCHED_BY_FILTER" <<'PY'
+    --output json)
+  echo "$_ec2_out" | python3 <(cat <<'PY'
 import json
 import sys
 
@@ -146,6 +151,7 @@ print(f"[{region}]")
 for iid, state, itype, az, launched_by in matches:
     print(f"  {iid}  state={state} type={itype} az={az} {launched_by_key}={launched_by}")
 PY
+  ) "$region" "$OWNER_TAG_KEY" "$LAUNCHED_BY_TAG_KEY" "$LAUNCHED_BY_FILTER"
 done
 
 echo ""

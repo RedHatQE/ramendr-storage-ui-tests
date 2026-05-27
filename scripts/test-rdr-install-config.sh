@@ -203,7 +203,7 @@ main() {
     mv "$DEFAULT_PRIMARY" "${DEFAULT_PRIMARY}.bak"
     mv "$DEFAULT_SECONDARY" "${DEFAULT_SECONDARY}.bak"
     tmpout=$(mktemp)
-    trap "mv -f '${DEFAULT_PRIMARY}.bak' '$DEFAULT_PRIMARY' 2>/dev/null; mv -f '${DEFAULT_SECONDARY}.bak' '$DEFAULT_SECONDARY' 2>/dev/null; rm -f '$tmpout'" EXIT
+    trap 'mv -f "${DEFAULT_PRIMARY}.bak" "$DEFAULT_PRIMARY" 2>/dev/null; mv -f "${DEFAULT_SECONDARY}.bak" "$DEFAULT_SECONDARY" 2>/dev/null; rm -f "$tmpout"' EXIT
     run_helm_capture -f "$MINIMAL_REGIONAL_DR" -f "$OVERRIDES" >"$tmpout"
     helm_ret=$?
     out=$(cat "$tmpout")
