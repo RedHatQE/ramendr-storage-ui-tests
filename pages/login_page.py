@@ -35,8 +35,13 @@ class LoginPage(BasePage):
             all_links = self.page.get_by_role("link").filter(
                 has=self.page.locator("span, div")
             )
-            if all_links.count() == 1:
-                idp = all_links
+            all_buttons = self.page.get_by_role("button").filter(
+                has=self.page.locator("span, div")
+            )
+            link_count = all_links.count()
+            button_count = all_buttons.count()
+            if link_count + button_count == 1:
+                idp = all_links if link_count == 1 else all_buttons
 
         if idp.count() > 0:
             idp.first.click()

@@ -33,10 +33,16 @@ All sensitive inputs must be provided externally:
 - Never write kubeconfigs or tokens into tracked paths.
 - Treat CI logs/artifacts as potentially shared; redact where necessary.
 
-## Future (UI tests)
+## UI tests
 
-Plan is to add:
+Currently implemented in `tests/ui/`:
 
-- `ui-tests/` (Python + Playwright)
-- A minimal `pyproject.toml` with Playwright tooling
+- `tests/ui/smoke/test_smoke.py` — infrastructure checks (`oc` CLI) and a Playwright UI walkthrough
+- Page objects for login, dashboard, and ACM disaster recovery navigation (`pages/`)
+- `utils/oc.py` — subprocess wrapper for `oc` CLI calls
+- `conftest.py` — session-scoped fixtures for kubeconfigs and browser context
+- `pyproject.toml` + `pytest.ini` — test runner configuration with Playwright
+
+## Future
+
 - CI entrypoints that reuse the same deployment and then run UI tests against the hub console

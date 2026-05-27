@@ -26,7 +26,11 @@ def _expand(env_var: str, default: str) -> str:
 def _read_kubeadmin_password() -> str:
     """Read the kubeadmin password written by openshift-install into the hub auth dir."""
     pw_file = (
-        Path(_expand("RAMENDR_HUB_KUBECONFIG", "~/git/hub-cluster-install/auth/kubeconfig")).parent
+        Path(
+            _expand(
+                "RAMENDR_HUB_KUBECONFIG", "~/git/hub-cluster-install/auth/kubeconfig"
+            )
+        ).parent
         / "kubeadmin-password"
     )
     try:
@@ -37,6 +41,12 @@ def _read_kubeadmin_password() -> str:
 
 HUB_PASSWORD = os.getenv("RAMENDR_HUB_PASSWORD") or _read_kubeadmin_password()
 
-HUB_KUBECONFIG = _expand("RAMENDR_HUB_KUBECONFIG", "~/git/hub-cluster-install/auth/kubeconfig")
-PRIMARY_KUBECONFIG = _expand("RAMENDR_PRIMARY_KUBECONFIG", "~/git/ocp-primary-install/auth/kubeconfig")
-SECONDARY_KUBECONFIG = _expand("RAMENDR_SECONDARY_KUBECONFIG", "~/git/ocp-secondary-install/auth/kubeconfig")
+HUB_KUBECONFIG = _expand(
+    "RAMENDR_HUB_KUBECONFIG", "~/git/hub-cluster-install/auth/kubeconfig"
+)
+PRIMARY_KUBECONFIG = _expand(
+    "RAMENDR_PRIMARY_KUBECONFIG", "~/git/ocp-primary-install/auth/kubeconfig"
+)
+SECONDARY_KUBECONFIG = _expand(
+    "RAMENDR_SECONDARY_KUBECONFIG", "~/git/ocp-secondary-install/auth/kubeconfig"
+)

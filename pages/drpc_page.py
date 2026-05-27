@@ -7,7 +7,7 @@ from playwright.sync_api import expect
 from pages.base_page import BasePage
 
 # Status text inside <span data-test="status-text"> for a healthy DRPC.
-_HEALTHY_STATUS_RE = re.compile(r"Healthy", re.IGNORECASE)
+_HEALTHY_STATUS_RE = re.compile(r"^\s*Healthy\s*$", re.IGNORECASE)
 
 
 class DRPCPage(BasePage):
@@ -38,7 +38,7 @@ class DRPCPage(BasePage):
             if fleet_item.count() == 0:
                 fleet_item = self.page.get_by_role("option", name="Fleet Management")
             if fleet_item.count() == 0:
-                fleet_item = self.page.get_by_text("Fleet Management").nth(1)
+                fleet_item = self.page.get_by_text("Fleet Management").first
             fleet_item.first.click()
             self.page.wait_for_load_state("domcontentloaded")
 
