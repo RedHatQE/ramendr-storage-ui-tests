@@ -241,28 +241,7 @@ class DRPCPage(BasePage):
 
     def assert_drpc_actions_menu(self, drpc_name: str):
         """Open DRPC actions menu and assert expected operations are available."""
-        row = self.page.locator("tr").filter(
-            has=self.page.locator(f"a[data-test='resource-link-{drpc_name}']")
-        )
-        expect(
-            row,
-            f"DRPC row '{drpc_name}' not found in the Protected applications table",
-        ).to_be_visible(timeout=10_000)
-
-        kebab = row.locator(
-            "button[aria-label='Kebab toggle'], "
-            "button[aria-label*='Kebab'], "
-            "button[aria-label*='Actions'], "
-            "button[data-test*='kebab']"
-        ).first
-        expect(
-            kebab,
-            f"DRPC '{drpc_name}': 3-dot actions button not found",
-        ).to_be_visible(timeout=10_000)
-        kebab.click()
-
-        # Wait for dropdown/menu container (PF v5 and v6).
-        self.page.locator(_DRPC_ACTIONS_MENU_LOCATOR).first.wait_for(timeout=10_000)
+        self._open_drpc_actions_menu(drpc_name)
 
         # Menu entries include description text in the same item; match by key label.
         expected_action_labels = [

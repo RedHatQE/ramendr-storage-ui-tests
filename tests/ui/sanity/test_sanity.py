@@ -5,8 +5,9 @@ Run after scripts/redeploy.sh completes.
 Usage:
     pytest tests/ui/sanity/test_sanity.py -m smoke
 
-    # Force full failover → relocate cycle (ignore resume shortcuts):
-    RAMENDR_SANITY_FORCE_FULL=1 pytest tests/ui/sanity/test_sanity.py -m smoke
+    # Default: full failover → relocate cycle (RAMENDR_SANITY_FORCE_FULL=1).
+    # Resume/adaptive mode (skip steps when cluster is already post-DR):
+    RAMENDR_SANITY_FORCE_FULL=0 pytest tests/ui/sanity/test_sanity.py -m smoke
 """
 
 import json
@@ -22,10 +23,10 @@ from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
 
-_FORCE_FULL_SANITY = os.getenv("RAMENDR_SANITY_FORCE_FULL", "").lower() in {
-    "1",
-    "true",
-    "yes",
+_FORCE_FULL_SANITY = os.getenv("RAMENDR_SANITY_FORCE_FULL", "1").lower() not in {
+    "0",
+    "false",
+    "no",
 }
 
 
