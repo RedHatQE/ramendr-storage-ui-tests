@@ -9,6 +9,21 @@ from pages.base_page import BasePage
 # Status text inside <span data-test="status-text"> for a healthy DRPC.
 _HEALTHY_STATUS_RE = re.compile(r"^\s*Healthy\s*$", re.IGNORECASE)
 
+# PatternFly / FontAwesome healthy indicator inside the DR Status cell.
+_HEALTHY_ICON_LOCATOR = (
+    ".fa-check-circle, "
+    ".pf-v5-l-check, "
+    "svg[data-icon='check-circle'], "
+    ".pf-v5-c-icon.pf-m-success, "
+    ".pf-v6-c-icon.pf-m-success"
+)
+
+# Kebab menu container — shared by assert_drpc_actions_menu and _open_drpc_actions_menu.
+_DRPC_ACTIONS_MENU_LOCATOR = (
+    "[role='menu'], .pf-v5-c-menu, .pf-v6-c-menu, "
+    ".pf-v5-c-dropdown__menu, .pf-v6-c-dropdown__menu"
+)
+
 
 class DRPCPage(BasePage):
     """ACM Data Services → Disaster Recovery page."""
@@ -170,12 +185,9 @@ class DRPCPage(BasePage):
             f"DRPC '{drpc_name}': expected cluster '{expected_cluster}'",
         ).to_have_text(expected_cluster, timeout=10_000)
 
-        # Healthy status icon should be the check-circle icon in the same cell.
-        # Match by FontAwesome check-circle path data copied from browser inspect.
+        # Healthy status icon (check-circle / success icon) in the DR Status cell.
         status_cell = row.locator("td[data-label='DR Status']")
-        healthy_icon = status_cell.locator(
-            "svg path[d^='M504 256c0 136.967-111.033 248-248 248S8 392.967 8 256']"
-        ).first
+        healthy_icon = status_cell.locator(_HEALTHY_ICON_LOCATOR).first
         expect(
             healthy_icon,
             f"DRPC '{drpc_name}': healthy checkmark icon is missing",
@@ -249,10 +261,8 @@ class DRPCPage(BasePage):
         ).to_be_visible(timeout=10_000)
         kebab.click()
 
-        # Wait for any dropdown/menu container to render after opening kebab.
-        self.page.locator(
-            "[role='menu'], .pf-v6-c-menu, .pf-v6-c-dropdown__menu, .pf-v6-c-popover"
-        ).first.wait_for(timeout=10_000)
+        # Wait for dropdown/menu container (PF v5 and v6).
+        self.page.locator(_DRPC_ACTIONS_MENU_LOCATOR).first.wait_for(timeout=10_000)
 
         # Menu entries include description text in the same item; match by key label.
         expected_action_labels = [
@@ -296,10 +306,7 @@ class DRPCPage(BasePage):
         ).to_be_visible(timeout=10_000)
         kebab.click()
 
-        self.page.locator(
-            "[role='menu'], .pf-v5-c-menu, .pf-v6-c-menu, "
-            ".pf-v5-c-dropdown__menu, .pf-v6-c-dropdown__menu"
-        ).first.wait_for(timeout=10_000)
+        self.page.locator(_DRPC_ACTIONS_MENU_LOCATOR).first.wait_for(timeout=10_000)
 
     def _select_drpc_menu_action(self, action_re: re.Pattern[str]):
         """Click one DRPC actions menu entry by text pattern."""
@@ -532,12 +539,12 @@ class DRPCPage(BasePage):
             details_toggle.click()
 
         status_cell = row.locator("td[data-label='DR Status']")
+        status_span = status_cell.locator("[data-test='status-text']").first
+        status_target = status_span if status_span.count() > 0 else status_cell
         expect(
-            status_cell,
+            status_target,
             f"DRPC '{drpc_name}' did not become Healthy",
-        ).to_contain_text(
-            re.compile(r"^\s*Healthy\s*$", re.IGNORECASE), timeout=timeout_ms
-        )
+        ).to_have_text(_HEALTHY_STATUS_RE, timeout=timeout_ms)
 
         expect(
             row.locator("td[data-label='Cluster']"),
