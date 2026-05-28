@@ -57,14 +57,19 @@ def _assert_managed_clusters_available():
     """Assert ocp-primary and ocp-secondary clusters are joined and available."""
     expected = {"ocp-primary", "ocp-secondary"}
     result = subprocess.run(  # noqa: S603
-        ["oc", f"--kubeconfig={HUB_KUBECONFIG}", "get", "managedclusters", "--output=json"],
+        [
+            "oc",
+            f"--kubeconfig={HUB_KUBECONFIG}",
+            "get",
+            "managedclusters",
+            "--output=json",
+        ],
         text=True,
         capture_output=True,
         check=False,
     )
     assert result.returncode == 0, (
-        "Failed to read managedclusters from hub.\n"
-        f"stderr:\n{result.stderr}"
+        f"Failed to read managedclusters from hub.\nstderr:\n{result.stderr}"
     )
     raw = result.stdout
     clusters = {
@@ -79,7 +84,8 @@ def _assert_managed_clusters_available():
     failures = []
     for name, cluster in clusters.items():
         conditions = {
-            c["type"]: c["status"] for c in cluster.get("status", {}).get("conditions", [])
+            c["type"]: c["status"]
+            for c in cluster.get("status", {}).get("conditions", [])
         }
         joined = conditions.get("ManagedClusterJoined", "False")
         available = conditions.get("ManagedClusterConditionAvailable", "False")
@@ -113,16 +119,14 @@ def _get_drpc_protected_condition() -> dict[str, str]:
         check=False,
     )
     assert result.returncode == 0, (
-        "Failed to read DRPlacementControl status from hub.\n"
-        f"stderr:\n{result.stderr}"
+        f"Failed to read DRPlacementControl status from hub.\nstderr:\n{result.stderr}"
     )
     drpc = json.loads(result.stdout)
     status = drpc.get("status", {})
     conditions = {c["type"]: c for c in status.get("conditions", [])}
     protected = conditions.get("Protected", {})
     resource_conditions = {
-        c["type"]: c
-        for c in status.get("resourceConditions", {}).get("conditions", [])
+        c["type"]: c for c in status.get("resourceConditions", {}).get("conditions", [])
     }
     no_conflict = resource_conditions.get("NoClusterDataConflict", {})
     return {
@@ -177,9 +181,7 @@ def _wait_for_drpc_healthy_with_recovery(
         } or drpc_page.is_protection_error_status(status)
 
         if needs_cleanup and (time.monotonic() - last_cleanup_at) > 60:
-            print(
-                f"DR status {status!r} on {cluster!r} — running non-primary cleanup"
-            )
+            print(f"DR status {status!r} on {cluster!r} — running non-primary cleanup")
             _run_cleanup_non_primary_cluster()
             last_cleanup_at = time.monotonic()
 
@@ -472,15 +474,16 @@ class TestUiSanity:
             drpc_page.initiate_relocate_dialog()
 
         if post_relocate or (
-            drpc_page.get_drpc_state("gitops-vm-protection")["cluster"]
-            == "ocp-primary"
+            drpc_page.get_drpc_state("gitops-vm-protection")["cluster"] == "ocp-primary"
             and _get_drpc_protected_condition().get("phase") == "Relocated"
         ):
             relocate_done = True
         else:
             relocate_state = drpc_page.get_drpc_state("gitops-vm-protection")
             relocate_status = relocate_state["status"].strip().lower()
-            relocate_done = relocate_state["cluster"] == "ocp-primary" and relocate_status in {
+            relocate_done = relocate_state[
+                "cluster"
+            ] == "ocp-primary" and relocate_status in {
                 "relocated",
                 "relocate complete",
                 "healthy",

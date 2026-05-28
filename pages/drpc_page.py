@@ -195,7 +195,10 @@ class DRPCPage(BasePage):
         status_text = (status_cell.inner_text() or "").strip()
         if not status_text:
             details_toggle = row.locator("button[aria-label='Details']").first
-            if details_toggle.count() > 0 and details_toggle.get_attribute("aria-expanded") == "false":
+            if (
+                details_toggle.count() > 0
+                and details_toggle.get_attribute("aria-expanded") == "false"
+            ):
                 details_toggle.click()
             status_text = (status_cell.inner_text() or "").strip()
         if not status_text:
@@ -345,7 +348,9 @@ class DRPCPage(BasePage):
             ).to_be_visible(timeout=10_000)
 
         expect(
-            dialog.get_by_role("button", name=re.compile(r"^\s*Cancel\s*$", re.IGNORECASE)),
+            dialog.get_by_role(
+                "button", name=re.compile(r"^\s*Cancel\s*$", re.IGNORECASE)
+            ),
             "Failover popup is missing Cancel button",
         ).to_be_visible(timeout=10_000)
         expect(
@@ -444,7 +449,10 @@ class DRPCPage(BasePage):
         status_cell = row.locator("td[data-label='DR Status']")
         if not (status_cell.inner_text() or "").strip():
             details_toggle = row.locator("button[aria-label='Details']").first
-            if details_toggle.count() > 0 and details_toggle.get_attribute("aria-expanded") == "false":
+            if (
+                details_toggle.count() > 0
+                and details_toggle.get_attribute("aria-expanded") == "false"
+            ):
                 details_toggle.click()
 
         expected_status_re = re.compile(
@@ -498,9 +506,7 @@ class DRPCPage(BasePage):
 
     def is_protection_error_status(self, status_text: str) -> bool:
         """Return True when UI DR status indicates a protection error."""
-        return bool(
-            re.search(r"protection\s*error", status_text or "", re.IGNORECASE)
-        )
+        return bool(re.search(r"protection\s*error", status_text or "", re.IGNORECASE))
 
     def wait_for_drpc_healthy_state(
         self,
@@ -529,7 +535,9 @@ class DRPCPage(BasePage):
         expect(
             status_cell,
             f"DRPC '{drpc_name}' did not become Healthy",
-        ).to_contain_text(re.compile(r"^\s*Healthy\s*$", re.IGNORECASE), timeout=timeout_ms)
+        ).to_contain_text(
+            re.compile(r"^\s*Healthy\s*$", re.IGNORECASE), timeout=timeout_ms
+        )
 
         expect(
             row.locator("td[data-label='Cluster']"),
@@ -554,7 +562,10 @@ class DRPCPage(BasePage):
         status_cell = row.locator("td[data-label='DR Status']")
         if not (status_cell.inner_text() or "").strip():
             details_toggle = row.locator("button[aria-label='Details']").first
-            if details_toggle.count() > 0 and details_toggle.get_attribute("aria-expanded") == "false":
+            if (
+                details_toggle.count() > 0
+                and details_toggle.get_attribute("aria-expanded") == "false"
+            ):
                 details_toggle.click()
 
         expected_status_re = re.compile(
@@ -644,9 +655,9 @@ class DRPCPage(BasePage):
 
         # Core progression steps expected during failover workflow.
         for step in ["Preparing", "Failover", "Restoring", "Clean up"]:
-            step_title = popover.locator(".pf-v5-c-progress-stepper__step-title").filter(
-                has_text=re.compile(rf"^\s*{re.escape(step)}\s*$", re.IGNORECASE)
-            )
+            step_title = popover.locator(
+                ".pf-v5-c-progress-stepper__step-title"
+            ).filter(has_text=re.compile(rf"^\s*{re.escape(step)}\s*$", re.IGNORECASE))
             expect(
                 step_title.first,
                 f"Failover progress popup is missing step: {step}",
@@ -669,7 +680,9 @@ class DRPCPage(BasePage):
             view_details,
             "Failover progress popup is missing View details/Hide details control",
         ).to_be_visible(timeout=10_000)
-        if re.search(r"View\s+details", (view_details.inner_text() or ""), re.IGNORECASE):
+        if re.search(
+            r"View\s+details", (view_details.inner_text() or ""), re.IGNORECASE
+        ):
             view_details.click()
 
         expect(
@@ -686,7 +699,9 @@ class DRPCPage(BasePage):
 
         for i in range(help_links.count()):
             href = help_links.nth(i).get_attribute("href") or ""
-            assert href.startswith("http"), f"Failover help link #{i+1} has invalid href: {href!r}"
+            assert href.startswith("http"), (
+                f"Failover help link #{i + 1} has invalid href: {href!r}"
+            )
             response = self.page.request.get(href)
             if response.status == 404:
                 # Known issue: links can return 404 in current product build.
@@ -717,9 +732,9 @@ class DRPCPage(BasePage):
         )
 
         for step in ["Preparing", "Clean up", "Syncing", "Restoring"]:
-            step_title = popover.locator(".pf-v5-c-progress-stepper__step-title").filter(
-                has_text=re.compile(rf"^\s*{re.escape(step)}\s*$", re.IGNORECASE)
-            )
+            step_title = popover.locator(
+                ".pf-v5-c-progress-stepper__step-title"
+            ).filter(has_text=re.compile(rf"^\s*{re.escape(step)}\s*$", re.IGNORECASE))
             expect(
                 step_title.first,
                 f"Relocate progress popup is missing step: {step}",
@@ -746,7 +761,9 @@ class DRPCPage(BasePage):
 
         for i in range(help_links.count()):
             href = help_links.nth(i).get_attribute("href") or ""
-            assert href.startswith("http"), f"Relocate help link #{i+1} has invalid href: {href!r}"
+            assert href.startswith("http"), (
+                f"Relocate help link #{i + 1} has invalid href: {href!r}"
+            )
             response = self.page.request.get(href)
             if response.status == 404:
                 # Known issue: links can return 404 in current product build.
