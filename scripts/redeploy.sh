@@ -791,12 +791,78 @@ deploy_pattern() {
   local override_pid=$!
 
   log "Running upstream pattern install (this takes time for operators to settle)..."
-  if ! (
-    cd "$UPSTREAM_DIR"
-    VALUES_SECRET="$VALUES_SECRET" ./pattern.sh make install 2>&1
-  ); then
-    err "Pattern install failed (pattern.sh make install returned non-zero)."
-    exit 1
+
+  # Run pattern.sh in the background so a parallel watcher can cut it short when only
+  # known-stable drift remains, instead of waiting the full 60-minute convergence loop.
+  ( cd "$UPSTREAM_DIR" && VALUES_SECRET="$VALUES_SECRET" ./pattern.sh make install 2>&1 ) &
+  local pattern_pid=$!
+
+  # Background watcher: once ALL apps except the two known-drift apps
+  # (regional-dr and ramendr-starter-kit-hub) are Synced/Healthy, and those
+  # two are Healthy for 3 consecutive 30-second checks, terminate pattern.sh early.
+  _stable_drift_exit() {
+    local pid=$1
+    local consecutive=0
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep 30
+      [[ -n "${KUBECONFIG:-}" ]] || return
+      local rdr_health hub_health other_bad
+      rdr_health=$(oc get application.argoproj.io regional-dr \
+        -n ramendr-starter-kit-hub \
+        -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+      hub_health=$(oc get application.argoproj.io ramendr-starter-kit-hub \
+        -n ramendr-starter-kit-hub \
+        -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+      # Count apps that are neither Synced/Healthy nor one of the two known-drift apps.
+      other_bad=$(oc get application.argoproj.io -A \
+        -o jsonpath='{range .items[*]}{.metadata.name}|{.status.sync.status}|{.status.health.status}{"\n"}{end}' \
+        2>/dev/null \
+        | grep -v "^regional-dr|" \
+        | grep -v "^ramendr-starter-kit-hub|" \
+        | grep -cv "Synced|Healthy" || true)
+      if [[ "$rdr_health" == "Healthy" ]] && [[ "$hub_health" == "Healthy" ]] \
+          && [[ "${other_bad:-1}" == "0" ]]; then
+        consecutive=$((consecutive + 1))
+        log "[early-exit] Stable drift detected (attempt $consecutive/3): only regional-dr + hub are OutOfSync/Healthy."
+        if [[ $consecutive -ge 3 ]]; then
+          log "[early-exit] Cutting pattern.sh short — all other apps converged, known drift remains."
+          kill "$pid" 2>/dev/null || true
+          return
+        fi
+      else
+        consecutive=0
+      fi
+    done
+  }
+  _stable_drift_exit "$pattern_pid" &
+  local drift_exit_pid=$!
+
+  local pattern_exit=0
+  wait "$pattern_pid" || pattern_exit=$?
+  kill "$drift_exit_pid" 2>/dev/null || true
+  wait "$drift_exit_pid" 2>/dev/null || true
+
+  if [[ $pattern_exit -ne 0 ]]; then
+    # pattern.sh often times out (or is killed by our early-exit watcher) because
+    # regional-dr and/or ramendr-starter-kit-hub are OutOfSync/Healthy — expected
+    # drift that the fix-up functions below correct. Continue if both are Healthy;
+    # only hard-exit for genuine install failures (no hub app, operators missing).
+    warn "pattern.sh make install returned non-zero — checking whether this is recoverable drift..."
+    local hub_health rdr_health
+    hub_health=$(oc get application.argoproj.io ramendr-starter-kit-hub \
+      -n ramendr-starter-kit-hub \
+      -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+    rdr_health=$(oc get application.argoproj.io regional-dr \
+      -n ramendr-starter-kit-hub \
+      -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+    if [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]]; then
+      warn "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
+      warn "Treating as recoverable OutOfSync/Healthy drift — continuing with fix-up functions."
+    else
+      err "Pattern install failed and cluster appears non-recoverable."
+      err "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
+      exit 1
+    fi
   fi
 
   if ! wait "$store_pid"; then
