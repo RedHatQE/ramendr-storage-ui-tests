@@ -780,16 +780,6 @@ deploy_pattern() {
   import_spoke_clusters &
   local import_pid=$!
 
-  # Patch disableExternalSecrets=false on regional-dr as a background watcher running
-  # concurrently with pattern.sh. This races against ArgoCD's first sync of regional-dr:
-  # the upstream overrides/values-egv-dr.yaml has disableExternalSecrets: true, so the
-  # first sync would deploy VMs without cloud-init or SSH key ExternalSecrets.
-  # By patching immediately when the app appears and cancelling the in-progress sync,
-  # we ensure the first PostSync hook (edge-gitops-vms-deploy.sh) runs with the correct
-  # parameter and creates both ExternalSecrets and the cloudInitConfigDrive VM volume.
-  watch_and_override_disable_external_secrets &
-  local override_pid=$!
-
   log "Running upstream pattern install (this takes time for operators to settle)..."
 
   # Run pattern.sh in the background so a parallel watcher can cut it short when only
@@ -872,23 +862,12 @@ deploy_pattern() {
 
   kill "$import_pid" 2>/dev/null || true
   wait "$import_pid" 2>/dev/null || true
-  kill "$override_pid" 2>/dev/null || true
-  wait "$override_pid" 2>/dev/null || true
 
   # Always run the safety-net check synchronously after pattern.sh returns.
   # This catches any spoke that was skipped because the namespace appeared after
   # the background job's per-cluster timeout.
   ensure_spoke_imports
   finalize_byoc_cluster_deployments
-
-  # Safety-net: apply disableExternalSecrets=false synchronously and verify ExternalSecrets
-  # were actually created on spoke clusters. If the background watcher lost the race (VMs
-  # were deployed before the parameter was applied), delete the VMs so the next ArgoCD sync
-  # re-deploys them with the correct parameter. The edge-gitops-vms-deploy PostSync hook
-  # skips the Helm apply if any VM already exists, so deleting them is the only way to
-  # force it to re-run with the updated values.
-  override_disable_external_secrets
-  ensure_vm_external_secrets
 
   log "Force-refreshing kubeconfig ExternalSecrets..."
   for cluster in ocp-primary ocp-secondary; do
@@ -897,134 +876,6 @@ deploy_pattern() {
   done
 }
 
-watch_and_override_disable_external_secrets() {
-  # Background watcher: polls until regional-dr exists, then immediately patches
-  # disableExternalSecrets=false and cancels any in-progress sync so the re-sync
-  # uses the correct value before the PostSync hook deploys VMs.
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-  local tries=0
-  until oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub &>/dev/null \
-      || [[ $tries -ge 60 ]]; do
-    tries=$((tries + 1)); sleep 15
-  done
-  if ! oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub &>/dev/null; then
-    warn "[override] regional-dr never appeared — giving up background watcher."
-    return
-  fi
-  log "[override] regional-dr found — patching disableExternalSecrets=false and cancelling sync."
-
-  local app_json patched
-  app_json=$(oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub -o json 2>/dev/null) || return
-  patched=$(echo "$app_json" | python3 -c "
-import json, sys
-app = json.load(sys.stdin)
-src = app['spec']['sources'][1]
-params = src.setdefault('helm', {}).setdefault('parameters', [])
-src['helm']['parameters'] = [p for p in params if p.get('name') != 'disableExternalSecrets']
-src['helm']['parameters'].append({'name': 'disableExternalSecrets', 'value': 'false'})
-# Cancel any in-progress sync so the re-sync picks up the new parameter.
-app.pop('operation', None)
-print(json.dumps(app))
-") || return
-
-  echo "$patched" | oc apply -f - &>/dev/null \
-    && log "[override] disableExternalSecrets=false patched on regional-dr (background)." \
-    || warn "[override] Background patch of regional-dr failed."
-
-  # Trigger a fresh sync so the updated parameter takes effect immediately.
-  oc patch application.argoproj.io regional-dr -n ramendr-starter-kit-hub \
-    --type merge \
-    -p '{"operation":{"initiatedBy":{"username":"redeploy-sh"},"sync":{}}}' \
-    &>/dev/null || true
-}
-
-ensure_vm_external_secrets() {
-  # After pattern.sh and override_disable_external_secrets, verify that
-  # ExternalSecrets exist in gitops-vms on the primary spoke. If they don't,
-  # the background watcher lost the race: VMs were deployed before the parameter
-  # was applied. Deleting the VMs forces the edge-gitops-vms-deploy PostSync hook
-  # to re-run on the next ArgoCD sync (it skips if any VM already exists).
-  log "[egv] Verifying edge VM ExternalSecrets on ocp-primary..."
-  export KUBECONFIG="$PRIMARY_INSTALL_DIR/auth/kubeconfig"
-
-  local es_count
-  es_count=$(oc get externalsecret -n gitops-vms --no-headers 2>/dev/null | wc -l | tr -d ' ')
-  if [[ "$es_count" -gt 0 ]]; then
-    log "[egv] ExternalSecrets present ($es_count) in gitops-vms — VM cloud-init/SSH is configured."
-    return
-  fi
-
-  warn "[egv] No ExternalSecrets in gitops-vms — VMs were deployed before disableExternalSecrets=false took effect."
-  warn "[egv] Deleting VMs so the next ArgoCD sync re-deploys them with cloud-init and SSH keys..."
-
-  oc delete vm -n gitops-vms --all --wait=false 2>/dev/null || true
-  oc delete virtualmachineinstance -n gitops-vms --all --wait=false 2>/dev/null || true
-
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-  # Wait a moment for VM deletion to register, then trigger a new regional-dr sync.
-  sleep 10
-  oc patch application.argoproj.io regional-dr -n ramendr-starter-kit-hub \
-    --type merge \
-    -p '{"operation":{"initiatedBy":{"username":"redeploy-sh"},"sync":{}}}' \
-    &>/dev/null || true
-
-  log "[egv] Waiting up to 20 min for VMs to be re-deployed with ExternalSecrets..."
-  local tries=0
-  while [[ $tries -lt 40 ]]; do
-    export KUBECONFIG="$PRIMARY_INSTALL_DIR/auth/kubeconfig"
-    es_count=$(oc get externalsecret -n gitops-vms --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "$es_count" -gt 0 ]]; then
-      log "[egv] ExternalSecrets created ($es_count) — VMs re-deployed correctly."
-      return
-    fi
-    tries=$((tries + 1))
-    sleep 30
-    export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-  done
-  warn "[egv] ExternalSecrets still missing after 20 min. Run manually: oc get externalsecret -n gitops-vms"
-}
-
-override_disable_external_secrets() {
-  # Add disableExternalSecrets=false as an explicit Helm parameter on the regional-dr
-  # ArgoCD app, then trigger a sync so the edge-gitops-vms chart creates the
-  # cloud-init and authorizedsshkeys ExternalSecrets on the spoke clusters.
-  log "Overriding disableExternalSecrets=false on regional-dr ArgoCD app..."
-
-  # Wait up to 5 min for the app to exist (it's created by pattern.sh during install).
-  local tries=0
-  until oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub &>/dev/null \
-      || [[ $tries -ge 10 ]]; do
-    tries=$((tries + 1)); sleep 30
-  done
-  if ! oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub &>/dev/null; then
-    warn "regional-dr ArgoCD app not found after waiting -- skipping disableExternalSecrets override."
-    return
-  fi
-
-  # Remove any pre-existing disableExternalSecrets parameter to avoid duplicates,
-  # then add the correct one. We do this with a Python one-liner to keep it atomic.
-  local app_json patched
-  app_json=$(oc get application.argoproj.io regional-dr -n ramendr-starter-kit-hub -o json)
-  patched=$(echo "$app_json" | python3 -c "
-import json, sys
-app = json.load(sys.stdin)
-src = app['spec']['sources'][1]
-params = src.setdefault('helm', {}).setdefault('parameters', [])
-src['helm']['parameters'] = [p for p in params if p.get('name') != 'disableExternalSecrets']
-src['helm']['parameters'].append({'name': 'disableExternalSecrets', 'value': 'false'})
-print(json.dumps(app))
-") || { warn "Could not build patched regional-dr app JSON."; return; }
-
-  echo "$patched" | oc apply -f - &>/dev/null \
-    && log "disableExternalSecrets=false applied to regional-dr." \
-    || { warn "Failed to apply disableExternalSecrets override to regional-dr."; return; }
-
-  # Trigger a sync so the chart picks up the parameter change immediately.
-  oc patch application.argoproj.io regional-dr -n ramendr-starter-kit-hub \
-    --type merge \
-    -p '{"operation":{"initiatedBy":{"username":"redeploy-sh"},"sync":{}}}' \
-    &>/dev/null || true
-}
 
 wait_for_convergence() {
   log "Waiting for environment convergence (ArgoCD Applications)..."
