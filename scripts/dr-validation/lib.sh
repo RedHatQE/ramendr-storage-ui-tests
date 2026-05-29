@@ -17,7 +17,9 @@ DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 DR_VALIDATION_SNAPSHOT_INTERVAL="${DR_VALIDATION_SNAPSHOT_INTERVAL:-300}"
 DR_VALIDATION_SNAPSHOT_KEEP="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
 AUTO_SNAPSHOT_ROOT="${REPO_ROOT}/.work/dr-validation-logs/auto"
+# shellcheck disable=SC2034  # used by start/stop/snapshot-daemon.sh via source
 SNAPSHOT_DAEMON_PID_FILE="${REPO_ROOT}/.work/dr-validation-snapshot-daemon.pid"
+# shellcheck disable=SC2034  # used by start/stop/snapshot-daemon.sh via source
 SNAPSHOT_DAEMON_LOG="${REPO_ROOT}/.work/dr-validation-snapshot-daemon.log"
 
 RED='\033[0;31m'
