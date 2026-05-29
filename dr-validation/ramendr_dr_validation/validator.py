@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from ramendr_dr_validation.records import TimestampRecord, parse_line
@@ -132,14 +132,18 @@ def compare_logs(
         "after_count": len(after),
         "before_last_seq": before_last,
         "after_first_seq": after_first,
-        "continues_from_before": after_first == before_last + 1 if after_first is not None else None,
+        "continues_from_before": after_first == before_last + 1
+        if after_first is not None
+        else None,
         "overlap_records_in_after": len(overlap),
         "missing_seqs_in_after": missing_in_after[:20],
         "missing_count": len(missing_in_after),
     }
 
 
-def print_report(report: ValidationReport, *, interval: float | None, verbose: bool) -> None:
+def print_report(
+    report: ValidationReport, *, interval: float | None, verbose: bool
+) -> None:
     """Print a JSON validation report to stdout (and PASS/FAIL to stderr if verbose)."""
     data = asdict(report)
     if interval is not None and report.max_seq_gap() > 0:
@@ -155,7 +159,9 @@ def print_report(report: ValidationReport, *, interval: float | None, verbose: b
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: validate one log file, optionally compare against a pre-failover baseline."""
-    parser = argparse.ArgumentParser(description="Validate a DR timestamp log for sequence gaps.")
+    parser = argparse.ArgumentParser(
+        description="Validate a DR timestamp log for sequence gaps."
+    )
     parser.add_argument("log_path", type=Path, help="Path to timestamps.log")
     parser.add_argument(
         "--interval",
@@ -163,7 +169,9 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Writer interval in seconds (for estimated RPO upper bound)",
     )
-    parser.add_argument("--compare", type=Path, help="Second log captured before failover")
+    parser.add_argument(
+        "--compare", type=Path, help="Second log captured before failover"
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 

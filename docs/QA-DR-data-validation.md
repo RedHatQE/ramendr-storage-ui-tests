@@ -77,8 +77,8 @@ After VMs and DataVolumes are removed, the script also deletes **all PVCs** in `
 
 ## Jira evidence
 
-- Attach terminal output from `post-dr-automation.sh`, or  
-- Folder `.work/dr-validation-logs/checks/<timestamp>/` (created by step 3 inside the script)  
+- Attach terminal output from `post-dr-automation.sh`, or
+- Folder `.work/dr-validation-logs/checks/<timestamp>/` (created by step 3 inside the script)
 - Paste into **your** test ticket manually (no automatic Jira integration)
 
 ---

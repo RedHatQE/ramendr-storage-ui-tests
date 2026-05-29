@@ -5,14 +5,18 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from ramendr_dr_validation.records import TimestampRecord, format_record, parse_line
 from ramendr_dr_validation.validator import compare_logs, load_records, validate_records
 
 
 def test_parse_line_roundtrip() -> None:
-    line = format_record(1, "host-a", 99, when=datetime(2026, 5, 17, 12, 0, 0, 123000, tzinfo=timezone.utc))
+    line = format_record(
+        1,
+        "host-a",
+        99,
+        when=datetime(2026, 5, 17, 12, 0, 0, 123000, tzinfo=timezone.utc),
+    )
     rec = parse_line(line, 1)
     assert rec.seq == 1
     assert rec.hostname == "host-a"
@@ -34,8 +38,12 @@ def test_validate_continuous_log(tmp_path: Path) -> None:
 def test_validate_detects_timestamp_regression(tmp_path: Path) -> None:
     log = tmp_path / "timestamps.log"
     log.write_text(
-        format_record(1, "vm-0", 1, when=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
-        + format_record(2, "vm-0", 1, when=datetime(2026, 1, 1, 11, 0, 0, tzinfo=timezone.utc)),
+        format_record(
+            1, "vm-0", 1, when=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        )
+        + format_record(
+            2, "vm-0", 1, when=datetime(2026, 1, 1, 11, 0, 0, tzinfo=timezone.utc)
+        ),
         encoding="utf-8",
     )
     records, _ = load_records(log)

@@ -35,7 +35,7 @@ replicated with the protected KubeVirt workload.
    ./scripts/dr-validation/bootstrap.sh
    ```
 
-3. **Automatic baseline** — a daemon saves logs every 5 minutes to  
+3. **Automatic baseline** — a daemon saves logs every 5 minutes to
    `.work/dr-validation-logs/auto/latest` (started by redeploy).
 4. **Run DR** — failover / relocate / failback via console (DRPC `gitops-vm-protection`).
 5. **After DR (one command)**:

@@ -45,10 +45,14 @@ def parse_line(line: str, line_no: int) -> TimestampRecord:
         raise ValueError(f"line {line_no}: invalid timestamp {ts_s!r}") from exc
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return TimestampRecord(seq=seq, timestamp=ts, hostname=host, pid=pid, line_no=line_no)
+    return TimestampRecord(
+        seq=seq, timestamp=ts, hostname=host, pid=pid, line_no=line_no
+    )
 
 
-def format_record(seq: int, hostname: str, pid: int, when: datetime | None = None) -> str:
+def format_record(
+    seq: int, hostname: str, pid: int, when: datetime | None = None
+) -> str:
     """Format a single log record as a CSV line with trailing newline."""
     when = when or datetime.now(timezone.utc)
     if when.tzinfo is None:
