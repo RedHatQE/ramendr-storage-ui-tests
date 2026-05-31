@@ -1,5 +1,8 @@
 ---
-disableExternalSecrets: true
+# Must be false so edge VMs get a cloud-init disk (user/password/SSH from Vault).
+# Secrets still come from ~/values-secret.yaml via pattern load-secrets; do not set true unless
+# you attach cloud-init another way (see dr-validation/examples/cloud-init-fragment.yaml).
+disableExternalSecrets: false
 waitForMetalNode: false
 
 vmDefaults:
