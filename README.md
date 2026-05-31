@@ -26,7 +26,7 @@ The deployment script expects tools similar to the original flow:
 - `oc`
 - `openshift-install`
 - `aws`
-- `podman`
+- `podman` — must be **running** when the pattern deploy starts (`pattern.sh` uses a utility container). On macOS, start the VM before a long redeploy or rely on `redeploy.sh` to auto-start it: `podman machine start`
 - `git`
 - `python3`
 
@@ -167,5 +167,13 @@ That single command runs cleanup (with safety guards), waits for healthy VMs, an
 See [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md) for the Jira-ready procedure.
 
 Set `SKIP_DR_VALIDATION=1` to skip writers and snapshots, or `REQUIRE_DR_VALIDATION=1` to fail redeploy if writers are not recording.
+
+If pattern deploy finished but timestamp bootstrap was skipped (e.g. interrupted redeploy), recover with:
+
+```bash
+export KUBECONFIG=~/git/hub-cluster-install/auth/kubeconfig
+./scripts/redeploy.sh --dr-bootstrap-only
+# or: ./scripts/dr-validation/bootstrap.sh && ./scripts/dr-validation/status.sh
+```
 
 See [`dr-validation/README.md`](dr-validation/README.md) for the full workflow.

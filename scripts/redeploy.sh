@@ -78,6 +78,34 @@ check_prerequisites() {
   log "All prerequisites met."
 }
 
+ensure_podman_ready() {
+  # pattern.sh runs the utility container via podman. On macOS the binary can exist
+  # while the podman machine VM is stopped (common after long cluster installs).
+  if podman info &>/dev/null; then
+    return 0
+  fi
+
+  warn "Podman is installed but not reachable (daemon/VM may be stopped)."
+
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v podman &>/dev/null; then
+    local machine
+    machine=$(podman machine list --format '{{.Name}}' 2>/dev/null | head -1 || true)
+    if [[ -n "$machine" ]]; then
+      log "Starting podman machine ${machine}..."
+      if podman machine start "$machine" &>/dev/null; then
+        sleep 3
+        podman info &>/dev/null && { log "Podman is ready."; return 0; }
+      fi
+    fi
+    err "Start Podman manually, then re-run: podman machine start"
+    err "Or install the helper: sudo podman-mac-helper install && podman machine start"
+    return 1
+  fi
+
+  err "Podman is not running. Start the Podman service/socket, then re-run deploy."
+  return 1
+}
+
 prepare_upstream() {
   log "Preparing upstream checkout at $UPSTREAM_REF..."
   mkdir -p "$WORK_DIR/upstream"
@@ -344,9 +372,14 @@ install_hub() {
 
 install_spokes() {
   log "Installing ocp-primary and ocp-secondary in parallel..."
+  local primary_pid secondary_pid failed=0
   install_one_cluster "ocp-primary" "$PRIMARY_INSTALL_DIR" &
+  primary_pid=$!
   install_one_cluster "ocp-secondary" "$SECONDARY_INSTALL_DIR" &
-  wait
+  secondary_pid=$!
+  wait "$primary_pid" || failed=1
+  wait "$secondary_pid" || failed=1
+  [[ "$failed" -eq 0 ]]
 }
 
 create_spoke_metal_machinesets() {
@@ -767,6 +800,7 @@ ensure_spoke_imports() {
 
 
 deploy_pattern() {
+  ensure_podman_ready || exit 1
   log "Deploying RamenDR pattern (upstream pinned, local overrides applied)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
@@ -881,15 +915,21 @@ wait_for_convergence() {
   log "Waiting for environment convergence (ArgoCD Applications)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
-  local tries=0
+  local tries=0 converged=0
   while [[ $tries -lt 120 ]]; do
     local unhealthy
-    unhealthy=$(oc get applications.argoproj.io -n ramendr-starter-kit-hub \
-      -o custom-columns=':.status.sync.status,:.status.health.status' --no-headers 2>/dev/null \
-      | grep -v "Synced.*Healthy" | grep -v "Synced.*Progressing" | wc -l | tr -d ' ')
+    # grep exits 1 when every app is Synced/Healthy; with pipefail that aborts redeploy.
+    unhealthy=$(set +o pipefail
+      oc get applications.argoproj.io -n ramendr-starter-kit-hub \
+        -o custom-columns=':.status.sync.status,:.status.health.status' --no-headers 2>/dev/null \
+        | grep -v "Synced.*Healthy" \
+        | grep -v "Synced.*Progressing" \
+        | wc -l \
+        | tr -d ' ')
 
-    if [[ "$unhealthy" -eq 0 ]]; then
+    if [[ "${unhealthy:-0}" -eq 0 ]]; then
       log "All ArgoCD applications are Synced/Healthy!"
+      converged=1
       break
     fi
 
@@ -904,6 +944,17 @@ wait_for_convergence() {
       done
     fi
   done
+
+  if [[ "$converged" -ne 1 ]]; then
+    warn "Timed out waiting for all hub ArgoCD apps to be Synced/Healthy (continuing)."
+  fi
+}
+
+run_post_pattern_steps() {
+  wait_for_convergence
+  setup_dr_validation
+  show_status
+  log "Post-pattern deploy steps complete!"
 }
 
 setup_dr_validation() {
@@ -1029,9 +1080,7 @@ full_redeploy() {
   wait_for_spoke_metal_nodes
 
   deploy_pattern
-  wait_for_convergence
-  setup_dr_validation
-  show_status
+  run_post_pattern_steps
   log "Full redeploy complete!"
 }
 
@@ -1053,19 +1102,22 @@ case "${1:-}" in
     scale_hub_workers
     wait_for_spoke_metal_nodes
     deploy_pattern
-    wait_for_convergence
-    setup_dr_validation
-    show_status
+    run_post_pattern_steps
+    ;;
+  --dr-bootstrap-only)
+    check_prerequisites
+    run_post_pattern_steps
     ;;
   --status)
     show_status
     ;;
   --help|-h)
-    echo "Usage: ./scripts/redeploy.sh [--destroy-only|--pattern-only|--status|--help]"
+    echo "Usage: ./scripts/redeploy.sh [--destroy-only|--pattern-only|--dr-bootstrap-only|--status|--help]"
     echo ""
     echo " (no args) Full redeploy: destroy + install all 3 clusters in parallel + deploy pinned upstream pattern"
     echo " --destroy-only Destroy all clusters and clean up AWS resources"
     echo " --pattern-only Deploy pattern on an existing hub cluster"
+    echo " --dr-bootstrap-only Wait for convergence + install/verify timestamp writers (existing env)"
     echo " --status Show current environment status"
     echo ""
     echo "Pinning:"
