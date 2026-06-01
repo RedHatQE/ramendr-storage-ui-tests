@@ -570,7 +570,7 @@ main() {
     echo "AUTO_CONFIRM=yes — proceeding with deletion (non-interactive)."
     confirm="yes"
   else
-    read -p "Do you want to proceed with deletion? (yes/no): " confirm
+    read -r -p "Do you want to proceed with deletion? (yes/no): " confirm
   fi
 
   if [[ "$confirm" != "yes" ]]; then
