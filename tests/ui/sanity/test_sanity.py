@@ -36,7 +36,10 @@ def _run_cleanup_non_primary_cluster():
     script_path = repo_root / "scripts" / "cleanup-gitops-vms-non-primary.sh"
     assert script_path.exists(), f"Cleanup script not found: {script_path}"
 
-    cmd = f"printf 'yes\\n' | {script_path}"
+    # --force bypasses the drpc-guard PlacementDecision check, which can block
+    # during an in-flight relocate triggered by the test itself (the decision
+    # is briefly empty while the relocation is progressing).
+    cmd = f"printf 'yes\\n' | {script_path} --force"
     env = os.environ.copy()
     env["KUBECONFIG"] = HUB_KUBECONFIG
     result = subprocess.run(  # noqa: S603

@@ -9,14 +9,10 @@ from pages.base_page import BasePage
 # Status text inside <span data-test="status-text"> for a healthy DRPC.
 _HEALTHY_STATUS_RE = re.compile(r"^\s*Healthy\s*$", re.IGNORECASE)
 
-# PatternFly / FontAwesome healthy indicator inside the DR Status cell.
-_HEALTHY_ICON_LOCATOR = (
-    ".fa-check-circle, "
-    ".pf-v5-l-check, "
-    "svg[data-icon='check-circle'], "
-    ".pf-v5-c-icon.pf-m-success, "
-    ".pf-v6-c-icon.pf-m-success"
-)
+# The healthy checkmark SVG carries data-test="success-icon" — a stable,
+# explicitly maintained test attribute in the ACM console.
+_HEALTHY_ICON_LOCATOR = "svg[data-test='success-icon']"
+
 
 # Kebab menu container — shared by assert_drpc_actions_menu and _open_drpc_actions_menu.
 _DRPC_ACTIONS_MENU_LOCATOR = (
@@ -185,11 +181,10 @@ class DRPCPage(BasePage):
             f"DRPC '{drpc_name}': expected cluster '{expected_cluster}'",
         ).to_have_text(expected_cluster, timeout=10_000)
 
-        # Healthy status icon (check-circle / success icon) in the DR Status cell.
-        status_cell = row.locator("td[data-label='DR Status']")
-        healthy_icon = status_cell.locator(_HEALTHY_ICON_LOCATOR).first
+        # Healthy checkmark icon — the SVG carries data-test="success-icon",
+        # a stable attribute maintained by the ACM console for testing.
         expect(
-            healthy_icon,
+            row.locator("td[data-label='DR Status']").locator(_HEALTHY_ICON_LOCATOR),
             f"DRPC '{drpc_name}': healthy checkmark icon is missing",
         ).to_be_visible(timeout=10_000)
 

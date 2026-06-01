@@ -181,7 +181,6 @@ class TestInfraSmoke:
     # ExternalSecrets on primary spoke
     # ------------------------------------------------------------------
 
-    @pytest.mark.skip(reason="ExternalSecrets not created in gitops-vms — see MBP-1098")
     def test_vm_external_secrets_present(self, primary_kubeconfig):
         """At least one ExternalSecret exists in gitops-vms on ocp-primary.
 
