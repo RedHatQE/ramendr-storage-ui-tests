@@ -5,6 +5,10 @@
 disableExternalSecrets: false
 waitForMetalNode: false
 
+edgeGitopsVms:
+  # Minimum version that supports additionalDisks (introduced in 0.5.0).
+  chartVersion: "0.5.0"
+
 vmDefaults:
   accessMode: "ReadWriteMany"
   storageClassName: "ocs-storagecluster-ceph-rbd-virtualization"
@@ -33,6 +37,11 @@ vmDefaults:
       port: 22
       protocol: TCP
       targetPort: 22
+  additionalDisks:
+    - name: data
+      storage: 10Gi
+      # accessMode, storageClassName, and volumeMode are inherited from vmDefaults
+      # (ReadWriteMany / ocs-storagecluster-ceph-rbd-virtualization / Block)
 
 vms:
   edgenode:
