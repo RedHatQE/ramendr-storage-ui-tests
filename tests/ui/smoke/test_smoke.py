@@ -177,6 +177,45 @@ class TestInfraSmoke:
             + "\n".join(f"  - {f}" for f in failures)
         )
 
+    def test_vms_have_two_data_disks(self, primary_kubeconfig):
+        """Every VM in gitops-vms on ocp-primary has exactly 2 DataVolume-backed disks.
+
+        The expected layout after the feature/add-second-disk change:
+          dataVolumeTemplates[0] — 30 Gi OS root disk  (e.g. rhel9-node-001)
+          dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. rhel9-node-001-data)
+
+        The cloud-init disk is ephemeral and is intentionally excluded from
+        this count because it is not backed by a DataVolume.
+        """
+        raw = run_oc(
+            [
+                "get",
+                "virtualmachines",
+                "-n",
+                "gitops-vms",
+                "--output=json",
+            ],
+            primary_kubeconfig,
+        )
+        vms = json.loads(raw)["items"]
+        assert vms, "No VirtualMachines found in gitops-vms on ocp-primary"
+
+        failures = []
+        for vm in vms:
+            name = vm["metadata"]["name"]
+            dvts = vm.get("spec", {}).get("dataVolumeTemplates", [])
+            if len(dvts) != 2:
+                dv_names = [d.get("metadata", {}).get("name", "?") for d in dvts]
+                failures.append(
+                    f"{name}: expected 2 DataVolumeTemplates, "
+                    f"got {len(dvts)} {dv_names}"
+                )
+
+        assert not failures, (
+            "VirtualMachine(s) do not have exactly 2 data disks:\n"
+            + "\n".join(f"  - {f}" for f in failures)
+        )
+
     # ------------------------------------------------------------------
     # ExternalSecrets on primary spoke
     # ------------------------------------------------------------------
@@ -264,7 +303,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     def test_drpc_deployed_available(self, hub_kubeconfig):
-        """DRPlacementControl gitops-vm-protection is Deployed and Available."""
+        """DRPlacementControl gitops-vm-protection is Deployed (or Relocated) and Available."""
         raw = run_oc(
             [
                 "get",
@@ -279,9 +318,10 @@ class TestInfraSmoke:
         drpc = json.loads(raw)
         status = drpc.get("status", {})
         phase = status.get("phase", "")
-        assert phase == "Deployed", (
+        # "Relocated" is a valid steady-state after a completed DR cycle.
+        assert phase in {"Deployed", "Relocated"}, (
             f"DRPlacementControl gitops-vm-protection phase is '{phase}', "
-            "expected 'Deployed'"
+            "expected 'Deployed' or 'Relocated'"
         )
 
         conditions = {c["type"]: c["status"] for c in status.get("conditions", [])}
