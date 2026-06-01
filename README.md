@@ -1,13 +1,14 @@
 # ramendr-storage-ui-tests
 
 This repository is a **consumer test harness** for the upstream validated pattern
-`[validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit)`.
+[validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit).
 
 It contains:
 
 - Deployment automation (`scripts/redeploy.sh`) that **pins upstream to `v1.1`**, applies the local customization overlays, and executes the same deployment flow currently used in the `redeploy.sh` from the forked starter-kit.
 - Override values under `overrides/` that are copied on top of the upstream `overrides/` directory before installing the pattern.
 - (Planned) UI tests using **Playwright + Python** (to be added later).
+- **RamenDR data validation** — continuous timestamp writer + post-failover log checks ([`dr-validation/README.md`](dr-validation/README.md)).
 
 ## What this repo does
 
@@ -25,7 +26,7 @@ The deployment script expects tools similar to the original flow:
 - `oc`
 - `openshift-install`
 - `aws`
-- `podman`
+- `podman` — must be **running** when the pattern deploy starts (`pattern.sh` uses a utility container). On macOS, start the VM before a long redeploy or rely on `redeploy.sh` to auto-start it: `podman machine start`
 - `git`
 - `python3`
 
@@ -56,11 +57,21 @@ Do not commit secrets to this repository.
 
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
-- Use the upstream template as a reference: `[values-secret.yaml.template](https://github.com/validatedpatterns/ramendr-starter-kit/blob/main/values-secret.yaml.template)`
+- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/validatedpatterns/ramendr-starter-kit/blob/main/values-secret.yaml.template)
+- For regional-dr cluster private-key ExternalSecrets, ensure `~/values-secret.yaml` includes hub `privatekey` paths (compare with your team's file via private DM), for example:
+
+```yaml
+- name: privatekey
+  fields:
+    - name: ssh-privatekey
+      path: ~/.ssh/id_ed25519
+    - name: ssh-publickey
+      path: ~/.ssh/id_ed25519.pub
+```
 
 ## Fork parity: BYOC and `values-hub.yaml`
 
-Upstream `v1.1` ships a stock `[values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml)`. Your fork changes that file (for example **ODF subscription channels** `stable-4.21`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
+Upstream v1.1 ships a stock [values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml). Your fork changes that file (for example **ODF subscription channels** `stable-4.21`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
 
 This repo reproduces that without forking upstream:
 
@@ -140,3 +151,29 @@ This checks only the files you have staged. Pass `--all-files` if you want to sc
 
 The same checks run automatically on every pull request via `.github/workflows/pre-commit.yaml`.
 PRs that fail the checks cannot be merged.
+
+## RamenDR data validation
+
+A full `./scripts/redeploy.sh` run ends with timestamp writers **running on all edge VMs** (one
+record every **10 seconds**) and a **rolling baseline snapshot** refreshed every 5 minutes (only the
+latest snapshot is kept as the pre-failover baseline). After failover/relocate and the UI cleanup step, run:
+
+```bash
+./scripts/dr-validation/post-dr-automation.sh
+```
+
+That single command runs cleanup (with safety guards), waits for healthy VMs, and validates data — no other manual steps.
+
+See [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md) for the Jira-ready procedure.
+
+Set `SKIP_DR_VALIDATION=1` to skip writers and snapshots, or `REQUIRE_DR_VALIDATION=1` to fail redeploy if writers are not recording.
+
+If pattern deploy finished but timestamp bootstrap was skipped (e.g. interrupted redeploy), recover with:
+
+```bash
+export KUBECONFIG=~/git/hub-cluster-install/auth/kubeconfig
+./scripts/redeploy.sh --dr-bootstrap-only
+# or: ./scripts/dr-validation/bootstrap.sh && ./scripts/dr-validation/status.sh
+```
+
+See [`dr-validation/README.md`](dr-validation/README.md) for the full workflow.

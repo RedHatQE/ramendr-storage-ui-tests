@@ -1,0 +1,25 @@
+# Fragment to merge into Vault secret global/cloud-init userData (values-secret.yaml).
+# Installs the timestamp writer on first boot. Adjust username and paths as needed.
+#
+#cloud-config
+# user: cloud-user
+# password: <set-in-values-secret>
+# chpasswd: { expire: False }
+# ssh_pwauth: true   # required for password SSH from in-cluster install/collect Jobs
+# ssh_authorized_keys:
+#   - <contents-of-vm-ssh-publickey>
+#
+#write_files:
+#  - path: /usr/local/bin/ramendr-dr-writer
+#    permissions: '0755'
+#    content: |
+#      # Paste contents of dr-validation/ramendr_dr_validation/writer.py wrapper or
+#      # deploy via scripts/dr-validation/install-writer.sh after VMs are up.
+#  - path: /etc/systemd/system/ramendr-dr-writer.service
+#    permissions: '0644'
+#    content: |
+#      # Paste dr-validation/systemd/ramendr-dr-writer.service
+#runcmd:
+#  - mkdir -p /var/lib/ramendr-dr-validation
+#  - systemctl daemon-reload
+#  - systemctl enable --now ramendr-dr-writer.service
