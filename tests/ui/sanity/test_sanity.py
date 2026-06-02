@@ -13,6 +13,7 @@ After each DR phase (failover to secondary, relocate back to primary), the test
 collects edge VM timestamp logs and asserts sequence continuity (no data-loss gaps).
 Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that step.
 Default RTO standard is 900s (15 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
+DR validation subprocess timeout defaults to 600s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
 """
 
 import json
@@ -40,6 +41,9 @@ _SKIP_DR_TIMESTAMP_VALIDATION = (
 )
 
 _MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "900"))
+_DR_VALIDATION_TIMEOUT_SECONDS = float(
+    os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600")
+)
 
 
 def _repo_root() -> Path:
@@ -79,14 +83,31 @@ def _run_dr_timestamp_validation(*, phase: str) -> None:
 
     env = os.environ.copy()
     env["KUBECONFIG"] = HUB_KUBECONFIG
-    result = subprocess.run(  # noqa: S603
-        ["bash", str(script_path)],  # noqa: S607
-        cwd=_repo_root(),
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    cmd = ["bash", str(script_path)]
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,  # noqa: S607
+            cwd=_repo_root(),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_DR_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        pytest.fail(
+            f"DR timestamp validation timed out after {phase} "
+            f"(limit={_DR_VALIDATION_TIMEOUT_SECONDS:.0f}s; "
+            "increase RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS if needed).\n"
+            f"stdout:\n{stdout}\n"
+            f"stderr:\n{stderr}"
+        )
     assert result.returncode == 0, (
         f"DR timestamp validation failed after {phase} "
         "(sequence gaps or log collect errors — see dr-validation/README.md).\n"
