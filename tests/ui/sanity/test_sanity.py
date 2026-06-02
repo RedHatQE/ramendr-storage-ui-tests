@@ -46,6 +46,12 @@ _RTO_WARN_SECONDS = float(os.getenv("RAMENDR_SANITY_RTO_WARN_SECONDS", "120"))
 _DR_VALIDATION_TIMEOUT_SECONDS = float(
     os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600")
 )
+_CLEANUP_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "RAMENDR_SANITY_CLEANUP_TIMEOUT_SECONDS",
+        os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600"),
+    )
+)
 
 
 def _repo_root() -> Path:
@@ -136,14 +142,30 @@ def _run_cleanup_non_primary_cluster():
     cmd = f"printf 'yes\\n' | {script_path} --force"
     env = os.environ.copy()
     env["KUBECONFIG"] = HUB_KUBECONFIG
-    result = subprocess.run(  # noqa: S603
-        ["bash", "-lc", cmd],  # noqa: S607
-        cwd=repo_root,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["bash", "-lc", cmd],  # noqa: S607
+            cwd=repo_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_CLEANUP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        pytest.fail(
+            "cleanup-gitops-vms-non-primary.sh timed out "
+            f"(limit={_CLEANUP_TIMEOUT_SECONDS:.0f}s; "
+            "increase RAMENDR_SANITY_CLEANUP_TIMEOUT_SECONDS if needed).\n"
+            f"stdout:\n{stdout}\n"
+            f"stderr:\n{stderr}"
+        )
     assert result.returncode == 0, (
         "cleanup-gitops-vms-non-primary.sh failed.\n"
         f"stdout:\n{result.stdout}\n"
@@ -382,7 +404,7 @@ def _run_force_full_sanity_dr_flow(
     if post_relocate_status in {
         "waitonusertocleanup",
         "action needed",
-        "relocat",
+        "relocating",
     }:
         _run_cleanup_non_primary_cluster()
 
@@ -617,7 +639,7 @@ class TestUiSanity:
             if post_relocate_status in {
                 "waitonusertocleanup",
                 "action needed",
-                "relocat",
+                "relocating",
             }:
                 _run_cleanup_non_primary_cluster()
 

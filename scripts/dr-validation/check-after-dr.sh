@@ -149,9 +149,19 @@ PY
   fi
 
   if [[ -f "$validate_json" ]]; then
-    estimated_rpo="$(python3 -c "import json; d=json.load(open('${validate_json}', encoding='utf-8')); print(d.get('estimated_rpo_seconds_upper_bound', 0.0))")"
-    missing_count="$(python3 -c "import json; d=json.load(open('${validate_json}', encoding='utf-8')); print(d.get('missing_count', 0))")"
-    rpo_exceeded="$(python3 -c "print(1 if float('${estimated_rpo}') > float('${MAX_RPO_SECONDS}') else 0)")"
+    read -r estimated_rpo missing_count rpo_exceeded < <(
+      python3 - "$validate_json" "$MAX_RPO_SECONDS" <<'PY'
+import sys
+from pathlib import Path
+
+data = __import__("json").loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+max_rpo = float(sys.argv[2])
+estimated = float(data.get("estimated_rpo_seconds_upper_bound", 0.0))
+missing = int(data.get("missing_count", 0))
+exceeded = 1 if estimated > max_rpo else 0
+print(estimated, missing, exceeded)
+PY
+    )
     if [[ "$rpo_exceeded" == "1" ]]; then
       result="FAIL"
       notes="RPO ${estimated_rpo}s > ${MAX_RPO_SECONDS}s"

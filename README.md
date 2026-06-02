@@ -113,30 +113,39 @@ This keeps your changes reviewable and avoids long-lived forks of upstream.
 
 ## Code quality (pre-commit)
 
-This repo uses [pre-commit](https://pre-commit.com/) to enforce linting and formatting (Python via ruff, shell via shellcheck, YAML via yamllint, plus general hygiene hooks).
+This repo uses [pre-commit](https://pre-commit.com/) to enforce linting and formatting on every commit (Python via ruff, shell via shellcheck, YAML via yamllint, plus general hygiene hooks).
 
-### One-time setup (automatic hooks)
-
-After cloning, run once:
+### Install
 
 ```bash
-./scripts/setup-dev.sh
+pip install pre-commit
 ```
 
-That installs git hooks for **both** `git commit` and `git push`, so formatting/lint runs locally before CI — you do not need to run `pre-commit run` manually before pushing.
-
-Opening this repo in Cursor also runs the same setup on session start (see `.cursor/hooks.json`).
-
-Optional: use a virtualenv first:
+Or, using the repo's virtual environment:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install pre-commit
-./scripts/setup-dev.sh
 ```
 
-If a hook reformats files, stage the changes and commit (or push) again.
+### Activate the hooks
+
+Run once after cloning to install the git hook:
+
+```bash
+pre-commit install
+```
+
+After this, hooks run automatically on every `git commit`.
+
+### Run manually before pushing
+
+```bash
+pre-commit run --all-files
+```
+
+If a hook reformats files, stage the changes and commit again.
 
 ### CI enforcement
 
