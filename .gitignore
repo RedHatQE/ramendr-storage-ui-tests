@@ -9,5 +9,8 @@ __pycache__/
 playwright-report/
 test-results/
 .DS_Store
-.cursor/
+.cursor/*
+!.cursor/hooks.json
+!.cursor/hooks/
+!.cursor/hooks/**
 .work/

@@ -1,3 +1,6 @@
+# Install both commit and pre-push hooks with: ./scripts/setup-dev.sh
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
   # -------------------------------------------------------------------------
   # General hygiene
