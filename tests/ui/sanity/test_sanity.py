@@ -34,9 +34,10 @@ _FORCE_FULL_SANITY = os.getenv("RAMENDR_SANITY_FORCE_FULL", "1").lower() not in 
     "no",
 }
 
-_SKIP_DR_TIMESTAMP_VALIDATION = os.getenv(
-    "RAMENDR_SANITY_SKIP_DR_VALIDATION", "0"
-).lower() in {"1", "true", "yes"} or os.getenv("SKIP_DR_VALIDATION", "0") == "1"
+_SKIP_DR_TIMESTAMP_VALIDATION = (
+    os.getenv("RAMENDR_SANITY_SKIP_DR_VALIDATION", "0").lower() in {"1", "true", "yes"}
+    or os.getenv("SKIP_DR_VALIDATION", "0") == "1"
+)
 
 _MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "900"))
 
@@ -48,7 +49,9 @@ def _repo_root() -> Path:
 def _assert_rto_within_standard(*, phase: str, started_at: float | None) -> None:
     """Assert measured failover/relocate duration is within the configured RTO."""
     if started_at is None:
-        print(f"NOTE: RTO check skipped for {phase} (operation start time not observed)")
+        print(
+            f"NOTE: RTO check skipped for {phase} (operation start time not observed)"
+        )
         return
     elapsed = time.monotonic() - started_at
     assert elapsed <= _MAX_RTO_SECONDS, (
