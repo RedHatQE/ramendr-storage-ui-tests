@@ -12,6 +12,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 export PYTHONPATH="${DR_VALIDATION_DIR}:${PYTHONPATH:-}"
 INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
+MAX_RPO_SECONDS="${DR_VALIDATION_MAX_RPO_SECONDS:-900}"
 CHECK_ROOT="${REPO_ROOT}/.work/dr-validation-logs/checks"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 AFTER_DIR="${CHECK_ROOT}/${STAMP}"
@@ -32,6 +33,8 @@ ensure_hub_kubeconfig
 PRIMARY="$(determine_primary_cluster)"
 [[ -z "$PRIMARY" ]] && PRIMARY="(unknown)"
 echo "Current primary cluster: ${PRIMARY}"
+echo ""
+echo "RPO standard (max): ${MAX_RPO_SECONDS}s"
 echo ""
 
 BASELINE_DIR=""
@@ -68,6 +71,7 @@ overall_fail=0
   echo "=========================="
   echo "Time (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "Primary:    ${PRIMARY}"
+  echo "RPO max:    ${MAX_RPO_SECONDS}s"
   echo "Baseline:   ${BASELINE_DIR:-none}"
   echo "After:      ${AFTER_DIR}"
   echo ""
@@ -84,23 +88,87 @@ else
 for after_file in "${log_files[@]}"; do
   name=$(basename "$after_file" .timestamps.log)
   result="PASS"
-  notes="no sequence gaps"
-
+  notes="continuous"
+  before_file=""
   if [[ -n "$BASELINE_DIR" ]] && [[ -f "${BASELINE_DIR}/$(basename "$after_file")" ]]; then
-    if ! python3 -m ramendr_dr_validation.validator "$after_file" \
-      --compare "${BASELINE_DIR}/$(basename "$after_file")" \
-      --interval "$INTERVAL" >/dev/null 2>"${AFTER_DIR}/${name}.validate.err"; then
+    before_file="${BASELINE_DIR}/$(basename "$after_file")"
+  fi
+  validate_json="${AFTER_DIR}/${name}.validate.json"
+  validate_err="${AFTER_DIR}/${name}.validate.err"
+
+  if ! python3 - "$after_file" "$before_file" "$INTERVAL" "$validate_json" >"$validate_err" 2>&1 <<'PY'; then
+import json
+import sys
+from pathlib import Path
+
+from ramendr_dr_validation.validator import compare_logs, load_records, validate_records
+
+after_path = Path(sys.argv[1])
+before_path_raw = sys.argv[2]
+interval = float(sys.argv[3])
+report_path = Path(sys.argv[4])
+
+records, parse_errors = load_records(after_path)
+report = validate_records(records, str(after_path))
+report.parse_errors = parse_errors
+
+comparison = None
+missing_count = 0
+if before_path_raw:
+    before_path = Path(before_path_raw)
+    before_records, before_errors = load_records(before_path)
+    report.parse_errors.extend(before_errors)
+    comparison = compare_logs(before_records, records)
+    missing_count = int(comparison.get("missing_count", 0))
+
+max_gap = report.max_seq_gap()
+estimated_rpo = max_gap * interval if max_gap > 0 else 0.0
+
+payload = {
+    "log": str(after_path),
+    "record_count": report.record_count,
+    "ok": report.ok,
+    "seq_gap_count": len(report.seq_gaps),
+    "parse_error_count": len(report.parse_errors),
+    "duplicate_seq_count": len(report.duplicate_seqs),
+    "timestamp_regression_count": len(report.timestamp_regressions),
+    "max_seq_gap": max_gap,
+    "estimated_rpo_seconds_upper_bound": estimated_rpo,
+    "comparison": comparison,
+    "missing_count": missing_count,
+}
+
+report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+if (not report.ok) or missing_count > 0:
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(1)
+PY
+    result="FAIL"
+    notes="sequence continuity/compare failed (see ${name}.validate.err)"
+    overall_fail=1
+  fi
+
+  if [[ -f "$validate_json" ]]; then
+    estimated_rpo="$(python3 -c "import json; d=json.load(open('${validate_json}', encoding='utf-8')); print(d.get('estimated_rpo_seconds_upper_bound', 0.0))")"
+    missing_count="$(python3 -c "import json; d=json.load(open('${validate_json}', encoding='utf-8')); print(d.get('missing_count', 0))")"
+    rpo_exceeded="$(python3 -c "print(1 if float('${estimated_rpo}') > float('${MAX_RPO_SECONDS}') else 0)")"
+    if [[ "$rpo_exceeded" == "1" ]]; then
       result="FAIL"
-      notes=$(grep -E 'seq_gaps|missing_count|parse_errors' "${AFTER_DIR}/${name}.validate.err" 2>/dev/null | head -1 || echo "see ${name}.validate.err")
+      notes="RPO ${estimated_rpo}s > ${MAX_RPO_SECONDS}s"
       overall_fail=1
+    elif [[ "$result" == "PASS" ]]; then
+      if [[ "$missing_count" != "0" ]]; then
+        result="FAIL"
+        notes="missing baseline sequences=${missing_count}"
+        overall_fail=1
+      else
+        notes="RPO ${estimated_rpo}s <= ${MAX_RPO_SECONDS}s"
+      fi
     fi
-  else
-    if ! python3 -m ramendr_dr_validation.validator "$after_file" --interval "$INTERVAL" \
-      >/dev/null 2>"${AFTER_DIR}/${name}.validate.err"; then
-      result="FAIL"
-      notes="sequence gaps or parse errors (see ${name}.validate.err)"
-      overall_fail=1
-    fi
+  elif [[ "$result" == "PASS" ]]; then
+    result="FAIL"
+    notes="missing validation report ${name}.validate.json"
+    overall_fail=1
   fi
 
   printf "%-28s %-8s %s\n" "$name" "$result" "$notes" | tee -a "$SUMMARY"
@@ -109,9 +177,9 @@ fi
 
 echo ""
 if [[ "$overall_fail" -eq 0 ]]; then
-  echo -e "${GREEN}Overall: PASS${NC} — no data loss detected in timestamp logs."
+  echo -e "${GREEN}Overall: PASS${NC} — timestamp continuity and RPO standard satisfied."
 else
-  echo -e "${RED}Overall: FAIL${NC} — at least one VM shows missing sequence numbers (possible data loss)."
+  echo -e "${RED}Overall: FAIL${NC} — at least one VM breached continuity or RPO standard."
 fi
 echo ""
 echo "Full report folder: ${AFTER_DIR}"
