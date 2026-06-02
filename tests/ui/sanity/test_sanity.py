@@ -13,6 +13,7 @@ After each DR phase (failover to secondary, relocate back to primary), the test
 collects edge VM timestamp logs and asserts sequence continuity (no data-loss gaps).
 Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that step.
 Default RTO standard is 900s (15 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
+Warn when RTO exceeds 120s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 15 min limit.
 DR validation subprocess timeout defaults to 600s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
 """
 
@@ -41,6 +42,7 @@ _SKIP_DR_TIMESTAMP_VALIDATION = (
 )
 
 _MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "900"))
+_RTO_WARN_SECONDS = float(os.getenv("RAMENDR_SANITY_RTO_WARN_SECONDS", "120"))
 _DR_VALIDATION_TIMEOUT_SECONDS = float(
     os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600")
 )
@@ -58,6 +60,12 @@ def _assert_rto_within_standard(*, phase: str, started_at: float | None) -> None
         )
         return
     elapsed = time.monotonic() - started_at
+    if elapsed > _RTO_WARN_SECONDS:
+        print(
+            f"WARNING: {phase} RTO exceeded {_RTO_WARN_SECONDS:.0f}s "
+            f"(elapsed={elapsed:.1f}s; DRPolicy target is ~2m). "
+            f"Still within {_MAX_RTO_SECONDS:.0f}s hard limit."
+        )
     assert elapsed <= _MAX_RTO_SECONDS, (
         f"{phase} RTO standard breached: elapsed={elapsed:.1f}s "
         f"max={_MAX_RTO_SECONDS:.1f}s. "
