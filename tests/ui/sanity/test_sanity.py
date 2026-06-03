@@ -1,6 +1,6 @@
 """UI sanity tests for the RamenDR ACM console.
 
-Run after scripts/redeploy.sh completes.
+Run after scripts/redeploy.sh completes (timestamp writers should be recording).
 
 Usage:
     pytest tests/ui/sanity/test_sanity.py -m smoke
@@ -8,6 +8,13 @@ Usage:
     # Default: full failover → relocate cycle (RAMENDR_SANITY_FORCE_FULL=1).
     # Resume/adaptive mode (skip steps when cluster is already post-DR):
     RAMENDR_SANITY_FORCE_FULL=0 pytest tests/ui/sanity/test_sanity.py -m smoke
+
+After each DR phase (failover to secondary, relocate back to primary), the test
+collects edge VM timestamp logs and asserts sequence continuity (no data-loss gaps).
+Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that step.
+Default RTO standard is 900s (15 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
+Warn when RTO exceeds 120s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 15 min limit.
+DR validation subprocess timeout defaults to 600s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
 """
 
 import json
@@ -29,10 +36,103 @@ _FORCE_FULL_SANITY = os.getenv("RAMENDR_SANITY_FORCE_FULL", "1").lower() not in 
     "no",
 }
 
+_SKIP_DR_TIMESTAMP_VALIDATION = (
+    os.getenv("RAMENDR_SANITY_SKIP_DR_VALIDATION", "0").lower() in {"1", "true", "yes"}
+    or os.getenv("SKIP_DR_VALIDATION", "0") == "1"
+)
+
+_MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "900"))
+_RTO_WARN_SECONDS = float(os.getenv("RAMENDR_SANITY_RTO_WARN_SECONDS", "120"))
+_DR_VALIDATION_TIMEOUT_SECONDS = float(
+    os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600")
+)
+_CLEANUP_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "RAMENDR_SANITY_CLEANUP_TIMEOUT_SECONDS",
+        os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600"),
+    )
+)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _assert_rto_within_standard(*, phase: str, started_at: float | None) -> None:
+    """Assert measured failover/relocate duration is within the configured RTO."""
+    if started_at is None:
+        print(
+            f"NOTE: RTO check skipped for {phase} (operation start time not observed)"
+        )
+        return
+    elapsed = time.monotonic() - started_at
+    if elapsed > _RTO_WARN_SECONDS:
+        print(
+            f"WARNING: {phase} RTO exceeded {_RTO_WARN_SECONDS:.0f}s "
+            f"(elapsed={elapsed:.1f}s; DRPolicy target is ~2m). "
+            f"Still within {_MAX_RTO_SECONDS:.0f}s hard limit."
+        )
+    assert elapsed <= _MAX_RTO_SECONDS, (
+        f"{phase} RTO standard breached: elapsed={elapsed:.1f}s "
+        f"max={_MAX_RTO_SECONDS:.1f}s. "
+        "Adjust RAMENDR_SANITY_MAX_RTO_SECONDS only if SLO changes."
+    )
+    print(
+        f"{phase} RTO check passed: elapsed={elapsed:.1f}s <= "
+        f"max={_MAX_RTO_SECONDS:.1f}s"
+    )
+
+
+def _run_dr_timestamp_validation(*, phase: str) -> None:
+    """Collect VM timestamp logs and assert continuity after failover or relocate."""
+    if _SKIP_DR_TIMESTAMP_VALIDATION:
+        print(
+            f"NOTE: Skipping DR timestamp validation after {phase} "
+            "(RAMENDR_SANITY_SKIP_DR_VALIDATION or SKIP_DR_VALIDATION)"
+        )
+        return
+
+    script_path = _repo_root() / "scripts" / "dr-validation" / "check-after-dr.sh"
+    assert script_path.exists(), f"DR validation script not found: {script_path}"
+
+    env = os.environ.copy()
+    env["KUBECONFIG"] = HUB_KUBECONFIG
+    cmd = ["bash", str(script_path)]
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,  # noqa: S607
+            cwd=_repo_root(),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_DR_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        pytest.fail(
+            f"DR timestamp validation timed out after {phase} "
+            f"(limit={_DR_VALIDATION_TIMEOUT_SECONDS:.0f}s; "
+            "increase RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS if needed).\n"
+            f"stdout:\n{stdout}\n"
+            f"stderr:\n{stderr}"
+        )
+    assert result.returncode == 0, (
+        f"DR timestamp validation failed after {phase} "
+        "(sequence gaps or log collect errors — see dr-validation/README.md).\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
 
 def _run_cleanup_non_primary_cluster():
     """Run non-primary cleanup script (auto-confirm) after failover action-needed."""
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = _repo_root()
     script_path = repo_root / "scripts" / "cleanup-gitops-vms-non-primary.sh"
     assert script_path.exists(), f"Cleanup script not found: {script_path}"
 
@@ -42,14 +142,30 @@ def _run_cleanup_non_primary_cluster():
     cmd = f"printf 'yes\\n' | {script_path} --force"
     env = os.environ.copy()
     env["KUBECONFIG"] = HUB_KUBECONFIG
-    result = subprocess.run(  # noqa: S603
-        ["bash", "-lc", cmd],  # noqa: S607
-        cwd=repo_root,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["bash", "-lc", cmd],  # noqa: S607
+            cwd=repo_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_CLEANUP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        pytest.fail(
+            "cleanup-gitops-vms-non-primary.sh timed out "
+            f"(limit={_CLEANUP_TIMEOUT_SECONDS:.0f}s; "
+            "increase RAMENDR_SANITY_CLEANUP_TIMEOUT_SECONDS if needed).\n"
+            f"stdout:\n{stdout}\n"
+            f"stderr:\n{stderr}"
+        )
     assert result.returncode == 0, (
         "cleanup-gitops-vms-non-primary.sh failed.\n"
         f"stdout:\n{result.stdout}\n"
@@ -219,6 +335,7 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.open_failover_dialog(drpc_name)
     drpc_page.assert_failover_dialog_contents()
+    failover_started_at = time.monotonic()
     drpc_page.initiate_failover_dialog()
 
     try:
@@ -251,7 +368,9 @@ def _run_force_full_sanity_dr_flow(
         expected_cluster="ocp-secondary",
         timeout_ms=900_000,
     )
+    _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
     _assert_managed_clusters_available()
+    _run_dr_timestamp_validation(phase="failover")
 
     state_before_relocate = drpc_page.get_drpc_state(drpc_name)
     assert state_before_relocate["cluster"] == "ocp-secondary", (
@@ -268,6 +387,7 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.open_relocate_dialog(drpc_name)
     drpc_page.assert_relocate_dialog_contents()
+    relocate_started_at = time.monotonic()
     drpc_page.initiate_relocate_dialog()
 
     try:
@@ -284,7 +404,7 @@ def _run_force_full_sanity_dr_flow(
     if post_relocate_status in {
         "waitonusertocleanup",
         "action needed",
-        "relocat",
+        "relocating",
     }:
         _run_cleanup_non_primary_cluster()
 
@@ -299,7 +419,9 @@ def _run_force_full_sanity_dr_flow(
         expected_cluster="ocp-primary",
         timeout_ms=900_000,
     )
+    _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
     _assert_managed_clusters_available()
+    _run_dr_timestamp_validation(phase="relocate")
 
 
 def _require_ui_credentials():
@@ -381,6 +503,8 @@ class TestUiSanity:
         )
         is_already_completed = False
         failover_initiated = False
+        failover_started_at: float | None = None
+        relocate_started_at: float | None = None
 
         # Fresh flow: healthy on primary, then trigger failover.
         if ready_for_failover:
@@ -399,6 +523,7 @@ class TestUiSanity:
             # --- Failover popup (initiate path) ---
             drpc_page.open_failover_dialog("gitops-vm-protection")
             drpc_page.assert_failover_dialog_contents()
+            failover_started_at = time.monotonic()
             drpc_page.initiate_failover_dialog()
             failover_initiated = True
         elif post_failover:
@@ -455,9 +580,13 @@ class TestUiSanity:
                 expected_cluster="ocp-secondary",
                 timeout_ms=900_000,
             )
+            _assert_rto_within_standard(
+                phase="failover", started_at=failover_started_at
+            )
 
             # --- Cluster health check before relocate ---
             _assert_managed_clusters_available()
+            _run_dr_timestamp_validation(phase="failover")
 
             state_before_relocate = drpc_page.get_drpc_state("gitops-vm-protection")
             assert state_before_relocate["cluster"] == "ocp-secondary", (
@@ -475,6 +604,7 @@ class TestUiSanity:
             # --- Relocate from secondary back to primary ---
             drpc_page.open_relocate_dialog("gitops-vm-protection")
             drpc_page.assert_relocate_dialog_contents()
+            relocate_started_at = time.monotonic()
             drpc_page.initiate_relocate_dialog()
 
         if post_relocate or (
@@ -509,7 +639,7 @@ class TestUiSanity:
             if post_relocate_status in {
                 "waitonusertocleanup",
                 "action needed",
-                "relocat",
+                "relocating",
             }:
                 _run_cleanup_non_primary_cluster()
 
@@ -525,4 +655,6 @@ class TestUiSanity:
             expected_cluster="ocp-primary",
             timeout_ms=900_000,
         )
+        _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
         _assert_managed_clusters_available()
+        _run_dr_timestamp_validation(phase="relocate")

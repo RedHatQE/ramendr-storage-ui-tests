@@ -36,9 +36,17 @@ This runs **automatically**, in order:
 
 You do **not** run `cleanup-gitops-vms-non-primary.sh` or `check-after-dr.sh` separately unless debugging.
 
-### Playwright
+### Playwright / sanity test
 
-After the UI cleanup step appears, execute:
+The UI sanity test (`tests/ui/sanity/test_sanity.py`) runs timestamp validation
+automatically after each DR phase completes (healthy on the new primary):
+
+1. After **failover** to `ocp-secondary` — `./scripts/dr-validation/check-after-dr.sh`
+2. After **relocate** back to `ocp-primary` — same check again
+
+Set `RAMENDR_SANITY_SKIP_DR_VALIDATION=1` (or `SKIP_DR_VALIDATION=1`) to skip.
+
+For manual or one-off runs after the UI cleanup step:
 
 ```bash
 ./scripts/dr-validation/post-dr-automation.sh

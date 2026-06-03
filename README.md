@@ -142,10 +142,10 @@ After this, hooks run automatically on every `git commit`.
 ### Run manually before pushing
 
 ```bash
-pre-commit run
+pre-commit run --all-files
 ```
 
-This checks only the files you have staged. Pass `--all-files` if you want to scan the entire repository at once.
+If a hook reformats files, stage the changes and commit again.
 
 ### CI enforcement
 
@@ -163,6 +163,8 @@ latest snapshot is kept as the pre-failover baseline). After failover/relocate a
 ```
 
 That single command runs cleanup (with safety guards), waits for healthy VMs, and validates data — no other manual steps.
+Defaults enforce a 15-minute standard: `DR_VALIDATION_MAX_RPO_SECONDS=900` and
+`RAMENDR_SANITY_MAX_RTO_SECONDS=900` (override via env vars if your target changes).
 
 See [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md) for the Jira-ready procedure.
 
