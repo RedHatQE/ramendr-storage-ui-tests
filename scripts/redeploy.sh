@@ -12,13 +12,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/validatedpatterns/ramendr-starter-kit}"
+UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
 UPSTREAM_REF="${UPSTREAM_REF:-v1.1}"
 
 WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
-
-UPSTREAM_OVERRIDES_DIR="${UPSTREAM_OVERRIDES_DIR:-$REPO_ROOT/upstream-overrides}"
 
 HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
 PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
@@ -120,23 +118,6 @@ prepare_upstream() {
     git fetch --tags --force origin
     git checkout --force "$UPSTREAM_REF"
   )
-
-  log "Copying local overrides into upstream checkout..."
-  mkdir -p "$UPSTREAM_DIR/overrides"
-  cp -f "$REPO_ROOT/overrides/"*.yaml "$UPSTREAM_DIR/overrides/"
-
-  if [[ -f "$UPSTREAM_OVERRIDES_DIR/values-hub.patch" ]]; then
-    log "Applying values-hub.patch (ODF channel pins + values-aws-cost-optimized extra value file)..."
-    if ! (cd "$UPSTREAM_DIR" && git apply --check "$UPSTREAM_OVERRIDES_DIR/values-hub.patch" 2>/dev/null); then
-      err "values-hub.patch does not apply cleanly against upstream $UPSTREAM_REF."
-      err "Upstream values-hub.yaml may have changed. Review and regenerate the patch:"
-      err "  cd .work/upstream/ramendr-starter-kit"
-      err "  # edit values-hub.yaml, then:"
-      err "  git diff values-hub.yaml > \$REPO_ROOT/upstream-overrides/values-hub.patch"
-      exit 1
-    fi
-    (cd "$UPSTREAM_DIR" && git apply "$UPSTREAM_OVERRIDES_DIR/values-hub.patch")
-  fi
 
   # Patch upstream pattern.sh for automation (non-TTY) and Apple Silicon (amd64 container).
   if [[ -f "$UPSTREAM_DIR/pattern.sh" ]]; then
@@ -1123,7 +1104,6 @@ case "${1:-}" in
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $UPSTREAM_REPO)"
     echo " UPSTREAM_REF            Upstream git ref (default: $UPSTREAM_REF)"
-    echo " UPSTREAM_OVERRIDES_DIR  Dir containing values-hub.patch (default: $UPSTREAM_OVERRIDES_DIR)"
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"

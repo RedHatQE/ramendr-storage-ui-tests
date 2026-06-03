@@ -4,9 +4,8 @@
 
 This repository (`ramendr-storage-ui-tests`) provides:
 
-- A reproducible way to deploy the upstream validated pattern
-`validatedpatterns/ramendr-starter-kit` pinned to **v1.1**
-- Local customization overlays (values under `overrides/`)
+- A reproducible way to deploy the fork of the upstream validated pattern
+  `elsapassaro/ramendr-starter-kit` (branch `v1.1`)
 - A home for UI tests (Playwright + Python) to validate RamenDR workflows
 
 ## Non-goals
@@ -18,9 +17,9 @@ This repository (`ramendr-storage-ui-tests`) provides:
 
 The entrypoint is `scripts/redeploy.sh`.
 
-- It clones upstream at tag `v1.1` into `.work/upstream/ramendr-starter-kit`.
-- It copies this repo�s `overrides/*.yaml` on top of upstream `overrides/`.
-- It runs the upstream deployment via upstream `pattern.sh` (utility-container).
+- It clones the fork (`elsapassaro/ramendr-starter-kit`, branch `v1.1`) into `.work/upstream/ramendr-starter-kit`.
+- All customizations (additionalDisks, chartVersion, byoc cluster names, ODF channel pins, cost-optimized values) live directly in the fork's `v1.1` branch. ArgoCD tracks the fork and picks them up automatically.
+- It runs the deployment via upstream `pattern.sh` (utility-container).
 
 All sensitive inputs must be provided externally:
 

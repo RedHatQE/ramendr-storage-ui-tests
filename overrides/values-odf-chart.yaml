@@ -1,9 +1,0 @@
----
-storageSystem:
-  deploy: false
-  inventory:
-    nodeJobLabelSelector: 'node-role.kubernetes.io/worker=,!submariner.io/gateway,!node-role.kubernetes.io/infra'
-    useSpecificNodes: false
-
-objectStorage:
-  enable: true
