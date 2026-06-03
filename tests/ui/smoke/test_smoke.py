@@ -178,7 +178,8 @@ class TestInfraSmoke:
         )
 
     def test_vms_have_two_data_disks(self, primary_kubeconfig):
-        """Every VM in gitops-vms on ocp-primary has exactly 2 DataVolume-backed disks.
+        """Every VM in gitops-vms on ocp-primary has exactly 2 DataVolume-backed disks,
+        and both corresponding PVCs are Bound.
 
         The expected layout after the feature/add-second-disk change:
           dataVolumeTemplates[0] — 30 Gi OS root disk  (e.g. rhel9-node-001)
@@ -201,6 +202,7 @@ class TestInfraSmoke:
         assert vms, "No VirtualMachines found in gitops-vms on ocp-primary"
 
         failures = []
+        expected_pvc_names = set()
         for vm in vms:
             name = vm["metadata"]["name"]
             dvts = vm.get("spec", {}).get("dataVolumeTemplates", [])
@@ -210,10 +212,40 @@ class TestInfraSmoke:
                     f"{name}: expected 2 DataVolumeTemplates, "
                     f"got {len(dvts)} {dv_names}"
                 )
+            else:
+                for dvt in dvts:
+                    expected_pvc_names.add(dvt["metadata"]["name"])
 
         assert not failures, (
             "VirtualMachine(s) do not have exactly 2 data disks:\n"
             + "\n".join(f"  - {f}" for f in failures)
+        )
+
+        # Verify every expected PVC actually exists and is Bound.
+        raw_pvcs = run_oc(
+            [
+                "get",
+                "persistentvolumeclaims",
+                "-n",
+                "gitops-vms",
+                "--output=json",
+            ],
+            primary_kubeconfig,
+        )
+        pvcs = {
+            item["metadata"]["name"]: item.get("status", {}).get("phase", "")
+            for item in json.loads(raw_pvcs)["items"]
+        }
+
+        pvc_failures = []
+        for pvc_name in sorted(expected_pvc_names):
+            phase = pvcs.get(pvc_name, "<missing>")
+            if phase != "Bound":
+                pvc_failures.append(f"{pvc_name}: phase={phase!r}")
+
+        assert not pvc_failures, (
+            "PVC(s) for VM data disks are not Bound in gitops-vms on ocp-primary:\n"
+            + "\n".join(f"  - {f}" for f in pvc_failures)
         )
 
     # ------------------------------------------------------------------
