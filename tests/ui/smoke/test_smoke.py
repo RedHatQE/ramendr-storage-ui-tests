@@ -214,7 +214,13 @@ class TestInfraSmoke:
                 )
             else:
                 for dvt in dvts:
-                    expected_pvc_names.add(dvt["metadata"]["name"])
+                    pvc_name = dvt.get("metadata", {}).get("name")
+                    if not pvc_name:
+                        failures.append(
+                            f"{name}: DataVolumeTemplate missing metadata.name"
+                        )
+                        continue
+                    expected_pvc_names.add(pvc_name)
 
         assert not failures, (
             "VirtualMachine(s) do not have exactly 2 data disks:\n"
