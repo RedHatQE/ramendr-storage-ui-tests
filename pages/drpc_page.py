@@ -87,6 +87,8 @@ class DRPCPage(BasePage):
             data_services_btn,
             "Data Services navigation group is not visible",
         ).to_be_visible(timeout=10_000)
+        if data_services_btn.get_attribute("aria-expanded") != "true":
+            data_services_btn.click()
         expect(
             data_services_btn,
             "Data Services navigation group is not expanded",
