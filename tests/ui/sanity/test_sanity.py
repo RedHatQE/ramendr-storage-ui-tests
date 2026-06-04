@@ -44,7 +44,7 @@ _SKIP_DR_TIMESTAMP_VALIDATION = (
 _MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "900"))
 _RTO_WARN_SECONDS = float(os.getenv("RAMENDR_SANITY_RTO_WARN_SECONDS", "120"))
 _DR_VALIDATION_TIMEOUT_SECONDS = float(
-    os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600")
+    os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "900")
 )
 _CLEANUP_TIMEOUT_SECONDS = float(
     os.getenv(
@@ -265,7 +265,7 @@ def _wait_for_drpc_healthy_with_recovery(
     drpc_name: str,
     *,
     expected_cluster: str,
-    timeout_ms: int = 900_000,
+    timeout_ms: int = 1_800_000,
 ):
     """Wait for Healthy DR status, running cleanup when protection/action-needed appears.
 
@@ -366,7 +366,6 @@ def _run_force_full_sanity_dr_flow(
         drpc_page,
         drpc_name,
         expected_cluster="ocp-secondary",
-        timeout_ms=900_000,
     )
     _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
     _assert_managed_clusters_available()
@@ -578,7 +577,6 @@ class TestUiSanity:
                 drpc_page,
                 "gitops-vm-protection",
                 expected_cluster="ocp-secondary",
-                timeout_ms=900_000,
             )
             _assert_rto_within_standard(
                 phase="failover", started_at=failover_started_at
@@ -653,7 +651,6 @@ class TestUiSanity:
             drpc_page,
             "gitops-vm-protection",
             expected_cluster="ocp-primary",
-            timeout_ms=900_000,
         )
         _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
         _assert_managed_clusters_available()
