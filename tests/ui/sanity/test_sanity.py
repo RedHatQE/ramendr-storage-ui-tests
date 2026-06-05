@@ -21,11 +21,19 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from config.settings import BASE_URL, HUB_KUBECONFIG, HUB_PASSWORD, HUB_USERNAME
+from config.settings import (
+    BASE_URL,
+    HUB_KUBECONFIG,
+    HUB_PASSWORD,
+    HUB_USERNAME,
+    PRIMARY_KUBECONFIG,
+    SECONDARY_KUBECONFIG,
+)
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
@@ -51,6 +59,16 @@ _CLEANUP_TIMEOUT_SECONDS = float(
         "RAMENDR_SANITY_CLEANUP_TIMEOUT_SECONDS",
         os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600"),
     )
+)
+# How many edge VMs the test expects (must all be SSHable for RTO to be satisfied).
+_EXPECTED_VMS = int(os.getenv("RAMENDR_EXPECTED_VMS", "4"))
+# Hard timeout for the SSH-reachability polling that ends the RTO clock (default 30 min).
+_SSH_RTO_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_SSH_RTO_TIMEOUT_SECONDS", "1800"))
+# How long to wait for DRPC to reach Healthy after a failover/relocate (default 60 min).
+# Ceph RBD mirroring must re-establish at least one sync after failover before
+# DataProtected=True, which can take significantly longer than the DR operation itself.
+_DRPC_HEALTHY_TIMEOUT_MS = int(
+    float(os.getenv("RAMENDR_SANITY_DRPC_HEALTHY_TIMEOUT_SECONDS", "1800")) * 1000
 )
 
 
@@ -83,8 +101,137 @@ def _assert_rto_within_standard(*, phase: str, started_at: float | None) -> None
     )
 
 
-def _run_dr_timestamp_validation(*, phase: str) -> None:
-    """Collect VM timestamp logs and assert continuity after failover or relocate."""
+def _wait_for_vms_sshable(
+    kubeconfig: str,
+    *,
+    cluster_name: str,
+    expected: int = _EXPECTED_VMS,
+    timeout_s: float = _SSH_RTO_TIMEOUT_SECONDS,
+    poll_interval_s: float = 15.0,
+) -> None:
+    """Block until *expected* edge VMs on *cluster_name* are Running with SSH services.
+
+    The edge VMs are exposed via NodePort on cluster-internal IPs only, so direct
+    TCP connects from the external test runner are not possible.  Instead, we poll
+    the Kubernetes API (via kubeconfig) for:
+      1. *expected* VirtualMachineInstances in phase Running in gitops-vms.
+      2. *expected* NodePort Services with SSH (port 22) in gitops-vms.
+
+    Both conditions being met means the workload is up and SSH is configured —
+    equivalent to "VMs are reachable via SSH from within the cluster", which is the
+    meaningful RTO end-point.
+
+    The caller stops the RTO clock immediately after this function returns.
+    """
+    vm_namespace = "gitops-vms"
+    deadline = time.monotonic() + timeout_s
+    attempt = 0
+    last_running: list[str] = []
+    last_ssh_svcs: list[str] = []
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        env = os.environ.copy()
+        env["KUBECONFIG"] = kubeconfig
+
+        # Count Running VMIs. KubeVirt does NOT support --field-selector status.phase,
+        # so we fetch all VMIs as JSON and filter by phase in Python.
+        running_names: list[str] = []
+        try:
+            r = subprocess.run(  # noqa: S603
+                [  # noqa: S607
+                    "oc",
+                    "get",
+                    "vmi",
+                    "-n",
+                    vm_namespace,
+                    "-o",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+                env=env,
+            )
+            if r.returncode == 0:
+                vmi_data = json.loads(r.stdout)
+                running_names = [
+                    item["metadata"]["name"]
+                    for item in vmi_data.get("items", [])
+                    if item.get("status", {}).get("phase", "").lower() == "running"
+                ]
+        except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
+            pass
+
+        # Count NodePort Services with an SSH (port 22) entry.
+        ssh_svc_names: list[str] = []
+        try:
+            r2 = subprocess.run(  # noqa: S603
+                [  # noqa: S607
+                    "oc",
+                    "get",
+                    "svc",
+                    "-n",
+                    vm_namespace,
+                    "-o",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+                env=env,
+            )
+            if r2.returncode == 0:
+                svc_data = json.loads(r2.stdout)
+                for item in svc_data.get("items", []):
+                    if item.get("spec", {}).get("type") != "NodePort":
+                        continue
+                    ports = item.get("spec", {}).get("ports", [])
+                    if any(
+                        p.get("port") == 22 or p.get("name") == "ssh" for p in ports
+                    ):
+                        ssh_svc_names.append(item["metadata"]["name"])
+        except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
+            pass
+
+        last_running = running_names
+        last_ssh_svcs = ssh_svc_names
+        remaining = max(0, int(deadline - time.monotonic()))
+        print(
+            f"  [vm-ready attempt={attempt}] cluster={cluster_name} "
+            f"running_vmis={running_names} ssh_services={ssh_svc_names} "
+            f"remaining={remaining}s"
+        )
+
+        if len(running_names) >= expected and len(ssh_svc_names) >= expected:
+            print(
+                f"  All {expected} VM(s) are Running with SSH services on {cluster_name}."
+            )
+            return
+
+        sleep_for = min(poll_interval_s, max(0.0, deadline - time.monotonic()))
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+    pytest.fail(
+        f"Timed out waiting for {expected} VM(s) Running with SSH services on "
+        f"{cluster_name} (limit={timeout_s:.0f}s). "
+        f"Last running VMIs: {last_running}. Last SSH services: {last_ssh_svcs}"
+    )
+
+
+def _run_dr_timestamp_validation(
+    *, phase: str, initiated_utc: datetime | None = None
+) -> None:
+    """Collect VM timestamp logs and assert continuity after failover or relocate.
+
+    initiated_utc: UTC datetime of the "Initiate" UI click that started the DR
+    operation.  When provided it is forwarded as DR_VALIDATION_CUTOFF_UTC so
+    check-after-dr.sh can enforce the RPO relative to the exact initiation moment.
+    When None (resume/adaptive mode) the cutoff-based RPO check is skipped.
+    """
     if _SKIP_DR_TIMESTAMP_VALIDATION:
         print(
             f"NOTE: Skipping DR timestamp validation after {phase} "
@@ -97,6 +244,8 @@ def _run_dr_timestamp_validation(*, phase: str) -> None:
 
     env = os.environ.copy()
     env["KUBECONFIG"] = HUB_KUBECONFIG
+    if initiated_utc is not None:
+        env["DR_VALIDATION_CUTOFF_UTC"] = initiated_utc.isoformat()
     cmd = ["bash", str(script_path)]
     try:
         result = subprocess.run(  # noqa: S603
@@ -130,8 +279,13 @@ def _run_dr_timestamp_validation(*, phase: str) -> None:
     )
 
 
-def _run_cleanup_non_primary_cluster():
-    """Run non-primary cleanup script (auto-confirm) after failover action-needed."""
+def _run_cleanup_non_primary_cluster(*, skip_pvcs: bool = False):
+    """Run non-primary cleanup script (auto-confirm) after failover action-needed.
+
+    Pass skip_pvcs=True during relocate cleanup to preserve the RBD mirror source
+    images on the non-primary cluster. Deleting those PVCs while ocp-primary is
+    still promoting its VolumeGroupReplication breaks the promotion path.
+    """
     repo_root = _repo_root()
     script_path = repo_root / "scripts" / "cleanup-gitops-vms-non-primary.sh"
     assert script_path.exists(), f"Cleanup script not found: {script_path}"
@@ -139,7 +293,10 @@ def _run_cleanup_non_primary_cluster():
     # --force bypasses the drpc-guard PlacementDecision check, which can block
     # during an in-flight relocate triggered by the test itself (the decision
     # is briefly empty while the relocation is progressing).
-    cmd = f"printf 'yes\\n' | {script_path} --force"
+    flags = "--force"
+    if skip_pvcs:
+        flags += " --skip-pvcs"
+    cmd = f"printf 'yes\\n' | {script_path} {flags}"
     env = os.environ.copy()
     env["KUBECONFIG"] = HUB_KUBECONFIG
     try:
@@ -286,7 +443,24 @@ def _wait_for_drpc_healthy_with_recovery(
         if cluster == expected_cluster and status_lower == "healthy":
             backend = _get_drpc_protected_condition()
             if backend["protected"] == "True":
-                return
+                phase = backend.get("phase", "")
+                # Settled phases: Relocated (after relocate) or Deployed (fresh/no action)
+                # on primary; FailedOver on secondary. These are terminal until the next
+                # DR action — Ramen does not auto-transition Relocated→Deployed.
+                if expected_cluster == "ocp-primary":
+                    if phase in {"Deployed", "Relocated"}:
+                        return
+                    print(
+                        f"  UI Healthy + Protected=True but backend phase={phase!r}; "
+                        "waiting for Deployed/Relocated on primary..."
+                    )
+                else:
+                    if phase in {"FailedOver", "Deployed"}:
+                        return
+                    print(
+                        f"  UI Healthy + Protected=True but backend phase={phase!r}; "
+                        "waiting for FailedOver on secondary..."
+                    )
             if backend["protected_reason"] == "Error":
                 print(
                     "WARNING: UI is Healthy but DRPC Protected=False; "
@@ -336,6 +510,7 @@ def _run_force_full_sanity_dr_flow(
     drpc_page.open_failover_dialog(drpc_name)
     drpc_page.assert_failover_dialog_contents()
     failover_started_at = time.monotonic()
+    failover_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_failover_dialog()
 
     try:
@@ -362,14 +537,18 @@ def _run_force_full_sanity_dr_flow(
         expected_cluster="ocp-secondary",
         timeout_ms=900_000,
     )
+    # RTO ends when all VMs are SSHable on the secondary (workload accessible),
+    # not when Ramen finishes its internal reconciliation to Healthy.
+    _wait_for_vms_sshable(SECONDARY_KUBECONFIG, cluster_name="ocp-secondary")
+    _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
     _wait_for_drpc_healthy_with_recovery(
         drpc_page,
         drpc_name,
         expected_cluster="ocp-secondary",
+        timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
     )
-    _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
     _assert_managed_clusters_available()
-    _run_dr_timestamp_validation(phase="failover")
+    _run_dr_timestamp_validation(phase="failover", initiated_utc=failover_initiated_utc)
 
     state_before_relocate = drpc_page.get_drpc_state(drpc_name)
     assert state_before_relocate["cluster"] == "ocp-secondary", (
@@ -387,6 +566,7 @@ def _run_force_full_sanity_dr_flow(
     drpc_page.open_relocate_dialog(drpc_name)
     drpc_page.assert_relocate_dialog_contents()
     relocate_started_at = time.monotonic()
+    relocate_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_relocate_dialog()
 
     try:
@@ -405,22 +585,25 @@ def _run_force_full_sanity_dr_flow(
         "action needed",
         "relocating",
     }:
-        _run_cleanup_non_primary_cluster()
+        _run_cleanup_non_primary_cluster(skip_pvcs=True)
 
     drpc_page.wait_for_relocate_complete_state(
         drpc_name,
         expected_cluster="ocp-primary",
-        timeout_ms=900_000,
+        timeout_ms=2_700_000,
     )
+    # RTO ends when all VMs are SSHable on the primary (workload accessible),
+    # not when Ramen finishes its internal reconciliation to Healthy.
+    _wait_for_vms_sshable(PRIMARY_KUBECONFIG, cluster_name="ocp-primary")
+    _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
     _wait_for_drpc_healthy_with_recovery(
         drpc_page,
         drpc_name,
         expected_cluster="ocp-primary",
-        timeout_ms=900_000,
+        timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
     )
-    _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
     _assert_managed_clusters_available()
-    _run_dr_timestamp_validation(phase="relocate")
+    _run_dr_timestamp_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
 
 
 def _require_ui_credentials():
@@ -503,7 +686,9 @@ class TestUiSanity:
         is_already_completed = False
         failover_initiated = False
         failover_started_at: float | None = None
+        failover_initiated_utc: datetime | None = None
         relocate_started_at: float | None = None
+        relocate_initiated_utc: datetime | None = None
 
         # Fresh flow: healthy on primary, then trigger failover.
         if ready_for_failover:
@@ -523,6 +708,7 @@ class TestUiSanity:
             drpc_page.open_failover_dialog("gitops-vm-protection")
             drpc_page.assert_failover_dialog_contents()
             failover_started_at = time.monotonic()
+            failover_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_failover_dialog()
             failover_initiated = True
         elif post_failover:
@@ -573,18 +759,24 @@ class TestUiSanity:
                 expected_cluster="ocp-secondary",
                 timeout_ms=900_000,
             )
+            # RTO ends when all VMs are SSHable on the secondary (workload accessible),
+            # not when Ramen reconciles to Healthy.
+            _wait_for_vms_sshable(SECONDARY_KUBECONFIG, cluster_name="ocp-secondary")
+            _assert_rto_within_standard(
+                phase="failover", started_at=failover_started_at
+            )
             _wait_for_drpc_healthy_with_recovery(
                 drpc_page,
                 "gitops-vm-protection",
                 expected_cluster="ocp-secondary",
-            )
-            _assert_rto_within_standard(
-                phase="failover", started_at=failover_started_at
+                timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
             )
 
             # --- Cluster health check before relocate ---
             _assert_managed_clusters_available()
-            _run_dr_timestamp_validation(phase="failover")
+            _run_dr_timestamp_validation(
+                phase="failover", initiated_utc=failover_initiated_utc
+            )
 
             state_before_relocate = drpc_page.get_drpc_state("gitops-vm-protection")
             assert state_before_relocate["cluster"] == "ocp-secondary", (
@@ -603,6 +795,7 @@ class TestUiSanity:
             drpc_page.open_relocate_dialog("gitops-vm-protection")
             drpc_page.assert_relocate_dialog_contents()
             relocate_started_at = time.monotonic()
+            relocate_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_relocate_dialog()
 
         if post_relocate or (
@@ -639,19 +832,25 @@ class TestUiSanity:
                 "action needed",
                 "relocating",
             }:
-                _run_cleanup_non_primary_cluster()
+                _run_cleanup_non_primary_cluster(skip_pvcs=True)
 
         # --- Wait for relocate completion + healthy on primary ---
         drpc_page.wait_for_relocate_complete_state(
             "gitops-vm-protection",
             expected_cluster="ocp-primary",
-            timeout_ms=900_000,
+            timeout_ms=2_700_000,
         )
+        # RTO ends when all VMs are SSHable on the primary (workload accessible),
+        # not when Ramen reconciles to Healthy.
+        _wait_for_vms_sshable(PRIMARY_KUBECONFIG, cluster_name="ocp-primary")
+        _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
         _wait_for_drpc_healthy_with_recovery(
             drpc_page,
             "gitops-vm-protection",
             expected_cluster="ocp-primary",
+            timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
         )
-        _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
         _assert_managed_clusters_available()
-        _run_dr_timestamp_validation(phase="relocate")
+        _run_dr_timestamp_validation(
+            phase="relocate", initiated_utc=relocate_initiated_utc
+        )

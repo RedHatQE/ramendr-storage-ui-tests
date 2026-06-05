@@ -12,7 +12,12 @@ source "$SCRIPT_DIR/lib.sh"
 
 export PYTHONPATH="${DR_VALIDATION_DIR}:${PYTHONPATH:-}"
 INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
-MAX_RPO_SECONDS="${DR_VALIDATION_MAX_RPO_SECONDS:-900}"
+# Default aligns with the 2m-vm DRPolicy: ≤120 s data loss is acceptable.
+# Override with DR_VALIDATION_MAX_RPO_SECONDS if the policy schedule changes.
+MAX_RPO_SECONDS="${DR_VALIDATION_MAX_RPO_SECONDS:-120}"
+# UTC datetime of the "Initiate" UI click (ISO-8601).  Set by test_sanity.py via
+# DR_VALIDATION_CUTOFF_UTC.  When empty the cutoff-based RPO check is skipped.
+CUTOFF_UTC="${DR_VALIDATION_CUTOFF_UTC:-}"
 CHECK_ROOT="${REPO_ROOT}/.work/dr-validation-logs/checks"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 AFTER_DIR="${CHECK_ROOT}/${STAMP}"
@@ -35,6 +40,11 @@ PRIMARY="$(determine_primary_cluster)"
 echo "Current primary cluster: ${PRIMARY}"
 echo ""
 echo "RPO standard (max): ${MAX_RPO_SECONDS}s"
+if [[ -n "$CUTOFF_UTC" ]]; then
+  echo "DR initiation cutoff: ${CUTOFF_UTC}"
+else
+  echo "DR initiation cutoff: (not set — cutoff-based RPO check skipped)"
+fi
 echo ""
 
 BASELINE_DIR=""
@@ -96,9 +106,10 @@ for after_file in "${log_files[@]}"; do
   validate_json="${AFTER_DIR}/${name}.validate.json"
   validate_err="${AFTER_DIR}/${name}.validate.err"
 
-  if ! python3 - "$after_file" "$before_file" "$INTERVAL" "$validate_json" >"$validate_err" 2>&1 <<'PY'; then
+  if ! python3 - "$after_file" "$before_file" "$INTERVAL" "$validate_json" "$CUTOFF_UTC" >"$validate_err" 2>&1 <<'PY'; then
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ramendr_dr_validation.validator import compare_logs, load_records, validate_records
@@ -107,6 +118,7 @@ after_path = Path(sys.argv[1])
 before_path_raw = sys.argv[2]
 interval = float(sys.argv[3])
 report_path = Path(sys.argv[4])
+cutoff_raw = sys.argv[5] if len(sys.argv) > 5 else ""
 
 records, parse_errors = load_records(after_path)
 report = validate_records(records, str(after_path))
@@ -124,6 +136,22 @@ if before_path_raw:
 max_gap = report.max_seq_gap()
 estimated_rpo = max_gap * interval if max_gap > 0 else 0.0
 
+# RPO relative to the DR initiation click: (cutoff_time - last_vm_timestamp).
+# Measures how stale the last replicated snapshot was when we declared the disaster.
+rpo_from_cutoff_seconds = None
+if cutoff_raw and records:
+    try:
+        cutoff_s = cutoff_raw if not cutoff_raw.endswith("Z") else cutoff_raw[:-1] + "+00:00"
+        cutoff_dt = datetime.fromisoformat(cutoff_s)
+        if cutoff_dt.tzinfo is None:
+            cutoff_dt = cutoff_dt.replace(tzinfo=timezone.utc)
+        last_ts = records[-1].timestamp
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        rpo_from_cutoff_seconds = (cutoff_dt - last_ts).total_seconds()
+    except (ValueError, TypeError):
+        pass
+
 payload = {
     "log": str(after_path),
     "record_count": report.record_count,
@@ -134,6 +162,7 @@ payload = {
     "timestamp_regression_count": len(report.timestamp_regressions),
     "max_seq_gap": max_gap,
     "estimated_rpo_seconds_upper_bound": estimated_rpo,
+    "rpo_from_cutoff_seconds": rpo_from_cutoff_seconds,
     "comparison": comparison,
     "missing_count": missing_count,
 }
@@ -149,7 +178,7 @@ PY
   fi
 
   if [[ -f "$validate_json" ]]; then
-    read -r estimated_rpo missing_count rpo_exceeded < <(
+    read -r estimated_rpo missing_count gap_exceeded cutoff_rpo cutoff_exceeded < <(
       python3 - "$validate_json" "$MAX_RPO_SECONDS" <<'PY'
 import sys
 from pathlib import Path
@@ -158,21 +187,30 @@ data = __import__("json").loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 max_rpo = float(sys.argv[2])
 estimated = float(data.get("estimated_rpo_seconds_upper_bound", 0.0))
 missing = int(data.get("missing_count", 0))
-exceeded = 1 if estimated > max_rpo else 0
-print(estimated, missing, exceeded)
+gap_exceeded = 1 if estimated > max_rpo else 0
+cutoff_val = data.get("rpo_from_cutoff_seconds")
+cutoff_rpo = float(cutoff_val) if cutoff_val is not None else -1.0
+cutoff_exceeded = 1 if (cutoff_val is not None and cutoff_rpo > max_rpo) else 0
+print(estimated, missing, gap_exceeded, cutoff_rpo, cutoff_exceeded)
 PY
     )
-    if [[ "$rpo_exceeded" == "1" ]]; then
+    if [[ "$gap_exceeded" == "1" ]]; then
       result="FAIL"
-      notes="RPO ${estimated_rpo}s > ${MAX_RPO_SECONDS}s"
+      notes="sequence-gap RPO ${estimated_rpo}s > ${MAX_RPO_SECONDS}s"
+      overall_fail=1
+    elif [[ "$cutoff_exceeded" == "1" ]]; then
+      result="FAIL"
+      notes="cutoff RPO ${cutoff_rpo}s > ${MAX_RPO_SECONDS}s (data older than initiation by >${MAX_RPO_SECONDS}s)"
       overall_fail=1
     elif [[ "$result" == "PASS" ]]; then
       if [[ "$missing_count" != "0" ]]; then
         result="FAIL"
         notes="missing baseline sequences=${missing_count}"
         overall_fail=1
+      elif [[ "$cutoff_rpo" != "-1" ]]; then
+        notes="cutoff RPO ${cutoff_rpo}s <= ${MAX_RPO_SECONDS}s (gap RPO ${estimated_rpo}s)"
       else
-        notes="RPO ${estimated_rpo}s <= ${MAX_RPO_SECONDS}s"
+        notes="gap RPO ${estimated_rpo}s <= ${MAX_RPO_SECONDS}s"
       fi
     fi
   elif [[ "$result" == "PASS" ]]; then

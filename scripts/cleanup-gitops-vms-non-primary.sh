@@ -13,7 +13,9 @@ set -euo pipefail
 # 2. List VM-related resources directly from the non-primary cluster
 # 3. Delete them from the gitops-vms namespace
 # 4. Delete all PVCs in gitops-vms (including stuck Terminating PVCs held by Ramen DR finalizers)
+#    Skipped when --skip-pvcs is passed (use during relocate to preserve RBD mirror source images)
 # 5. Remove orphan PVs that were bound to gitops-vms (Retain reclaim policy)
+#    Skipped when --skip-pvcs is passed
 
 # Configuration
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,11 +33,13 @@ NC='\033[0m' # No Color
 
 AUTO_CONFIRM="${AUTO_CONFIRM:-no}"
 CLEANUP_FORCE=0
+SKIP_PVCS=0
 CLUSTER_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes | -y) AUTO_CONFIRM=yes; shift ;;
     --force) CLEANUP_FORCE=1; shift ;;
+    --skip-pvcs) SKIP_PVCS=1; shift ;;
     --) shift; break ;;
     -*)
       echo -e "${RED}Unknown option: $1${NC}" >&2
@@ -417,6 +421,8 @@ cleanup_pvcs() {
   while IFS= read -r pvc; do
     [[ -z "$pvc" ]] && continue
     echo " Deleting PVC: $pvc"
+    # --wait=false returns immediately so Ramen/CDI finalizers don't block here.
+    # The retry loop below clears any remaining finalizers.
     if oc --kubeconfig="$KUBECONFIG" delete pvc "$pvc" -n "$VM_NAMESPACE" --ignore-not-found --wait=false &>/dev/null; then
       echo -e " ${GREEN}✅ Delete requested: $pvc${NC}"
       deleted_count=$((deleted_count + 1))
@@ -591,15 +597,25 @@ main() {
   # Force-delete any leftover virt-launcher pods not in Running state
   cleanup_virt_launcher_pods
 
-  # Always remove PVCs and gitops-vms PVs on the non-primary spoke
-  if ! cleanup_pvcs; then
-    echo -e "${RED}Error: PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
-    exit 1
-  fi
+  # Remove PVCs and gitops-vms PVs on the non-primary spoke.
+  # Skipped with --skip-pvcs: during a relocate the non-primary holds the active RBD
+  # mirror source images; deleting them breaks VolumeGroupReplication promotion on the
+  # returning primary. RamenDR demotes and cleans those PVCs itself once promotion
+  # completes.
+  if [[ "$SKIP_PVCS" -eq 1 ]]; then
+    echo ""
+    echo "Step 4: Skipping PVC deletion (--skip-pvcs). RamenDR will manage PVC cleanup."
+    echo "Step 5: Skipping PV deletion (--skip-pvcs)."
+  else
+    if ! cleanup_pvcs; then
+      echo -e "${RED}Error: PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
+      exit 1
+    fi
 
-  if ! cleanup_gitops_pvs; then
-    echo -e "${YELLOW}Warning: Some orphan PVs may remain on $NON_PRIMARY_CLUSTER${NC}"
-    exit 1
+    if ! cleanup_gitops_pvs; then
+      echo -e "${YELLOW}Warning: Some orphan PVs may remain on $NON_PRIMARY_CLUSTER${NC}"
+      exit 1
+    fi
   fi
 
   echo ""
@@ -608,7 +624,11 @@ main() {
   echo "Resources were deleted from:"
   echo " - Cluster: $NON_PRIMARY_CLUSTER"
   echo " - Namespace: $VM_NAMESPACE"
-  echo " (includes all PVCs and gitops-vms-bound PVs)"
+  if [[ "$SKIP_PVCS" -eq 1 ]]; then
+    echo " (VMs/VMIs/Services/ExternalSecrets/DataVolumes only — PVCs/PVs preserved)"
+  else
+    echo " (includes all PVCs and gitops-vms-bound PVs)"
+  fi
 }
 
 # Run main function
