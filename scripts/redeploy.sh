@@ -13,7 +13,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-v1.1}"
+UPSTREAM_REF="${UPSTREAM_REF:-c025108811561fef71b59f797123d9e1066d93b0}"
+# Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
+# The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-v1.1}"
 
 WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
@@ -116,7 +119,10 @@ prepare_upstream() {
   (
     cd "$UPSTREAM_DIR"
     git fetch --tags --force origin
-    git checkout --force "$UPSTREAM_REF"
+    # Use `checkout -B` so HEAD lands on a named local branch even when UPSTREAM_REF
+    # is a bare commit SHA. Without a branch name the upstream pattern's Makefile
+    # cannot derive target_branch and aborts with "Could not determine target branch".
+    git checkout -B "$UPSTREAM_BRANCH" "$UPSTREAM_REF"
   )
 
   # Patch upstream pattern.sh for automation (non-TTY) and Apple Silicon (amd64 container).
@@ -1103,7 +1109,8 @@ case "${1:-}" in
     echo ""
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $UPSTREAM_REPO)"
-    echo " UPSTREAM_REF            Upstream git ref (default: $UPSTREAM_REF)"
+    echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
+    echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
