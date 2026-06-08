@@ -101,7 +101,7 @@ def _assert_rto_within_standard(*, phase: str, started_at: float | None) -> None
     )
 
 
-def _wait_for_vms_sshable(
+def _wait_for_vms_running_with_ssh_service(
     kubeconfig: str,
     *,
     cluster_name: str,
@@ -117,9 +117,10 @@ def _wait_for_vms_sshable(
       1. *expected* VirtualMachineInstances in phase Running in gitops-vms.
       2. *expected* NodePort Services with SSH (port 22) in gitops-vms.
 
-    Both conditions being met means the workload is up and SSH is configured —
-    equivalent to "VMs are reachable via SSH from within the cluster", which is the
-    meaningful RTO end-point.
+    Both conditions being met means the VM infrastructure is up and SSH is
+    configured on the cluster side.  Actual end-to-end SSH connectivity is not
+    verified here because NodePorts are on cluster-internal IPs unreachable from
+    the external test runner.
 
     The caller stops the RTO clock immediately after this function returns.
     """
@@ -539,7 +540,9 @@ def _run_force_full_sanity_dr_flow(
     )
     # RTO ends when all VMs are SSHable on the secondary (workload accessible),
     # not when Ramen finishes its internal reconciliation to Healthy.
-    _wait_for_vms_sshable(SECONDARY_KUBECONFIG, cluster_name="ocp-secondary")
+    _wait_for_vms_running_with_ssh_service(
+        SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
+    )
     _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
     _wait_for_drpc_healthy_with_recovery(
         drpc_page,
@@ -594,7 +597,9 @@ def _run_force_full_sanity_dr_flow(
     )
     # RTO ends when all VMs are SSHable on the primary (workload accessible),
     # not when Ramen finishes its internal reconciliation to Healthy.
-    _wait_for_vms_sshable(PRIMARY_KUBECONFIG, cluster_name="ocp-primary")
+    _wait_for_vms_running_with_ssh_service(
+        PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
+    )
     _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
     _wait_for_drpc_healthy_with_recovery(
         drpc_page,
@@ -761,7 +766,9 @@ class TestUiSanity:
             )
             # RTO ends when all VMs are SSHable on the secondary (workload accessible),
             # not when Ramen reconciles to Healthy.
-            _wait_for_vms_sshable(SECONDARY_KUBECONFIG, cluster_name="ocp-secondary")
+            _wait_for_vms_running_with_ssh_service(
+                SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
+            )
             _assert_rto_within_standard(
                 phase="failover", started_at=failover_started_at
             )
@@ -842,7 +849,9 @@ class TestUiSanity:
         )
         # RTO ends when all VMs are SSHable on the primary (workload accessible),
         # not when Ramen reconciles to Healthy.
-        _wait_for_vms_sshable(PRIMARY_KUBECONFIG, cluster_name="ocp-primary")
+        _wait_for_vms_running_with_ssh_service(
+            PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
+        )
         _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
         _wait_for_drpc_healthy_with_recovery(
             drpc_page,

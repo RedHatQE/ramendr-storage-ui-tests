@@ -136,8 +136,12 @@ if before_path_raw:
 max_gap = report.max_seq_gap()
 estimated_rpo = max_gap * interval if max_gap > 0 else 0.0
 
-# RPO relative to the DR initiation click: (cutoff_time - last_vm_timestamp).
+# RPO relative to the DR initiation click: (cutoff_time - last_pre_cutoff_vm_timestamp).
 # Measures how stale the last replicated snapshot was when we declared the disaster.
+#
+# We filter to records written BEFORE the cutoff because after failover/relocate the
+# VMs resume writing new timestamps on the target cluster.  Using records[-1] (the
+# latest overall) would yield a negative or near-zero RPO that hides real data loss.
 rpo_from_cutoff_seconds = None
 if cutoff_raw and records:
     try:
@@ -145,10 +149,16 @@ if cutoff_raw and records:
         cutoff_dt = datetime.fromisoformat(cutoff_s)
         if cutoff_dt.tzinfo is None:
             cutoff_dt = cutoff_dt.replace(tzinfo=timezone.utc)
-        last_ts = records[-1].timestamp
-        if last_ts.tzinfo is None:
-            last_ts = last_ts.replace(tzinfo=timezone.utc)
-        rpo_from_cutoff_seconds = (cutoff_dt - last_ts).total_seconds()
+        pre_cutoff = [
+            r for r in records
+            if (r.timestamp if r.timestamp.tzinfo else r.timestamp.replace(tzinfo=timezone.utc))
+            <= cutoff_dt
+        ]
+        if pre_cutoff:
+            last_ts = pre_cutoff[-1].timestamp
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            rpo_from_cutoff_seconds = (cutoff_dt - last_ts).total_seconds()
     except (ValueError, TypeError):
         pass
 
