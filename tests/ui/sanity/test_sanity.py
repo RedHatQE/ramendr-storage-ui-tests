@@ -423,6 +423,7 @@ def _wait_for_drpc_healthy_with_recovery(
     drpc_name: str,
     *,
     expected_cluster: str,
+    cleanup_skip_pvcs: bool = False,
     timeout_ms: int = 1_800_000,
 ):
     """Wait for Healthy DR status, running cleanup when protection/action-needed appears.
@@ -430,6 +431,11 @@ def _wait_for_drpc_healthy_with_recovery(
     Protection error is usually transient after manual cleanup: Ramen reports
     conflicting workload data on the non-primary cluster until that spoke is
     cleaned and reconciliation completes.
+
+    cleanup_skip_pvcs: when True, PVC/PV deletion is skipped during any recovery
+    cleanup triggered inside this wait.  Must be True on the relocate path to avoid
+    deleting secondary PVCs while ocp-primary is still promoting its
+    VolumeGroupReplication (the same race the --skip-pvcs flag was introduced to fix).
     """
     poll_interval_ms = 30_000
     deadline = time.monotonic() + (timeout_ms / 1000)
@@ -456,7 +462,7 @@ def _wait_for_drpc_healthy_with_recovery(
                         "waiting for Deployed/Relocated on primary..."
                     )
                 else:
-                    if phase in {"FailedOver", "Deployed"}:
+                    if phase == "FailedOver":
                         return
                     print(
                         f"  UI Healthy + Protected=True but backend phase={phase!r}; "
@@ -477,7 +483,7 @@ def _wait_for_drpc_healthy_with_recovery(
 
         if needs_cleanup and (time.monotonic() - last_cleanup_at) > 60:
             print(f"DR status {status!r} on {cluster!r} — running non-primary cleanup")
-            _run_cleanup_non_primary_cluster()
+            _run_cleanup_non_primary_cluster(skip_pvcs=cleanup_skip_pvcs)
             last_cleanup_at = time.monotonic()
 
         remaining_ms = int((deadline - time.monotonic()) * 1000)
@@ -605,6 +611,7 @@ def _run_force_full_sanity_dr_flow(
         drpc_page,
         drpc_name,
         expected_cluster="ocp-primary",
+        cleanup_skip_pvcs=True,
         timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
     )
     _assert_managed_clusters_available()
@@ -857,6 +864,7 @@ class TestUiSanity:
             drpc_page,
             "gitops-vm-protection",
             expected_cluster="ocp-primary",
+            cleanup_skip_pvcs=True,
             timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
         )
         _assert_managed_clusters_available()
