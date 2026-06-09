@@ -1,23 +1,28 @@
 # ramendr-storage-ui-tests
 
-This repository is a **consumer test harness** for the upstream validated pattern
-[validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit).
+This repository is a **test harness** for the RamenDR validated pattern.
+It deploys from a maintained fork of the upstream starter kit —
+[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `v1.1`) —
+which carries all environment-specific customizations (additional VM disks, BYOC cluster names,
+ODF channel pins, cost-optimized instance profiles) committed directly so that ArgoCD picks them
+up automatically on every sync.
 
 It contains:
 
-- Deployment automation (`scripts/redeploy.sh`) that **pins upstream to `v1.1`**, applies the local customization overlays, and executes the same deployment flow currently used in the `redeploy.sh` from the forked starter-kit.
-- Override values under `overrides/` that are copied on top of the upstream `overrides/` directory before installing the pattern.
-- (Planned) UI tests using **Playwright + Python** (to be added later).
+- Deployment automation (`scripts/redeploy.sh`) that pins the fork to an immutable commit SHA and executes the full deployment flow.
+- UI and sanity tests using **Playwright + Python** (`tests/`).
 - **RamenDR data validation** — continuous timestamp writer + post-failover log checks ([`dr-validation/README.md`](dr-validation/README.md)).
 
 ## What this repo does
 
 `scripts/redeploy.sh` will:
 
-1. Clone upstream `validatedpatterns/ramendr-starter-kit` and check out ref `v1.1` (branch in upstream)
-2. Copy this repo's `overrides/*.yaml` into the cloned upstream `overrides/`, apply `upstream-overrides/values-hub.patch` on top of upstream `values-hub.yaml`, and patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal)
-3. Provision hub + two spokes on AWS (BYOC spokes)
-4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at a pinned commit SHA (defaulting to the tip of `v1.1`) into `.work/upstream/ramendr-starter-kit`.
+2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
+3. Provision hub + two spokes on AWS (BYOC spokes).
+4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`. ArgoCD reads values files directly from the fork's `v1.1` branch on GitHub.
+
+> **Why a fork?** ArgoCD fetches all values files directly from the remote GitHub repository at the pinned ref — local copies placed next to the checkout are invisible to it. Committing customizations into the fork's branch is the only way to have ArgoCD reconcile them automatically.
 
 ## Prerequisites
 
@@ -57,7 +62,7 @@ Do not commit secrets to this repository.
 
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
-- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/validatedpatterns/ramendr-starter-kit/blob/main/values-secret.yaml.template)
+- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/v1.1/values-secret.yaml.template)
 - For regional-dr cluster private-key ExternalSecrets, ensure `~/values-secret.yaml` includes hub `privatekey` paths (compare with your team's file via private DM), for example:
 
 ```yaml
@@ -69,16 +74,21 @@ Do not commit secrets to this repository.
       path: ~/.ssh/id_ed25519.pub
 ```
 
-## Fork parity: BYOC and `values-hub.yaml`
+## Customizing the deployment
 
-Upstream v1.1 ships a stock [values-hub.yaml](https://github.com/validatedpatterns/ramendr-starter-kit/blob/v1.1/values-hub.yaml). Your fork changes that file (for example **ODF subscription channels** `stable-4.21`, and **including** `/overrides/values-aws-cost-optimized.yaml` in the regional-dr app's `extraValueFiles`).
+All environment-specific values (additional VM disks, BYOC cluster names, ODF channel pins,
+cost-optimized instance profiles) live in the fork's `v1.1` branch under `overrides/` and
+`values-hub.yaml`. To adapt the deployment for a different AWS account or region:
 
-This repo reproduces that without forking upstream:
+1. Fork `elsapassaro/ramendr-starter-kit` (or push a new branch on the existing fork).
+2. Edit the relevant `overrides/*.yaml` files in that branch.
+3. Point `redeploy.sh` at your fork by setting `UPSTREAM_REPO` and `UPSTREAM_REF`:
 
-- `upstream-overrides/values-hub.patch` — applied with `git apply` to the upstream checkout's root `values-hub.yaml` during `prepare_upstream` (if the patch no longer applies after an upstream bump, regenerate it from a clean checkout as described in `scripts/redeploy.sh` error messages).
-- `overrides/values-cluster-names.yaml` — `byoc: true` and spoke metadata (same role as your fork's overrides for BYOC).
-
-Replace placeholders in `overrides/values-cluster-names.yaml` under `costManagement:` (`<OWNER_TAG>`, etc.) with real tag values for your account policy.
+```bash
+export UPSTREAM_REPO=https://github.com/<your-org>/ramendr-starter-kit
+export UPSTREAM_REF=<commit-sha-or-branch>
+./scripts/redeploy.sh --pattern-only
+```
 
 ## Usage
 
@@ -105,11 +115,6 @@ Then from the repo root:
 ```
 
 Run either a full redeploy or pattern-only on an existing hub, depending on your workflow.
-
-## Customization overlays
-
-Local overlays live under `overrides/` and are copied into the upstream checkout before install.
-This keeps your changes reviewable and avoids long-lived forks of upstream.
 
 ## Code quality (pre-commit)
 
@@ -163,7 +168,7 @@ latest snapshot is kept as the pre-failover baseline). After failover/relocate a
 ```
 
 That single command runs cleanup (with safety guards), waits for healthy VMs, and validates data — no other manual steps.
-Defaults enforce a 15-minute standard: `DR_VALIDATION_MAX_RPO_SECONDS=900` and
+Defaults enforce a **2-minute RPO** and **15-minute RTO**: `DR_VALIDATION_MAX_RPO_SECONDS=120` and
 `RAMENDR_SANITY_MAX_RTO_SECONDS=900` (override via env vars if your target changes).
 
 See [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md) for the Jira-ready procedure.
