@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,6 +65,9 @@ _CLEANUP_TIMEOUT_SECONDS = float(
 _EXPECTED_VMS = int(os.getenv("RAMENDR_EXPECTED_VMS", "4"))
 # Hard timeout for the SSH-reachability polling that ends the RTO clock (default 30 min).
 _SSH_RTO_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_SSH_RTO_TIMEOUT_SECONDS", "1800"))
+# Image used for the ephemeral in-cluster SSH-probe pod.  busybox ships nc and is tiny.
+# Override with RAMENDR_PROBE_IMAGE if busybox is not available on your nodes.
+_PROBE_IMAGE = os.getenv("RAMENDR_PROBE_IMAGE", "busybox")
 # How long to wait for DRPC to reach Healthy after a failover/relocate (default 60 min).
 # Ceph RBD mirroring must re-establish at least one sync after failover before
 # DataProtected=True, which can take significantly longer than the DR operation itself.
@@ -108,7 +112,7 @@ def _wait_for_vms_running_with_ssh_service(
     expected: int = _EXPECTED_VMS,
     timeout_s: float = _SSH_RTO_TIMEOUT_SECONDS,
     poll_interval_s: float = 15.0,
-) -> None:
+) -> list[str]:
     """Block until *expected* edge VMs on *cluster_name* are Running with SSH services.
 
     The edge VMs are exposed via NodePort on cluster-internal IPs only, so direct
@@ -122,6 +126,9 @@ def _wait_for_vms_running_with_ssh_service(
     verified here because NodePorts are on cluster-internal IPs unreachable from
     the external test runner.
 
+    Returns the ClusterIP addresses of all discovered SSH NodePort services so
+    the caller can pass them to _probe_ssh_via_pod() for in-cluster verification.
+
     The caller stops the RTO clock immediately after this function returns.
     """
     vm_namespace = "gitops-vms"
@@ -129,6 +136,7 @@ def _wait_for_vms_running_with_ssh_service(
     attempt = 0
     last_running: list[str] = []
     last_ssh_svcs: list[str] = []
+    last_ssh_cluster_ips: list[str] = []
 
     while time.monotonic() < deadline:
         attempt += 1
@@ -165,8 +173,10 @@ def _wait_for_vms_running_with_ssh_service(
         except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
             pass
 
-        # Count NodePort Services with an SSH (port 22) entry.
+        # Count NodePort Services with an SSH (port 22) entry; collect ClusterIPs
+        # so the in-cluster probe knows where to connect.
         ssh_svc_names: list[str] = []
+        ssh_svc_cluster_ips: list[str] = []
         try:
             r2 = subprocess.run(  # noqa: S603
                 [  # noqa: S607
@@ -194,11 +204,15 @@ def _wait_for_vms_running_with_ssh_service(
                         p.get("port") == 22 or p.get("name") == "ssh" for p in ports
                     ):
                         ssh_svc_names.append(item["metadata"]["name"])
+                        cluster_ip = item.get("spec", {}).get("clusterIP", "")
+                        if cluster_ip and cluster_ip != "None":
+                            ssh_svc_cluster_ips.append(cluster_ip)
         except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
             pass
 
         last_running = running_names
         last_ssh_svcs = ssh_svc_names
+        last_ssh_cluster_ips = ssh_svc_cluster_ips
         remaining = max(0, int(deadline - time.monotonic()))
         print(
             f"  [vm-ready attempt={attempt}] cluster={cluster_name} "
@@ -210,7 +224,7 @@ def _wait_for_vms_running_with_ssh_service(
             print(
                 f"  All {expected} VM(s) are Running with SSH services on {cluster_name}."
             )
-            return
+            return ssh_svc_cluster_ips
 
         sleep_for = min(poll_interval_s, max(0.0, deadline - time.monotonic()))
         if sleep_for > 0:
@@ -221,6 +235,210 @@ def _wait_for_vms_running_with_ssh_service(
         f"{cluster_name} (limit={timeout_s:.0f}s). "
         f"Last running VMIs: {last_running}. Last SSH services: {last_ssh_svcs}"
     )
+    return last_ssh_cluster_ips  # unreachable; satisfies type checker
+
+
+def _launch_ssh_probe_pod(kubeconfig: str, *, namespace: str = "gitops-vms") -> str:
+    """Create an ephemeral idle pod for later in-cluster TCP probing.
+
+    Call this at DR initiation time so pod scheduling and image pull happen in
+    parallel with the DR operation, absorbing the overhead into the DR window
+    rather than the RTO measurement.  The pod sleeps until _probe_ssh_via_pod()
+    execs into it.  Returns the unique pod name.
+    """
+    pod_name = f"ramendr-ssh-probe-{uuid.uuid4().hex[:8]}"
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    try:
+        subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "oc",
+                "run",
+                pod_name,
+                "-n",
+                namespace,
+                "--restart=Never",
+                f"--image={_PROBE_IMAGE}",
+                "--",
+                "sh",
+                "-c",
+                "sleep 600",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    print(
+        f"  [ssh-probe] pod {pod_name!r} submitted to {namespace} (scheduling in background)"
+    )
+    return pod_name
+
+
+def _probe_ssh_via_pod(
+    kubeconfig: str,
+    pod_name: str,
+    cluster_ips: list[str],
+    *,
+    namespace: str = "gitops-vms",
+    port: int = 22,
+    pod_ready_timeout_s: float = 60.0,
+    probe_timeout_s: float = 300.0,
+    probe_interval_s: float = 10.0,
+) -> None:
+    """Exec a TCP SSH check from the pre-launched probe pod to each VM ClusterIP.
+
+    The pod was launched at DR initiation, so it should already be Running by the
+    time this is called (DR takes minutes; pod startup takes seconds).  Waits up
+    to pod_ready_timeout_s for the pod to become Running; if it never does, logs a
+    warning and skips the probe rather than failing the test.
+
+    After the pod is Running, polls connectivity for up to probe_timeout_s.  This
+    retry window is intentional: KubeVirt marks a VMI Running when the VM process
+    starts, but the guest SSH daemon may take 30–60 s more to come up after OS
+    boot.  Since this function is called before _assert_rto_within_standard, the
+    retry time is correctly included in the RTO measurement.
+
+    Always deletes the pod on exit.  Calls pytest.fail() only after probe_timeout_s
+    is exhausted with unreachable IPs.
+    """
+    if not cluster_ips:
+        print("  [ssh-probe] no ClusterIPs to probe — skipping in-cluster check.")
+        _delete_probe_pod(kubeconfig, pod_name, namespace=namespace)
+        return
+
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+
+    # Wait for the probe pod to be Running.
+    pod_deadline = time.monotonic() + pod_ready_timeout_s
+    pod_running = False
+    while time.monotonic() < pod_deadline:
+        try:
+            r = subprocess.run(  # noqa: S603
+                [  # noqa: S607
+                    "oc",
+                    "get",
+                    "pod",
+                    pod_name,
+                    "-n",
+                    namespace,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if r.returncode == 0 and r.stdout.strip() == "Running":
+                pod_running = True
+                break
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        time.sleep(5)
+
+    if not pod_running:
+        print(
+            f"WARNING: SSH probe pod {pod_name!r} not Running after "
+            f"{pod_ready_timeout_s:.0f}s — skipping in-cluster connectivity check."
+        )
+        _delete_probe_pod(kubeconfig, pod_name, namespace=namespace)
+        return
+
+    # Poll until every ClusterIP is reachable or the deadline expires.
+    # Retrying is necessary because KubeVirt marks VMIs Running before the
+    # guest SSH daemon has finished starting.
+    probe_deadline = time.monotonic() + probe_timeout_s
+    pending = list(cluster_ips)
+
+    while pending and time.monotonic() < probe_deadline:
+        newly_ok: list[str] = []
+        for ip in list(pending):
+            try:
+                r = subprocess.run(  # noqa: S603
+                    [  # noqa: S607
+                        "oc",
+                        "exec",
+                        pod_name,
+                        "-n",
+                        namespace,
+                        "--",
+                        "sh",
+                        "-c",
+                        f"nc -z -w 5 {ip} {port} && echo OK || echo FAIL",
+                    ],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                if r.returncode == 0 and "OK" in r.stdout:
+                    print(f"  [ssh-probe] TCP {ip}:{port} — OK")
+                    newly_ok.append(ip)
+                else:
+                    remaining_s = max(0, int(probe_deadline - time.monotonic()))
+                    print(
+                        f"  [ssh-probe] TCP {ip}:{port} — not yet reachable "
+                        f"(retrying, {remaining_s}s left)"
+                    )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                print(f"  [ssh-probe] TCP {ip}:{port} — exec error: {exc}")
+
+        for ip in newly_ok:
+            pending.remove(ip)
+
+        if pending:
+            sleep_for = min(
+                probe_interval_s, max(0.0, probe_deadline - time.monotonic())
+            )
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+    _delete_probe_pod(kubeconfig, pod_name, namespace=namespace)
+
+    if pending:
+        pytest.fail(
+            f"In-cluster SSH TCP probe timed out for {len(pending)} VM service(s) "
+            f"after {probe_timeout_s:.0f}s:\n"
+            + "\n".join(f"  - {ip}:{port}" for ip in pending)
+        )
+    print(
+        f"  [ssh-probe] all {len(cluster_ips)} VM SSH service(s) reachable in-cluster."
+    )
+
+
+def _delete_probe_pod(
+    kubeconfig: str, pod_name: str, *, namespace: str = "gitops-vms"
+) -> None:
+    """Delete the ephemeral probe pod, ignoring all errors."""
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    try:
+        subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "oc",
+                "delete",
+                "pod",
+                pod_name,
+                "-n",
+                namespace,
+                "--ignore-not-found",
+                "--wait=false",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
 
 
 def _run_dr_timestamp_validation(
@@ -491,10 +709,10 @@ def _wait_for_drpc_healthy_with_recovery(
             break
         drpc_page.page.wait_for_timeout(min(poll_interval_ms, remaining_ms))
 
-    drpc_page.wait_for_drpc_healthy_state(
-        drpc_name,
-        expected_cluster=expected_cluster,
-        timeout_ms=max(int((deadline - time.monotonic()) * 1000), 10_000),
+    pytest.fail(
+        f"DRPC '{drpc_name}' did not reach a settled state on cluster "
+        f"'{expected_cluster}' within {timeout_ms // 1000}s. "
+        "Check DRPC Protected condition and backend VRG/Ceph mirroring status."
     )
 
 
@@ -516,6 +734,10 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.open_failover_dialog(drpc_name)
     drpc_page.assert_failover_dialog_contents()
+    # Launch probe pod before starting the clock — scheduling + image pull happen
+    # in parallel with the DR operation, so the pod is idle and ready by the time
+    # VMs come up on the secondary.
+    failover_probe_pod = _launch_ssh_probe_pod(SECONDARY_KUBECONFIG)
     failover_started_at = time.monotonic()
     failover_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_failover_dialog()
@@ -534,7 +756,6 @@ def _run_force_full_sanity_dr_flow(
     if post_progress_status in {
         "waitonusertocleanup",
         "action needed",
-        "failing over",
         "protection error",
     }:
         _run_cleanup_non_primary_cluster()
@@ -544,11 +765,12 @@ def _run_force_full_sanity_dr_flow(
         expected_cluster="ocp-secondary",
         timeout_ms=900_000,
     )
-    # RTO ends when all VMs are SSHable on the secondary (workload accessible),
-    # not when Ramen finishes its internal reconciliation to Healthy.
-    _wait_for_vms_running_with_ssh_service(
+    # RTO ends when all VMs are Running with SSH services on the secondary, confirmed
+    # by both the Kubernetes API signal and an in-cluster TCP probe (pod pre-launched).
+    failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
         SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
     )
+    _probe_ssh_via_pod(SECONDARY_KUBECONFIG, failover_probe_pod, failover_ssh_ips)
     _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
     _wait_for_drpc_healthy_with_recovery(
         drpc_page,
@@ -564,16 +786,15 @@ def _run_force_full_sanity_dr_flow(
         "Expected DRPC on ocp-secondary before relocate, got "
         f"{state_before_relocate['cluster']!r}"
     )
-    assert state_before_relocate["status"].strip().lower() in {
-        "healthy",
-        "protection error",
-    }, (
-        "Expected DR status Healthy (or recovering) before relocate, got "
+    assert state_before_relocate["status"].strip().lower() == "healthy", (
+        "Expected DR status Healthy before relocate — DRPC must be Protected=True "
+        "before triggering relocate to avoid Ceph split-brain. Got "
         f"{state_before_relocate['status']!r}"
     )
 
     drpc_page.open_relocate_dialog(drpc_name)
     drpc_page.assert_relocate_dialog_contents()
+    relocate_probe_pod = _launch_ssh_probe_pod(PRIMARY_KUBECONFIG)
     relocate_started_at = time.monotonic()
     relocate_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_relocate_dialog()
@@ -601,11 +822,10 @@ def _run_force_full_sanity_dr_flow(
         expected_cluster="ocp-primary",
         timeout_ms=2_700_000,
     )
-    # RTO ends when all VMs are SSHable on the primary (workload accessible),
-    # not when Ramen finishes its internal reconciliation to Healthy.
-    _wait_for_vms_running_with_ssh_service(
+    relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
         PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
     )
+    _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_probe_pod, relocate_ssh_ips)
     _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
     _wait_for_drpc_healthy_with_recovery(
         drpc_page,
@@ -699,8 +919,10 @@ class TestUiSanity:
         failover_initiated = False
         failover_started_at: float | None = None
         failover_initiated_utc: datetime | None = None
+        failover_probe_pod: str | None = None
         relocate_started_at: float | None = None
         relocate_initiated_utc: datetime | None = None
+        relocate_probe_pod: str | None = None
 
         # Fresh flow: healthy on primary, then trigger failover.
         if ready_for_failover:
@@ -719,6 +941,7 @@ class TestUiSanity:
             # --- Failover popup (initiate path) ---
             drpc_page.open_failover_dialog("gitops-vm-protection")
             drpc_page.assert_failover_dialog_contents()
+            failover_probe_pod = _launch_ssh_probe_pod(SECONDARY_KUBECONFIG)
             failover_started_at = time.monotonic()
             failover_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_failover_dialog()
@@ -759,7 +982,6 @@ class TestUiSanity:
             if post_progress_status in {
                 "waitonusertocleanup",
                 "action needed",
-                "failing over",
                 "protection error",
             }:
                 _run_cleanup_non_primary_cluster()
@@ -771,10 +993,15 @@ class TestUiSanity:
                 expected_cluster="ocp-secondary",
                 timeout_ms=900_000,
             )
-            # RTO ends when all VMs are SSHable on the secondary (workload accessible),
-            # not when Ramen reconciles to Healthy.
-            _wait_for_vms_running_with_ssh_service(
+            # RTO ends when all VMs are Running with SSH services on the secondary,
+            # confirmed by both the K8s API signal and an in-cluster TCP probe.
+            if failover_probe_pod is None:
+                failover_probe_pod = _launch_ssh_probe_pod(SECONDARY_KUBECONFIG)
+            failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
                 SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
+            )
+            _probe_ssh_via_pod(
+                SECONDARY_KUBECONFIG, failover_probe_pod, failover_ssh_ips
             )
             _assert_rto_within_standard(
                 phase="failover", started_at=failover_started_at
@@ -797,17 +1024,16 @@ class TestUiSanity:
                 "Expected DRPC to be on ocp-secondary before relocate, got "
                 f"{state_before_relocate['cluster']!r}"
             )
-            assert state_before_relocate["status"].strip().lower() in {
-                "healthy",
-                "protection error",
-            }, (
-                "Expected DR status Healthy (or recovering) before relocate, got "
+            assert state_before_relocate["status"].strip().lower() == "healthy", (
+                "Expected DR status Healthy before relocate — DRPC must be Protected=True "
+                "before triggering relocate to avoid Ceph split-brain. Got "
                 f"{state_before_relocate['status']!r}"
             )
 
             # --- Relocate from secondary back to primary ---
             drpc_page.open_relocate_dialog("gitops-vm-protection")
             drpc_page.assert_relocate_dialog_contents()
+            relocate_probe_pod = _launch_ssh_probe_pod(PRIMARY_KUBECONFIG)
             relocate_started_at = time.monotonic()
             relocate_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_relocate_dialog()
@@ -854,11 +1080,12 @@ class TestUiSanity:
             expected_cluster="ocp-primary",
             timeout_ms=2_700_000,
         )
-        # RTO ends when all VMs are SSHable on the primary (workload accessible),
-        # not when Ramen reconciles to Healthy.
-        _wait_for_vms_running_with_ssh_service(
+        if relocate_probe_pod is None:
+            relocate_probe_pod = _launch_ssh_probe_pod(PRIMARY_KUBECONFIG)
+        relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
             PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
         )
+        _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_probe_pod, relocate_ssh_ips)
         _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
         _wait_for_drpc_healthy_with_recovery(
             drpc_page,
