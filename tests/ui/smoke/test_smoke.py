@@ -177,6 +177,180 @@ class TestInfraSmoke:
             + "\n".join(f"  - {f}" for f in failures)
         )
 
+    def test_vms_have_two_data_disks(
+        self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
+    ):
+        """Every VM in gitops-vms has exactly 2 DataVolume-backed disks.
+
+        The expected layout after the feature/add-second-disk change:
+          dataVolumeTemplates[0] — 30 Gi OS root disk  (e.g. rhel9-node-001)
+          dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. rhel9-node-001-data)
+
+        The cloud-init disk is ephemeral and is intentionally excluded from
+        this count because it is not backed by a DataVolume.
+
+        The second disk must have the properties required for RamenDR
+        replication eligibility:
+          - name ending in '-data'
+          - storage: 10Gi
+          - volumeMode: Block
+          - accessModes: [ReadWriteMany]
+          - storageClassName: ocs-storagecluster-ceph-rbd-virtualization
+
+        The test is cluster-aware: it follows the DRPC placement to check VMs
+        on whichever spoke currently hosts them (primary after Deployed/Relocated,
+        secondary after FailedOver).
+        """
+        _EXPECTED_DATA_STORAGE = "10Gi"
+        _EXPECTED_STORAGE_CLASS = "ocs-storagecluster-ceph-rbd-virtualization"
+
+        # Determine which cluster currently hosts the VMs from the DRPC.
+        raw_drpc = run_oc(
+            [
+                "get",
+                "drplacementcontrol",
+                "gitops-vm-protection",
+                "-n",
+                "openshift-dr-ops",
+                "--output=json",
+            ],
+            hub_kubeconfig,
+        )
+        drpc = json.loads(raw_drpc)
+        preferred = drpc.get("spec", {}).get("preferredCluster", "ocp-primary")
+        drpc_phase = drpc.get("status", {}).get("phase", "")
+
+        # FailedOver → VMs are on the non-preferred cluster; any other phase → preferred.
+        if drpc_phase == "FailedOver":
+            active_cluster = (
+                "ocp-secondary" if preferred == "ocp-primary" else "ocp-primary"
+            )
+        else:
+            active_cluster = preferred
+
+        kubeconfig = (
+            primary_kubeconfig
+            if active_cluster == "ocp-primary"
+            else secondary_kubeconfig
+        )
+
+        raw = run_oc(
+            [
+                "get",
+                "virtualmachines",
+                "-n",
+                "gitops-vms",
+                "--output=json",
+            ],
+            kubeconfig,
+        )
+        vms = json.loads(raw)["items"]
+        assert vms, f"No VirtualMachines found in gitops-vms on {active_cluster}"
+
+        failures: list[str] = []
+        data_pvc_names: set[str] = set()
+
+        for vm in vms:
+            name = vm["metadata"]["name"]
+            dvts = vm.get("spec", {}).get("dataVolumeTemplates", [])
+
+            if len(dvts) != 2:
+                dv_names = [d.get("metadata", {}).get("name", "?") for d in dvts]
+                failures.append(
+                    f"{name}: expected 2 DataVolumeTemplates, got {len(dvts)} {dv_names}"
+                )
+                continue
+
+            # Identify the data disk by its '-data' name suffix.
+            data_dvt = next(
+                (
+                    d
+                    for d in dvts
+                    if d.get("metadata", {}).get("name", "").endswith("-data")
+                ),
+                None,
+            )
+            if data_dvt is None:
+                dv_names = [d.get("metadata", {}).get("name", "?") for d in dvts]
+                failures.append(
+                    f"{name}: no DataVolumeTemplate with '-data' suffix found in {dv_names}"
+                )
+                continue
+
+            data_pvc_name = data_dvt["metadata"]["name"]
+            data_pvc_names.add(data_pvc_name)
+
+            # Check declared storage size in the DVT spec (supports both pvc and storage API).
+            pvc_spec = data_dvt.get("spec", {}).get("pvc") or data_dvt.get(
+                "spec", {}
+            ).get("storage", {})
+            size = (
+                (pvc_spec or {})
+                .get("resources", {})
+                .get("requests", {})
+                .get("storage", "")
+            )
+            if size != _EXPECTED_DATA_STORAGE:
+                failures.append(
+                    f"{name} data disk: declared storage={size!r}, expected {_EXPECTED_DATA_STORAGE!r}"
+                )
+
+        assert not failures, (
+            "VirtualMachine(s) data disk structure issues:\n"
+            + "\n".join(f"  - {f}" for f in failures)
+        )
+
+        # Verify PVC properties for all data disks.
+        raw_pvcs = run_oc(
+            [
+                "get",
+                "persistentvolumeclaims",
+                "-n",
+                "gitops-vms",
+                "--output=json",
+            ],
+            kubeconfig,
+        )
+        pvcs_by_name = {
+            item["metadata"]["name"]: item for item in json.loads(raw_pvcs)["items"]
+        }
+
+        pvc_failures: list[str] = []
+        for pvc_name in sorted(data_pvc_names):
+            pvc = pvcs_by_name.get(pvc_name)
+            if pvc is None:
+                pvc_failures.append(f"{pvc_name}: <missing>")
+                continue
+
+            spec = pvc.get("spec", {})
+            pvc_phase = pvc.get("status", {}).get("phase", "")
+            volume_mode = spec.get("volumeMode", "")
+            access_modes = spec.get("accessModes", [])
+            storage_class = spec.get("storageClassName", "")
+            size = spec.get("resources", {}).get("requests", {}).get("storage", "")
+
+            issues = []
+            if pvc_phase != "Bound":
+                issues.append(f"phase={pvc_phase!r} (expected 'Bound')")
+            if volume_mode != "Block":
+                issues.append(f"volumeMode={volume_mode!r} (expected 'Block')")
+            if "ReadWriteMany" not in access_modes:
+                issues.append(f"accessModes={access_modes} (expected ReadWriteMany)")
+            if storage_class != _EXPECTED_STORAGE_CLASS:
+                issues.append(
+                    f"storageClassName={storage_class!r} (expected {_EXPECTED_STORAGE_CLASS!r})"
+                )
+            if size != _EXPECTED_DATA_STORAGE:
+                issues.append(f"storage={size!r} (expected {_EXPECTED_DATA_STORAGE!r})")
+
+            if issues:
+                pvc_failures.append(f"{pvc_name}: " + "; ".join(issues))
+
+        assert not pvc_failures, (
+            f"PVC(s) for VM data disks have unexpected properties on {active_cluster}:\n"
+            + "\n".join(f"  - {f}" for f in pvc_failures)
+        )
+
     # ------------------------------------------------------------------
     # ExternalSecrets on primary spoke
     # ------------------------------------------------------------------
@@ -264,7 +438,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     def test_drpc_deployed_available(self, hub_kubeconfig):
-        """DRPlacementControl gitops-vm-protection is Deployed and Available."""
+        """DRPlacementControl gitops-vm-protection is Deployed (or Relocated) and Available."""
         raw = run_oc(
             [
                 "get",
@@ -279,9 +453,10 @@ class TestInfraSmoke:
         drpc = json.loads(raw)
         status = drpc.get("status", {})
         phase = status.get("phase", "")
-        assert phase == "Deployed", (
+        # "Relocated" is a valid steady-state after a completed DR cycle.
+        assert phase in {"Deployed", "Relocated"}, (
             f"DRPlacementControl gitops-vm-protection phase is '{phase}', "
-            "expected 'Deployed'"
+            "expected 'Deployed' or 'Relocated'"
         )
 
         conditions = {c["type"]: c["status"] for c in status.get("conditions", [])}

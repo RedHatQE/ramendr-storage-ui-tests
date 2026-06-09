@@ -108,12 +108,34 @@ spec:
         command: ["bash", "-c"]
         args:
           - |
-            set -uo pipefail
+            set -euo pipefail
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             cp /hosts/hosts.tsv /tmp/hosts.tsv
             echo "hosts count: \$(wc -l < /tmp/hosts.tsv)"
             PASS="\$(tr -d '\n' < /ssh/password 2>/dev/null || true)"
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
+            wait_for_ssh_tcp() {
+              local name="\$1" host="\$2" port="\$3"
+              local tries=0 max=40 sleep_sec=15
+              while [[ \$tries -lt \$max ]]; do
+                if (echo > /dev/tcp/"\$host"/"\$port") 2>/dev/null; then
+                  echo "  SSH port open: \$name (\$host:\$port)"
+                  return 0
+                fi
+                echo "  Waiting for SSH on \$name (\$host:\$port) [attempt \$((tries+1))/\$max]..."
+                sleep "\$sleep_sec"
+                tries=\$((tries+1))
+              done
+              echo "  TIMEOUT waiting for SSH on \$name (\$host:\$port)"
+              return 1
+            }
+            echo "Waiting for SSH on all VMs..."
+            while IFS=\$'\t' read -r name host port; do
+              [[ -z "\$name" ]] && continue
+              port="\${port:-22}"
+              wait_for_ssh_tcp "\$name" "\$host" "\$port" || { echo "FAILED_SSH_WAIT \$name"; exit 1; }
+            done < /tmp/hosts.tsv
+            echo "All VMs are SSHable. Starting installation..."
             install_on_vm() {
               local host="\$1" port="\$2"
               # shellcheck disable=SC2016
@@ -144,12 +166,12 @@ spec:
                 return 1
               fi
             }
-            cat /tmp/hosts.tsv | while IFS=\$'\t' read -r name host port; do
+            while IFS=\$'\t' read -r name host port; do
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
               echo "=== \$name @ \$host:\$port ==="
               install_on_vm "\$host" "\$port" || { echo "FAILED \$name"; exit 1; }
-            done
+            done < /tmp/hosts.tsv
             echo "All writers installed."
       volumes:
       - name: payload

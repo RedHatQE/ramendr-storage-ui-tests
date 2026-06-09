@@ -75,12 +75,33 @@ spec:
         command: ["bash", "-c"]
         args:
           - |
-            set -uo pipefail
+            set -euo pipefail
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             PASS="\$(tr -d '\n' < /ssh/password 2>/dev/null || true)"
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
             cp /ssh/hosts.tsv /tmp/hosts.tsv
-            cat /tmp/hosts.tsv | while IFS=\$'\t' read -r name host port; do
+            wait_for_ssh_tcp() {
+              local name="\$1" host="\$2" port="\$3"
+              local tries=0 max=20 sleep_sec=15
+              while [[ \$tries -lt \$max ]]; do
+                if (echo > /dev/tcp/"\$host"/"\$port") 2>/dev/null; then
+                  echo "  SSH port open: \$name (\$host:\$port)"
+                  return 0
+                fi
+                echo "  Waiting for SSH on \$name (\$host:\$port) [attempt \$((tries+1))/\$max]..."
+                sleep "\$sleep_sec"
+                tries=\$((tries+1))
+              done
+              echo "  TIMEOUT waiting for SSH on \$name (\$host:\$port)"
+              return 1
+            }
+            echo "Waiting for SSH on all VMs..."
+            while IFS=\$'\t' read -r name host port; do
+              [[ -z "\$name" ]] && continue
+              port="\${port:-22}"
+              wait_for_ssh_tcp "\$name" "\$host" "\$port" || { echo "FAILED_SSH_WAIT \$name"; exit 1; }
+            done < /tmp/hosts.tsv
+            while IFS=\$'\t' read -r name host port; do
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
               echo "===FILE:\${name}==="
@@ -93,9 +114,9 @@ spec:
                 sshpass -p "\$PASS" ssh -n -p "\$port" -o StrictHostKeyChecking=no \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-                  "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null
+                  "\${SSH_USER}@\${host}" "cat \${LOG_PATH} 2>/dev/null || true" 2>/dev/null || true
               fi
-            done
+            done < /tmp/hosts.tsv
       volumes:
       - name: ssh
         secret:
@@ -104,7 +125,7 @@ EOF
 
 collect_failed=0
 job_done=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 120); do
   if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-collect-logs -n "$VM_NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -q 1; then
     job_done=1
     break

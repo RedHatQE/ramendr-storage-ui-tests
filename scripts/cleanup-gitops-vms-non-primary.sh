@@ -417,7 +417,7 @@ cleanup_pvcs() {
   while IFS= read -r pvc; do
     [[ -z "$pvc" ]] && continue
     echo " Deleting PVC: $pvc"
-    if oc --kubeconfig="$KUBECONFIG" delete pvc "$pvc" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null; then
+    if oc --kubeconfig="$KUBECONFIG" delete pvc "$pvc" -n "$VM_NAMESPACE" --ignore-not-found --wait=false &>/dev/null; then
       echo -e " ${GREEN}✅ Delete requested: $pvc${NC}"
       deleted_count=$((deleted_count + 1))
     else
@@ -493,7 +493,7 @@ for item in data.get('items', []):
   while IFS= read -r pv; do
     [[ -z "$pv" ]] && continue
     echo " Deleting PV: $pv"
-    oc --kubeconfig="$KUBECONFIG" delete pv "$pv" --ignore-not-found &>/dev/null || true
+    oc --kubeconfig="$KUBECONFIG" delete pv "$pv" --ignore-not-found --wait=false &>/dev/null || true
     if oc --kubeconfig="$KUBECONFIG" get pv "$pv" &>/dev/null; then
       echo " Clearing finalizers on stuck PV: $pv"
       oc --kubeconfig="$KUBECONFIG" patch pv "$pv" \
