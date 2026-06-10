@@ -29,6 +29,9 @@ VALUES_SECRET="${VALUES_SECRET:-$HOME/values-secret.yaml}"
 
 HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-}"
 BASE_DOMAIN="${BASE_DOMAIN:-}"
+# Set CLEANUP_DNS=1 to opt into bulk Route53 record deletion in the public hosted zone.
+# Default preserves the hosted zone and its records across redeploys.
+CLEANUP_DNS="${CLEANUP_DNS:-0}"
 
 HUB_REGION="${HUB_REGION:-eu-north-1}"
 PRIMARY_REGION="${PRIMARY_REGION:-eu-central-1}"
@@ -76,7 +79,73 @@ check_prerequisites() {
     fi
   done
   [[ $missing -eq 1 ]] && { err "Prerequisites not met. Aborting."; exit 1; }
+
+  local account_id
+  account_id=$(current_aws_account_id) || { err "Cannot determine AWS account (check credentials)."; exit 1; }
+  log "Using AWS account: $account_id"
+
+  if ! verify_hosted_zone_in_account; then
+    err "HOSTED_ZONE_ID ($HOSTED_ZONE_ID) is not accessible in the current AWS account."
+    exit 1
+  fi
+  log "Route53 hosted zone $HOSTED_ZONE_ID verified in current account (zone will be preserved)."
   log "All prerequisites met."
+}
+
+current_aws_account_id() {
+  aws sts get-caller-identity --query Account --output text 2>/dev/null
+}
+
+verify_hosted_zone_in_account() {
+  [[ -n "$HOSTED_ZONE_ID" ]] || return 1
+  aws route53 get-hosted-zone --id "$HOSTED_ZONE_ID" \
+    --query 'HostedZone.Id' --output text &>/dev/null
+}
+
+read_cluster_metadata() {
+  local dir="$1"
+  local meta="$dir/metadata.json"
+  [[ -f "$meta" ]] || return 1
+  python3 -c "
+import json, sys
+d = json.load(open('$meta'))
+print(d.get('infraID', ''))
+print(d.get('aws', {}).get('region', ''))
+" 2>/dev/null
+}
+
+cluster_infra_exists() {
+  local infra_id="$1"
+  local region="$2"
+  [[ -n "$infra_id" && -n "$region" ]] || return 1
+
+  local vpc_count
+  vpc_count=$(aws ec2 describe-vpcs \
+    --region "$region" \
+    --filters "Name=tag:kubernetes.io/cluster/${infra_id},Values=owned" \
+    --query 'length(Vpcs)' \
+    --output text 2>/dev/null || echo "")
+  [[ "$vpc_count" =~ ^[1-9][0-9]*$ ]]
+}
+
+cluster_install_dirs() {
+  echo "hub:$HUB_INSTALL_DIR"
+  echo "ocp-primary:$PRIMARY_INSTALL_DIR"
+  echo "ocp-secondary:$SECONDARY_INSTALL_DIR"
+}
+
+clusters_with_infra_in_account() {
+  local entry name dir meta infra_id region
+  while IFS= read -r entry; do
+    name="${entry%%:*}"
+    dir="${entry#*:}"
+    meta=$(read_cluster_metadata "$dir") || continue
+    infra_id=$(echo "$meta" | sed -n '1p')
+    region=$(echo "$meta" | sed -n '2p')
+    if cluster_infra_exists "$infra_id" "$region"; then
+      echo "$name:$dir:$infra_id:$region"
+    fi
+  done < <(cluster_install_dirs)
 }
 
 ensure_podman_ready() {
@@ -180,7 +249,11 @@ PY
 }
 
 cleanup_dns() {
-  log "Cleaning stale DNS records from Route53..."
+  if [[ "$CLEANUP_DNS" != "1" ]]; then
+    log "Skipping Route53 record cleanup (hosted zone preserved; set CLEANUP_DNS=1 to enable)."
+    return 0
+  fi
+  log "Cleaning stale DNS records from Route53 (CLEANUP_DNS=1)..."
   local stale
   stale=$(aws route53 list-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" \
     --no-paginate --max-items 1000 --output json 2>/dev/null \
@@ -217,25 +290,34 @@ else:
   fi
 }
 
-release_orphaned_eips() {
-  log "Releasing orphaned Elastic IPs..."
-  local hub_region primary_region secondary_region
-  hub_region=$(python3 -c "import json; print(json.load(open('$HUB_INSTALL_DIR/metadata.json'))['aws']['region'])" 2>/dev/null || echo "$HUB_REGION")
-  primary_region=$(python3 -c "import json; print(json.load(open('$PRIMARY_INSTALL_DIR/metadata.json'))['aws']['region'])" 2>/dev/null || echo "$PRIMARY_REGION")
-  secondary_region=$(python3 -c "import json; print(json.load(open('$SECONDARY_INSTALL_DIR/metadata.json'))['aws']['region'])" 2>/dev/null || echo "$SECONDARY_REGION")
+release_cluster_orphaned_eips() {
+  log "Releasing unassociated Elastic IPs owned by installed clusters..."
+  local entry name dir infra_id region rest released=0
+  while IFS= read -r entry; do
+    name="${entry%%:*}"
+    rest="${entry#*:}"
+    region="${rest##*:}"
+    rest="${rest%:"$region"}"
+    infra_id="${rest##*:}"
+    dir="${rest%:"$infra_id"}"
 
-  local regions
-  regions=$(echo -e "$hub_region\n$primary_region\n$secondary_region" | sort -u)
-
-  for region in $regions; do
     local eips
     eips=$(aws ec2 describe-addresses --region "$region" \
-      --query 'Addresses[?AssociationId==null].AllocationId' --output text 2>/dev/null)
+      --filters \
+        "Name=tag:kubernetes.io/cluster/${infra_id},Values=owned" \
+        "Name=domain,Values=vpc" \
+      --query 'Addresses[?AssociationId==null].AllocationId' \
+      --output text 2>/dev/null | tr '\t' ' ')
     for eip in $eips; do
-      aws ec2 release-address --region "$region" --allocation-id "$eip" 2>/dev/null
-      log " Released EIP $eip in $region"
+      [[ -z "$eip" || "$eip" == "None" ]] && continue
+      aws ec2 release-address --region "$region" --allocation-id "$eip" 2>/dev/null \
+        && log " Released cluster EIP $eip for $name ($infra_id) in $region" \
+        && released=$((released + 1))
     done
-  done
+  done < <(clusters_with_infra_in_account)
+  if [[ "$released" -eq 0 ]]; then
+    log "No unassociated cluster-owned EIPs found."
+  fi
 }
 
 destroy_cluster() {
@@ -243,44 +325,64 @@ destroy_cluster() {
   local dir="$2"
 
   if [[ ! -f "$dir/metadata.json" ]]; then
-    warn "No metadata found for $name -- skipping (may already be destroyed)."
+    warn "No metadata found for $name -- skipping (not installed in this workspace)."
     return
   fi
 
-  # Before invoking openshift-install (which retries for many minutes on
-  # orphaned resources), do a quick AWS check: if the cluster's VPC is already
-  # gone, the infrastructure has been cleaned up and there is nothing to destroy.
-  local infra_id region vpc_count
+  local infra_id region
   infra_id=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['infraID'])" 2>/dev/null || echo "")
   region=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['aws']['region'])" 2>/dev/null || echo "")
 
-  if [[ -n "$infra_id" && -n "$region" ]]; then
-    vpc_count=$(aws ec2 describe-vpcs \
-      --region "$region" \
-      --filters "Name=tag:kubernetes.io/cluster/${infra_id},Values=owned" \
-      --query 'length(Vpcs)' \
-      --output text 2>/dev/null || echo "")
-    if [[ "$vpc_count" == "0" ]]; then
-      log "$name AWS infrastructure already gone ($infra_id in $region) -- skipping destroy."
-      return
-    fi
+  if [[ -z "$infra_id" || -z "$region" ]]; then
+    warn "Incomplete metadata for $name -- skipping destroy."
+    return
   fi
 
-  log "Destroying $name cluster ($infra_id in $region)..."
+  if ! cluster_infra_exists "$infra_id" "$region"; then
+    log "$name has no VPC in the current AWS account ($infra_id in $region) -- skipping destroy."
+    return
+  fi
+
+  log "Destroying $name cluster in current AWS account ($infra_id in $region)..."
+  log "Public Route53 hosted zone $HOSTED_ZONE_ID will be preserved (cluster DNS records may still be removed by openshift-install)."
   openshift-install destroy cluster --dir "$dir" --log-level=info 2>&1 \
     || warn "$name destroy had errors (may already be destroyed)"
 }
 
-destroy_managed_clusters() {
-  log "Destroying spoke clusters in parallel..."
-  destroy_cluster "ocp-primary" "$PRIMARY_INSTALL_DIR" &
-  destroy_cluster "ocp-secondary" "$SECONDARY_INSTALL_DIR" &
-  wait
-  log "Spoke clusters destroyed."
-}
+destroy_existing_clusters() {
+  local account_id found=0 entry name dir infra_id region rest hub_dir=""
+  local -a spoke_pids=()
+  account_id=$(current_aws_account_id || echo "unknown")
+  log "Destroying only clusters with live infrastructure in AWS account $account_id..."
 
-destroy_hub() {
-  destroy_cluster "hub" "$HUB_INSTALL_DIR"
+  while IFS= read -r entry; do
+    found=1
+    name="${entry%%:*}"
+    rest="${entry#*:}"
+    region="${rest##*:}"
+    rest="${rest%:"$region"}"
+    infra_id="${rest##*:}"
+    dir="${rest%:"$infra_id"}"
+    if [[ "$name" == "hub" ]]; then
+      hub_dir="$dir"
+    else
+      destroy_cluster "$name" "$dir" &
+      spoke_pids+=($!)
+    fi
+  done < <(clusters_with_infra_in_account)
+
+  if [[ "$found" -eq 0 ]]; then
+    log "No cluster infrastructure found in the current AWS account -- nothing to destroy."
+    return
+  fi
+
+  if [[ ${#spoke_pids[@]} -gt 0 ]]; then
+    wait "${spoke_pids[@]}"
+  fi
+  if [[ -n "$hub_dir" ]]; then
+    destroy_cluster "hub" "$hub_dir"
+  fi
+  log "Cluster destroy pass complete."
 }
 
 _openshift_install_tarball() {
@@ -511,7 +613,7 @@ EOF
     fi
     # Restart pods stuck in ContainerCreating for >5 min (stalled pull).
     oc get pods -n "$ns" -l app=odf-image-prepull --no-headers 2>/dev/null \
-      | awk '$4~/^([5-9][0-9]|[1-9][0-9]{2,})m/ && $3=="ContainerCreating" {print $1}' \
+      | awk '$4~/^([5-9]|[1-9][0-9]+)m/ && $3=="ContainerCreating" {print $1}' \
       | xargs -r oc delete pod -n "$ns" 2>/dev/null || true
     log "  $ready/$desired nodes ready (attempt $((tries+1))/40)..."
     sleep 30
@@ -905,14 +1007,9 @@ wait_for_convergence() {
   local tries=0 converged=0
   while [[ $tries -lt 120 ]]; do
     local unhealthy
-    # grep exits 1 when every app is Synced/Healthy; with pipefail that aborts redeploy.
-    unhealthy=$(set +o pipefail
-      oc get applications.argoproj.io -n ramendr-starter-kit-hub \
-        -o custom-columns=':.status.sync.status,:.status.health.status' --no-headers 2>/dev/null \
-        | grep -v "Synced.*Healthy" \
-        | grep -v "Synced.*Progressing" \
-        | wc -l \
-        | tr -d ' ')
+    unhealthy=$(oc get applications.argoproj.io -n ramendr-starter-kit-hub \
+      -o custom-columns=':.status.sync.status,:.status.health.status' --no-headers 2>/dev/null \
+      | grep -Evc 'Synced.*Healthy|Synced.*Progressing' || true)
 
     if [[ "${unhealthy:-0}" -eq 0 ]]; then
       log "All ArgoCD applications are Synced/Healthy!"
@@ -1040,11 +1137,8 @@ full_redeploy() {
   check_prerequisites
   prepare_upstream
 
-  cleanup_dns
-  release_orphaned_eips
-
-  destroy_managed_clusters
-  destroy_hub
+  destroy_existing_clusters
+  release_cluster_orphaned_eips
   cleanup_dns
 
   ensure_openshift_install_version
@@ -1076,11 +1170,9 @@ case "${1:-}" in
     check_prerequisites
     [[ -x "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" ]] && \
       "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" || true
-    destroy_managed_clusters
-    destroy_hub
-    cleanup_dns
-    release_orphaned_eips
-    log "Environment destroyed."
+    destroy_existing_clusters
+    release_cluster_orphaned_eips
+    log "Environment destroyed (Route53 hosted zone preserved)."
     ;;
   --pattern-only)
     check_prerequisites
@@ -1101,8 +1193,8 @@ case "${1:-}" in
   --help|-h)
     echo "Usage: ./scripts/redeploy.sh [--destroy-only|--pattern-only|--dr-bootstrap-only|--status|--help]"
     echo ""
-    echo " (no args) Full redeploy: destroy + install all 3 clusters in parallel + deploy pinned upstream pattern"
-    echo " --destroy-only Destroy all clusters and clean up AWS resources"
+    echo " (no args) Full redeploy: destroy clusters in current AWS account + install all 3 + deploy pinned upstream pattern"
+    echo " --destroy-only Destroy clusters that exist in the current AWS account (hosted zone preserved)"
     echo " --pattern-only Deploy pattern on an existing hub cluster"
     echo " --dr-bootstrap-only Wait for convergence + install/verify timestamp writers (existing env)"
     echo " --status Show current environment status"
@@ -1118,8 +1210,9 @@ case "${1:-}" in
     echo " SECONDARY_INSTALL_DIR Secondary spoke install directory (default: ~/git/ocp-secondary-install)"
     echo " VALUES_SECRET         Path to values-secret.yaml (default: ~/values-secret.yaml)"
     echo " HUB_OCP_VERSION       OCP version for all clusters (default: 4.21.14)"
-    echo " HOSTED_ZONE_ID        Route53 hosted zone ID"
+    echo " HOSTED_ZONE_ID        Route53 hosted zone ID (verified, never deleted)"
     echo " BASE_DOMAIN           Base domain for the clusters (required, no default)"
+    echo " CLEANUP_DNS           Set to 1 to bulk-delete DNS records in the hosted zone before install"
     echo " SKIP_DR_VALIDATION    Set to 1 to skip timestamp writers and auto snapshots"
     echo " SKIP_DR_VALIDATION_SNAPSHOTS  Set to 1 to skip only the 5-min snapshot daemon"
     echo " REQUIRE_DR_VALIDATION Set to 1 to fail redeploy if writers are not recording"
