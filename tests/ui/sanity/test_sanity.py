@@ -213,6 +213,14 @@ def _wait_for_vms_running_with_ssh_service(
         last_running = running_names
         last_ssh_svcs = ssh_svc_names
         last_ssh_cluster_ips = ssh_svc_cluster_ips
+
+        if ssh_svc_names and len(ssh_svc_cluster_ips) < len(ssh_svc_names):
+            print(
+                f"  WARNING: {len(ssh_svc_names)} SSH services found but only "
+                f"{len(ssh_svc_cluster_ips)} have valid ClusterIPs; "
+                f"probe coverage will be incomplete."
+            )
+
         remaining = max(0, int(deadline - time.monotonic()))
         print(
             f"  [vm-ready attempt={attempt}] cluster={cluster_name} "
@@ -220,7 +228,11 @@ def _wait_for_vms_running_with_ssh_service(
             f"remaining={remaining}s"
         )
 
-        if len(running_names) >= expected and len(ssh_svc_names) >= expected:
+        if (
+            len(running_names) >= expected
+            and len(ssh_svc_names) >= expected
+            and len(ssh_svc_cluster_ips) >= expected
+        ):
             print(
                 f"  All {expected} VM(s) are Running with SSH services on {cluster_name}."
             )
@@ -298,7 +310,7 @@ def _probe_ssh_via_pod(
 
     After the pod is Running, polls connectivity for up to probe_timeout_s.  This
     retry window is intentional: KubeVirt marks a VMI Running when the VM process
-    starts, but the guest SSH daemon may take 30–60 s more to come up after OS
+    starts, but the guest SSH daemon may take 30-60 s more to come up after OS
     boot.  Since this function is called before _assert_rto_within_standard, the
     retry time is correctly included in the RTO measurement.
 
