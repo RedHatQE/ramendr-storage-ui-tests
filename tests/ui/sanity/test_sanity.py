@@ -650,6 +650,141 @@ def _get_drpc_protected_condition() -> dict[str, str]:
     }
 
 
+_GITOPS_VMS_NAMESPACE = "gitops-vms"
+_RELOCATE_COMPLETE_TIMEOUT_MS = int(
+    float(os.getenv("RAMENDR_SANITY_RELOCATE_COMPLETE_TIMEOUT_SECONDS", "1800")) * 1000
+)
+
+
+def _list_gitops_vm_names(kubeconfig: str) -> list[str]:
+    """Return VirtualMachine names in gitops-vms on the given cluster."""
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    try:
+        result = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "oc",
+                "get",
+                "vm",
+                "-n",
+                _GITOPS_VMS_NAMESPACE,
+                "-o",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env=env,
+        )
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+        return [item["metadata"]["name"] for item in data.get("items", [])]
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
+        return []
+
+
+def _drpc_ui_indicates_relocate_complete(drpc_page: DRPCPage, drpc_name: str) -> bool:
+    """True when the ACM UI shows DRPC on primary in a post-relocate state."""
+    state = drpc_page.get_drpc_state(drpc_name)
+    cluster = state["cluster"].strip()
+    status_lower = state["status"].strip().lower()
+    if cluster != "ocp-primary":
+        return False
+    if status_lower in {"relocated", "relocate complete", "healthy"}:
+        return True
+    backend = _get_drpc_protected_condition()
+    return backend.get("phase") == "Relocated"
+
+
+def _is_relocate_truly_done(drpc_page: DRPCPage, drpc_name: str) -> bool:
+    """Relocate is done only when ocp-secondary has no gitops-vms VMs and UI is settled on primary."""
+    secondary_vms = _list_gitops_vm_names(SECONDARY_KUBECONFIG)
+    if secondary_vms:
+        return False
+    return _drpc_ui_indicates_relocate_complete(drpc_page, drpc_name)
+
+
+def _relocate_needs_user_cleanup(drpc_page: DRPCPage, status: str) -> bool:
+    """Return True when Ramen expects manual non-primary cleanup during relocate."""
+    status_lower = status.strip().lower()
+    return status_lower in {
+        "waitonusertocleanup",
+        "action needed",
+    } or drpc_page.is_protection_error_status(status)
+
+
+def _relocate_best_effort_progress(drpc_page: DRPCPage, drpc_name: str) -> None:
+    """Open relocate progress popover when available; ignore UI timing gaps."""
+    try:
+        drpc_page.wait_for_relocate_progress_state(drpc_name)
+        drpc_page.open_failover_progress_popover(drpc_name)
+        drpc_page.assert_relocate_progress_popover(
+            expected_source_cluster="ocp-secondary"
+        )
+    except AssertionError:
+        pass
+
+
+def _wait_for_relocate_secondary_cleared(
+    drpc_page: DRPCPage,
+    drpc_name: str,
+    *,
+    timeout_ms: int = _RELOCATE_COMPLETE_TIMEOUT_MS,
+    poll_interval_ms: int = 30_000,
+) -> None:
+    """Wait until relocate is complete: no VMs on ocp-secondary and DRPC settled on primary.
+
+    While VMs remain on ocp-secondary the UI may still show Healthy on ocp-primary
+    (placement moved before workloads).  In that window we keep polling DRPC and
+    secondary VM objects.  Run non-primary cleanup only when VMs are still on the
+    secondary and DRPC shows WaitOnUserToCleanUp / Action needed / Protection error.
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    last_cleanup_at = 0.0
+
+    while time.monotonic() < deadline:
+        if _is_relocate_truly_done(drpc_page, drpc_name):
+            print(
+                "  Relocate settled: no gitops-vms VMs on ocp-secondary "
+                "and DRPC indicates completion on ocp-primary."
+            )
+            return
+
+        secondary_vms = _list_gitops_vm_names(SECONDARY_KUBECONFIG)
+        state = drpc_page.get_drpc_state(drpc_name)
+        status = state["status"].strip()
+        remaining = max(0, int(deadline - time.monotonic()))
+        print(
+            f"  [relocate-wait] secondary_vms={secondary_vms or '(none)'} "
+            f"dr_status={status!r} cluster={state['cluster']!r} remaining={remaining}s"
+        )
+
+        if secondary_vms and _relocate_needs_user_cleanup(drpc_page, status):
+            if (time.monotonic() - last_cleanup_at) > 60:
+                print(
+                    f"  VMs still on ocp-secondary with DR status {status!r} "
+                    "— running non-primary cleanup"
+                )
+                _run_cleanup_non_primary_cluster(skip_pvcs=True)
+                last_cleanup_at = time.monotonic()
+
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            break
+        drpc_page.page.wait_for_timeout(min(poll_interval_ms, remaining_ms))
+
+    secondary_vms = _list_gitops_vm_names(SECONDARY_KUBECONFIG)
+    state = drpc_page.get_drpc_state(drpc_name)
+    pytest.fail(
+        f"Relocate did not complete within {timeout_ms // 1000}s. "
+        f"secondary_vms={secondary_vms}, "
+        f"dr_status={state['status']!r}, cluster={state['cluster']!r}. "
+        "Check DRPC progression and non-primary cleanup on ocp-secondary."
+    )
+
+
 def _wait_for_drpc_healthy_with_recovery(
     drpc_page: DRPCPage,
     drpc_name: str,
@@ -813,28 +948,17 @@ def _run_force_full_sanity_dr_flow(
     relocate_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_relocate_dialog()
 
-    try:
-        drpc_page.wait_for_relocate_progress_state(drpc_name)
-        drpc_page.open_failover_progress_popover(drpc_name)
-        drpc_page.assert_relocate_progress_popover(
-            expected_source_cluster="ocp-secondary"
-        )
-    except AssertionError:
-        pass
-
-    post_relocate_state = drpc_page.get_drpc_state(drpc_name)
-    post_relocate_status = post_relocate_state["status"].strip().lower()
-    if post_relocate_status in {
-        "waitonusertocleanup",
-        "action needed",
-        "relocating",
-    }:
-        _run_cleanup_non_primary_cluster(skip_pvcs=True)
+    _relocate_best_effort_progress(drpc_page, drpc_name)
+    _wait_for_relocate_secondary_cleared(
+        drpc_page,
+        drpc_name,
+        timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
+    )
 
     drpc_page.wait_for_relocate_complete_state(
         drpc_name,
         expected_cluster="ocp-primary",
-        timeout_ms=2_700_000,
+        timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
     )
     relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
         PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
@@ -937,6 +1061,7 @@ class TestUiSanity:
         relocate_started_at: float | None = None
         relocate_initiated_utc: datetime | None = None
         relocate_probe_pod: str | None = None
+        relocate_was_initiated = False
 
         # Fresh flow: healthy on primary, then trigger failover.
         if ready_for_failover:
@@ -1052,48 +1177,22 @@ class TestUiSanity:
             relocate_started_at = time.monotonic()
             relocate_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_relocate_dialog()
+            relocate_was_initiated = True
 
-        if post_relocate or (
-            drpc_page.get_drpc_state("gitops-vm-protection")["cluster"] == "ocp-primary"
-            and _get_drpc_protected_condition().get("phase") == "Relocated"
-        ):
-            relocate_done = True
-        else:
-            relocate_state = drpc_page.get_drpc_state("gitops-vm-protection")
-            relocate_status = relocate_state["status"].strip().lower()
-            relocate_done = relocate_state[
-                "cluster"
-            ] == "ocp-primary" and relocate_status in {
-                "relocated",
-                "relocate complete",
-                "healthy",
-            }
-
-        if not relocate_done:
-            # Similar to failover: when Action needed appears, assert popup and run cleanup.
-            try:
-                drpc_page.wait_for_relocate_progress_state("gitops-vm-protection")
-                drpc_page.open_failover_progress_popover("gitops-vm-protection")
-                drpc_page.assert_relocate_progress_popover(
-                    expected_source_cluster="ocp-secondary"
-                )
-            except AssertionError:
-                pass
-
-            post_relocate_state = drpc_page.get_drpc_state("gitops-vm-protection")
-            post_relocate_status = post_relocate_state["status"].strip().lower()
-            if post_relocate_status in {
-                "waitonusertocleanup",
-                "action needed",
-                "relocating",
-            }:
-                _run_cleanup_non_primary_cluster(skip_pvcs=True)
+        if not _is_relocate_truly_done(drpc_page, "gitops-vm-protection"):
+            if relocate_was_initiated:
+                _relocate_best_effort_progress(drpc_page, "gitops-vm-protection")
+            _wait_for_relocate_secondary_cleared(
+                drpc_page,
+                "gitops-vm-protection",
+                timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
+            )
 
         # --- Wait for relocate completion + healthy on primary ---
         drpc_page.wait_for_relocate_complete_state(
             "gitops-vm-protection",
             expected_cluster="ocp-primary",
-            timeout_ms=2_700_000,
+            timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
         )
         if relocate_probe_pod is None:
             relocate_probe_pod = _launch_ssh_probe_pod(PRIMARY_KUBECONFIG)
