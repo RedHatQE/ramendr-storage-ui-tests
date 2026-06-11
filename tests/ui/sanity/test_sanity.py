@@ -14,7 +14,7 @@ collects edge VM timestamp logs and asserts sequence continuity (no data-loss ga
 Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that step.
 Default RTO hard limit is 1200s (20 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
 Warn when RTO exceeds 900s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 20 min limit.
-DR validation subprocess timeout defaults to 600s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
+DR validation subprocess timeout defaults to 900s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
 """
 
 import json
@@ -355,12 +355,11 @@ def _probe_ssh_via_pod(
         time.sleep(5)
 
     if not pod_running:
-        print(
-            f"WARNING: SSH probe pod {pod_name!r} not Running after "
-            f"{pod_ready_timeout_s:.0f}s — skipping in-cluster connectivity check."
-        )
         _delete_probe_pod(kubeconfig, pod_name, namespace=namespace)
-        return
+        pytest.fail(
+            f"SSH probe pod {pod_name!r} did not become Running within "
+            f"{pod_ready_timeout_s:.0f}s, so VM reachability could not be verified."
+        )
 
     # Poll until every ClusterIP is reachable or the deadline expires.
     # Retrying is necessary because KubeVirt marks VMIs Running before the
@@ -656,8 +655,12 @@ _RELOCATE_COMPLETE_TIMEOUT_MS = int(
 )
 
 
-def _list_gitops_vm_names(kubeconfig: str) -> list[str]:
-    """Return VirtualMachine names in gitops-vms on the given cluster."""
+def _list_gitops_vm_names(kubeconfig: str) -> list[str] | None:
+    """Return VirtualMachine names in gitops-vms on the given cluster.
+
+    Returns None when the API call fails so callers can retry instead of
+    treating a transient error as an empty namespace.
+    """
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
     try:
@@ -678,11 +681,11 @@ def _list_gitops_vm_names(kubeconfig: str) -> list[str]:
             env=env,
         )
         if result.returncode != 0:
-            return []
+            return None
         data = json.loads(result.stdout)
         return [item["metadata"]["name"] for item in data.get("items", [])]
     except (subprocess.TimeoutExpired, OSError, ValueError, KeyError):
-        return []
+        return None
 
 
 def _drpc_ui_indicates_relocate_complete(drpc_page: DRPCPage, drpc_name: str) -> bool:
@@ -701,7 +704,7 @@ def _drpc_ui_indicates_relocate_complete(drpc_page: DRPCPage, drpc_name: str) ->
 def _is_relocate_truly_done(drpc_page: DRPCPage, drpc_name: str) -> bool:
     """Relocate is done only when ocp-secondary has no gitops-vms VMs and UI is settled on primary."""
     secondary_vms = _list_gitops_vm_names(SECONDARY_KUBECONFIG)
-    if secondary_vms:
+    if secondary_vms is None or secondary_vms:
         return False
     return _drpc_ui_indicates_relocate_complete(drpc_page, drpc_name)
 
@@ -756,12 +759,20 @@ def _wait_for_relocate_secondary_cleared(
         state = drpc_page.get_drpc_state(drpc_name)
         status = state["status"].strip()
         remaining = max(0, int(deadline - time.monotonic()))
+        if secondary_vms is None:
+            vm_display = "(unknown — oc get vm failed; retrying)"
+        else:
+            vm_display = secondary_vms or "(none)"
         print(
-            f"  [relocate-wait] secondary_vms={secondary_vms or '(none)'} "
+            f"  [relocate-wait] secondary_vms={vm_display} "
             f"dr_status={status!r} cluster={state['cluster']!r} remaining={remaining}s"
         )
 
-        if secondary_vms and _relocate_needs_user_cleanup(drpc_page, status):
+        if (
+            secondary_vms is not None
+            and secondary_vms
+            and _relocate_needs_user_cleanup(drpc_page, status)
+        ):
             if (time.monotonic() - last_cleanup_at) > 60:
                 print(
                     f"  VMs still on ocp-secondary with DR status {status!r} "
