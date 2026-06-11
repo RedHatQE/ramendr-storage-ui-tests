@@ -47,7 +47,7 @@ replicated with the protected KubeVirt workload.
 A **PASS** means no missing sequence numbers, no parse errors, and no RPO threshold breach.
 Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bound as
 `gap * interval` seconds and fails when that estimate is greater than `DR_VALIDATION_MAX_RPO_SECONDS`
-(default `900` seconds / 15 minutes).
+(default `120` seconds / 2 minutes, aligned with the `2m-vm` DRPolicy).
 
 ## Components
 
@@ -71,7 +71,9 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `DR_VALIDATION_STATUS_MAX_AGE_SEC` | `300` | Max log age for `status.sh` freshness check |
 | `DR_VALIDATION_LOG_PATH` | `/var/lib/ramendr-dr-validation/timestamps.log` | Log on VM |
 | `DR_VALIDATION_INTERVAL` | `10.0` | Seconds between records |
-| `DR_VALIDATION_MAX_RPO_SECONDS` | `900` | Fail check when estimated RPO (`max_seq_gap * interval`) exceeds this threshold |
+| `DR_VALIDATION_MAX_RPO_SECONDS` | `120` | Fail check when estimated RPO (`max_seq_gap * interval`) exceeds this threshold |
+| `RAMENDR_SANITY_MAX_RTO_SECONDS` | `1200` | UI sanity test: fail when measured failover/relocate RTO exceeds this limit |
+| `RAMENDR_SANITY_RTO_WARN_SECONDS` | `900` | UI sanity test: log a warning when RTO exceeds this threshold (still below hard limit) |
 | `DR_VALIDATION_SNAPSHOT_KEEP` | `1` | Auto-snapshot dirs to retain (latest only; `latest` symlink always points at current baseline) |
 | `SKIP_DR_VALIDATION` | `0` | Set `1` in redeploy to skip automatic writer setup |
 | `REQUIRE_DR_VALIDATION` | `0` | Set `1` to fail redeploy if writers are not recording |

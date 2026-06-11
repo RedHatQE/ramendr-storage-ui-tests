@@ -168,8 +168,8 @@ latest snapshot is kept as the pre-failover baseline). After failover/relocate a
 ```
 
 That single command runs cleanup (with safety guards), waits for healthy VMs, and validates data — no other manual steps.
-Defaults enforce a **2-minute RPO** and **15-minute RTO**: `DR_VALIDATION_MAX_RPO_SECONDS=120` and
-`RAMENDR_SANITY_MAX_RTO_SECONDS=900` (override via env vars if your target changes).
+Defaults enforce a **2-minute RPO** and **20-minute RTO** (warn at 15 minutes): `DR_VALIDATION_MAX_RPO_SECONDS=120`,
+`RAMENDR_SANITY_MAX_RTO_SECONDS=1200`, and `RAMENDR_SANITY_RTO_WARN_SECONDS=900` (override via env vars if your target changes).
 
 See [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md) for the Jira-ready procedure.
 

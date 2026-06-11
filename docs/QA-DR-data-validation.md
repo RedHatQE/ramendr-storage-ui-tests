@@ -46,6 +46,9 @@ automatically after each DR phase completes (healthy on the new primary):
 
 Set `RAMENDR_SANITY_SKIP_DR_VALIDATION=1` (or `SKIP_DR_VALIDATION=1`) to skip.
 
+RTO is measured from the UI Initiate click until all edge VMs pass an in-cluster SSH probe.
+Defaults: warn at `RAMENDR_SANITY_RTO_WARN_SECONDS=900`, fail above `RAMENDR_SANITY_MAX_RTO_SECONDS=1200`.
+
 For manual or one-off runs after the UI cleanup step:
 
 ```bash

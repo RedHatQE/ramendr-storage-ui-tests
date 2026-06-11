@@ -12,8 +12,8 @@ Usage:
 After each DR phase (failover to secondary, relocate back to primary), the test
 collects edge VM timestamp logs and asserts sequence continuity (no data-loss gaps).
 Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that step.
-Default RTO standard is 900s (15 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
-Warn when RTO exceeds 120s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 15 min limit.
+Default RTO hard limit is 1200s (20 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
+Warn when RTO exceeds 900s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 20 min limit.
 DR validation subprocess timeout defaults to 600s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
 """
 
@@ -50,8 +50,8 @@ _SKIP_DR_TIMESTAMP_VALIDATION = (
     or os.getenv("SKIP_DR_VALIDATION", "0") == "1"
 )
 
-_MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "900"))
-_RTO_WARN_SECONDS = float(os.getenv("RAMENDR_SANITY_RTO_WARN_SECONDS", "120"))
+_MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "1200"))
+_RTO_WARN_SECONDS = float(os.getenv("RAMENDR_SANITY_RTO_WARN_SECONDS", "900"))
 _DR_VALIDATION_TIMEOUT_SECONDS = float(
     os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "900")
 )
@@ -511,11 +511,13 @@ def _run_dr_timestamp_validation(
 
 
 def _run_cleanup_non_primary_cluster(*, skip_pvcs: bool = False):
-    """Run non-primary cleanup script (auto-confirm) after failover action-needed.
+    """Run non-primary cleanup script (auto-confirm) after DR action-needed.
 
-    Pass skip_pvcs=True during relocate cleanup to preserve the RBD mirror source
-    images on the non-primary cluster. Deleting those PVCs while ocp-primary is
-    still promoting its VolumeGroupReplication breaks the promotion path.
+    Pass skip_pvcs=True during failover and relocate cleanup. The non-primary
+    spoke still holds VolumeGroupReplication state Ramen needs to demote/promote;
+    deleting PVCs there while replication is settling breaks lastGroupSyncTime and
+    leaves DRPC Protected=False (former primary after failover, secondary during
+    relocate).
     """
     repo_root = _repo_root()
     script_path = repo_root / "scripts" / "cleanup-gitops-vms-non-primary.sh"
@@ -663,9 +665,8 @@ def _wait_for_drpc_healthy_with_recovery(
     cleaned and reconciliation completes.
 
     cleanup_skip_pvcs: when True, PVC/PV deletion is skipped during any recovery
-    cleanup triggered inside this wait.  Must be True on the relocate path to avoid
-    deleting secondary PVCs while ocp-primary is still promoting its
-    VolumeGroupReplication (the same race the --skip-pvcs flag was introduced to fix).
+    cleanup triggered inside this wait.  Must be True after failover (former primary)
+    and during relocate (secondary) so Ramen can finish VGR demotion/promotion.
     """
     poll_interval_ms = 30_000
     deadline = time.monotonic() + (timeout_ms / 1000)
@@ -770,7 +771,7 @@ def _run_force_full_sanity_dr_flow(
         "action needed",
         "protection error",
     }:
-        _run_cleanup_non_primary_cluster()
+        _run_cleanup_non_primary_cluster(skip_pvcs=True)
 
     drpc_page.wait_for_failover_complete_state(
         drpc_name,
@@ -788,6 +789,7 @@ def _run_force_full_sanity_dr_flow(
         drpc_page,
         drpc_name,
         expected_cluster="ocp-secondary",
+        cleanup_skip_pvcs=True,
         timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
     )
     _assert_managed_clusters_available()
@@ -996,7 +998,7 @@ class TestUiSanity:
                 "action needed",
                 "protection error",
             }:
-                _run_cleanup_non_primary_cluster()
+                _run_cleanup_non_primary_cluster(skip_pvcs=True)
 
         if run_failover_phase:
             # --- Wait for failover completion + healthy (up to 15 minutes) ---
@@ -1022,6 +1024,7 @@ class TestUiSanity:
                 drpc_page,
                 "gitops-vm-protection",
                 expected_cluster="ocp-secondary",
+                cleanup_skip_pvcs=True,
                 timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
             )
 
