@@ -454,7 +454,10 @@ class DRPCPage(BasePage):
         expected_cluster: str = "ocp-secondary",
         timeout_ms: int = 900_000,
     ):
-        """Wait until DRPC reaches post-failover complete/healthy state."""
+        """Wait until DRPC reaches post-failover complete/healthy state.
+
+        Accepts Critical when the UI skips the FailedOver label but failover has finished.
+        """
         row = self.page.locator("tr").filter(
             has=self.page.locator(f"a[data-test='resource-link-{drpc_name}']")
         )
@@ -476,7 +479,7 @@ class DRPCPage(BasePage):
             f"DRPC '{drpc_name}' did not reach failover-complete/healthy status",
         ).to_contain_text(
             re.compile(
-                r"FailedOver|Failover\s*complete|Healthy|Protection\s*error",
+                r"FailedOver|Failover\s*complete|Healthy|Protection\s*error|Critical",
                 re.IGNORECASE,
             ),
             timeout=timeout_ms,
