@@ -39,7 +39,7 @@ SECONDARY_REGION="${SECONDARY_REGION:-eu-west-1}"
 
 # Target OCP version for all clusters � hub + spokes should use the same minor version
 # to avoid ODF Multicluster Orchestrator incompatibilities.
-HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.21.14}"
+HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.22.1}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -1303,7 +1303,7 @@ case "${1:-}" in
     echo " PRIMARY_INSTALL_DIR   Primary spoke install directory (default: ~/git/ocp-primary-install)"
     echo " SECONDARY_INSTALL_DIR Secondary spoke install directory (default: ~/git/ocp-secondary-install)"
     echo " VALUES_SECRET         Path to values-secret.yaml (default: ~/values-secret.yaml)"
-    echo " HUB_OCP_VERSION       OCP version for all clusters (default: 4.21.14)"
+    echo " HUB_OCP_VERSION       OCP version for all clusters (default: 4.22.1)"
     echo " HOSTED_ZONE_ID        Route53 hosted zone ID (verified, never deleted)"
     echo " BASE_DOMAIN           Base domain for the clusters (required, no default)"
     echo " CLEANUP_DNS           Set to 1 to bulk-delete DNS records in the hosted zone before install"
