@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+ensure_hub_kubeconfig
+
 if [[ "${SKIP_DR_VALIDATION_SNAPSHOTS:-0}" == "1" ]] || [[ "${SKIP_DR_VALIDATION:-0}" == "1" ]]; then
   log "Automatic snapshots disabled (SKIP_DR_VALIDATION or SKIP_DR_VALIDATION_SNAPSHOTS)."
   exit 0
@@ -25,6 +27,17 @@ if [[ -f "$SNAPSHOT_DAEMON_PID_FILE" ]]; then
     log "Snapshot daemon already running (pid ${old_pid})."
     exit 0
   fi
+fi
+
+if dr_validation_uses_hammerdb; then
+  mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"
+  if ! seed_db_baseline_snapshot_if_missing; then
+    err "DB baseline seeding failed."
+    exit 1
+  fi
+  log "HammerDB mode uses a single pre-DR baseline (not a rolling daemon)."
+  log "Capture before DR with: ./scripts/dr-validation/save-db-baseline-snapshot.sh"
+  exit 0
 fi
 
 nohup "$SCRIPT_DIR/snapshot-daemon.sh" >>"$SNAPSHOT_DAEMON_LOG" 2>&1 &

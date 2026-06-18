@@ -1,6 +1,6 @@
 """UI sanity tests for the RamenDR ACM console.
 
-Run after scripts/redeploy.sh completes (timestamp writers should be recording).
+Run after scripts/redeploy.sh completes (HammerDB PostgreSQL or timestamp validation should be recording).
 
 Usage:
     pytest tests/ui/sanity/test_sanity.py -m smoke
@@ -10,12 +10,15 @@ Usage:
     RAMENDR_SANITY_FORCE_FULL=0 pytest tests/ui/sanity/test_sanity.py -m smoke
 
 After each DR phase (failover to secondary, relocate back to primary), the test
-collects edge VM timestamp logs and asserts sequence continuity (no data-loss gaps).
+runs ./scripts/dr-validation/check-after-dr.sh (HammerDB PostgreSQL by default, or
+legacy timestamp logs when DR_VALIDATION_MODE=timestamp).
 Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that step.
 Default RTO hard limit is 1200s (20 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
 Warn when RTO exceeds 900s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 20 min limit.
 DR validation subprocess timeout defaults to 900s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -468,10 +471,58 @@ def _delete_probe_pod(
         pass
 
 
-def _run_dr_timestamp_validation(
+def _save_hammerdb_baseline_snapshot(*, phase: str) -> None:
+    """Capture a fresh DB baseline on the HammerDB VM immediately before Initiate."""
+    if _SKIP_DR_TIMESTAMP_VALIDATION:
+        return
+    if os.getenv("DR_VALIDATION_MODE", "hammerdb") != "hammerdb":
+        return
+
+    script_path = (
+        _repo_root() / "scripts" / "dr-validation" / "save-db-baseline-snapshot.sh"
+    )
+    assert script_path.exists(), f"Baseline snapshot script not found: {script_path}"
+
+    env = os.environ.copy()
+    env["KUBECONFIG"] = HUB_KUBECONFIG
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["bash", str(script_path)],  # noqa: S607
+            cwd=_repo_root(),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_DR_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        pytest.fail(
+            f"HammerDB baseline snapshot timed out before {phase} "
+            f"(limit={_DR_VALIDATION_TIMEOUT_SECONDS:.0f}s).\n"
+            f"stdout:\n{stdout}\n"
+            f"stderr:\n{stderr}"
+        )
+    assert result.returncode == 0, (
+        f"HammerDB baseline snapshot failed before {phase}.\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
+
+def _run_dr_data_validation(
     *, phase: str, initiated_utc: datetime | None = None
 ) -> None:
-    """Collect VM timestamp logs and assert continuity after failover or relocate.
+    """Collect DR validation data and assert continuity after failover or relocate.
+
+    Uses check-after-dr.sh with HammerDB PostgreSQL validation on
+    DR_VALIDATION_HAMMERDB_VM (default `rhel9-node-001`). Set
+    DR_VALIDATION_MODE=timestamp for the legacy per-VM timestamp log checks.
 
     initiated_utc: UTC datetime of the "Initiate" UI click that started the DR
     operation.  When provided it is forwarded as DR_VALIDATION_CUTOFF_UTC so
@@ -480,7 +531,7 @@ def _run_dr_timestamp_validation(
     """
     if _SKIP_DR_TIMESTAMP_VALIDATION:
         print(
-            f"NOTE: Skipping DR timestamp validation after {phase} "
+            f"NOTE: Skipping DR data validation after {phase} "
             "(RAMENDR_SANITY_SKIP_DR_VALIDATION or SKIP_DR_VALIDATION)"
         )
         return
@@ -492,6 +543,8 @@ def _run_dr_timestamp_validation(
     env["KUBECONFIG"] = HUB_KUBECONFIG
     if initiated_utc is not None:
         env["DR_VALIDATION_CUTOFF_UTC"] = initiated_utc.isoformat()
+    else:
+        env.pop("DR_VALIDATION_CUTOFF_UTC", None)
     cmd = ["bash", str(script_path)]
     try:
         result = subprocess.run(  # noqa: S603
@@ -511,15 +564,15 @@ def _run_dr_timestamp_validation(
         if isinstance(stderr, bytes):
             stderr = stderr.decode(errors="replace")
         pytest.fail(
-            f"DR timestamp validation timed out after {phase} "
+            f"DR data validation timed out after {phase} "
             f"(limit={_DR_VALIDATION_TIMEOUT_SECONDS:.0f}s; "
             "increase RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS if needed).\n"
             f"stdout:\n{stdout}\n"
             f"stderr:\n{stderr}"
         )
     assert result.returncode == 0, (
-        f"DR timestamp validation failed after {phase} "
-        "(sequence gaps or log collect errors — see dr-validation/README.md).\n"
+        f"DR data validation failed after {phase} "
+        "(HammerDB PostgreSQL / audit continuity or collect errors — see dr-validation/README.md).\n"
         f"stdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
@@ -909,6 +962,7 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.open_failover_dialog(drpc_name)
     drpc_page.assert_failover_dialog_contents()
+    _save_hammerdb_baseline_snapshot(phase="failover")
     failover_started_at = time.monotonic()
     failover_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_failover_dialog()
@@ -951,7 +1005,7 @@ def _run_force_full_sanity_dr_flow(
         timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
     )
     _assert_managed_clusters_available()
-    _run_dr_timestamp_validation(phase="failover", initiated_utc=failover_initiated_utc)
+    _run_dr_data_validation(phase="failover", initiated_utc=failover_initiated_utc)
 
     state_before_relocate = drpc_page.get_drpc_state(drpc_name)
     assert state_before_relocate["cluster"] == "ocp-secondary", (
@@ -966,6 +1020,7 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.open_relocate_dialog(drpc_name)
     drpc_page.assert_relocate_dialog_contents()
+    _save_hammerdb_baseline_snapshot(phase="relocate")
     relocate_started_at = time.monotonic()
     relocate_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_relocate_dialog()
@@ -995,7 +1050,7 @@ def _run_force_full_sanity_dr_flow(
         timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
     )
     _assert_managed_clusters_available()
-    _run_dr_timestamp_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
+    _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
 
 
 def _require_ui_credentials():
@@ -1100,6 +1155,7 @@ class TestUiSanity:
             # --- Failover popup (initiate path) ---
             drpc_page.open_failover_dialog("gitops-vm-protection")
             drpc_page.assert_failover_dialog_contents()
+            _save_hammerdb_baseline_snapshot(phase="failover")
             failover_started_at = time.monotonic()
             failover_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_failover_dialog()
@@ -1170,7 +1226,7 @@ class TestUiSanity:
 
             # --- Cluster health check before relocate ---
             _assert_managed_clusters_available()
-            _run_dr_timestamp_validation(
+            _run_dr_data_validation(
                 phase="failover", initiated_utc=failover_initiated_utc
             )
 
@@ -1188,6 +1244,7 @@ class TestUiSanity:
             # --- Relocate from secondary back to primary ---
             drpc_page.open_relocate_dialog("gitops-vm-protection")
             drpc_page.assert_relocate_dialog_contents()
+            _save_hammerdb_baseline_snapshot(phase="relocate")
             relocate_started_at = time.monotonic()
             relocate_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_relocate_dialog()
@@ -1221,6 +1278,4 @@ class TestUiSanity:
             timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
         )
         _assert_managed_clusters_available()
-        _run_dr_timestamp_validation(
-            phase="relocate", initiated_utc=relocate_initiated_utc
-        )
+        _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)

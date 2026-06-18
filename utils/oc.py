@@ -1,5 +1,7 @@
 """Thin wrapper around the oc CLI for use in smoke tests."""
 
+from __future__ import annotations
+
 import subprocess
 from pathlib import Path
 

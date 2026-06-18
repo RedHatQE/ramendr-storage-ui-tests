@@ -4,6 +4,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DR_VALIDATION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DR_VALIDATION_DIR="${DR_VALIDATION_DIR:-$REPO_ROOT/dr-validation}"
 VM_NAMESPACE="${VM_NAMESPACE:-gitops-vms}"
 DRPC_NAMESPACE="${DRPC_NAMESPACE:-openshift-dr-ops}"
@@ -13,6 +14,11 @@ PLACEMENT_NAME="${PLACEMENT_NAME:-gitops-vm-protection-placement-1}"
 SSH_USER="${SSH_USER:-cloud-user}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-$HOME/.ssh/id_rsa}"
 DR_VALIDATION_LOG_PATH="${DR_VALIDATION_LOG_PATH:-/var/lib/ramendr-dr-validation/timestamps.log}"
+DR_VALIDATION_MODE="${DR_VALIDATION_MODE:-hammerdb}"
+DR_VALIDATION_HAMMERDB_VM="${DR_VALIDATION_HAMMERDB_VM:-rhel9-node-001}"
+DR_VALIDATION_DB_SNAPSHOT_ROOT="${DR_VALIDATION_DB_SNAPSHOT_ROOT:-${REPO_ROOT}/.work/dr-validation-db/auto}"
+# Pinned digest for reproducible in-cluster DR validation Jobs (override via env).
+DR_VALIDATION_UTILITY_CONTAINER_IMAGE="${DR_VALIDATION_UTILITY_CONTAINER_IMAGE:-quay.io/validatedpatterns/utility-container@sha256:05575d196a37ee5317b472408e552ff3eafa58cdfc26ba4454954e0d24337cec}"
 DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 DR_VALIDATION_SNAPSHOT_INTERVAL="${DR_VALIDATION_SNAPSHOT_INTERVAL:-300}"
 DR_VALIDATION_SNAPSHOT_KEEP="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
@@ -300,6 +306,78 @@ update_latest_snapshot_link() {
   ln -sfn "$(basename "$snap_dir")" "${AUTO_SNAPSHOT_ROOT}/latest"
 }
 
+is_auto_db_snapshot_dir() {
+  local out_dir="$1"
+  local canonical_out="" canonical_root=""
+  [[ -d "$out_dir" ]] || return 1
+  canonical_out="$(cd "$out_dir" && pwd)"
+  mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"
+  canonical_root="$(cd "$DR_VALIDATION_DB_SNAPSHOT_ROOT" && pwd)"
+  [[ "$canonical_out" == "${canonical_root}/"* ]]
+}
+
+update_latest_db_snapshot_link() {
+  local snap_dir="$1"
+  mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"
+  ln -sfn "$(basename "$snap_dir")" "${DR_VALIDATION_DB_SNAPSHOT_ROOT}/latest"
+}
+
+# Resolve auto/latest to an absolute baseline directory.
+# Returns 0 and prints the path when valid; 1 when missing; 2 when dangling.
+resolve_db_baseline_dir() {
+  local root="$1"
+  local link="${root}/latest"
+  local resolved=""
+  if [[ ! -L "$link" ]]; then
+    return 1
+  fi
+  if resolved="$(cd "$link" 2>/dev/null && pwd)"; then
+    echo "$resolved"
+    return 0
+  fi
+  return 2
+}
+
+seed_db_baseline_snapshot_if_missing() {
+  local stamp dest count
+  mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"
+  if [[ -L "${DR_VALIDATION_DB_SNAPSHOT_ROOT}/latest" ]]; then
+    shopt -s nullglob
+    local existing=("${DR_VALIDATION_DB_SNAPSHOT_ROOT}/latest"/*.db-snapshot.json)
+    shopt -u nullglob
+    if [[ ${#existing[@]} -ge 1 ]]; then
+      return 0
+    fi
+  fi
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  dest="${DR_VALIDATION_DB_SNAPSHOT_ROOT}/${stamp}"
+  log "Seeding initial DB baseline snapshot -> ${dest}"
+  if ! "$DR_VALIDATION_SCRIPT_DIR/collect-db-snapshot-incluster.sh" "$dest"; then
+    err "Could not seed initial DB baseline snapshot."
+    return 1
+  fi
+}
+
+prune_auto_snapshots_db() {
+  local keep="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
+  [[ -d "$DR_VALIDATION_DB_SNAPSHOT_ROOT" ]] || return 0
+  local dirs=()
+  while IFS= read -r d; do
+    dirs+=("$d")
+  done < <(find "$DR_VALIDATION_DB_SNAPSHOT_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name 'latest' | sort)
+  local count=${#dirs[@]}
+  if [[ "$count" -le "$keep" ]]; then
+    return 0
+  fi
+  local to_remove=$((count - keep))
+  local i=0
+  for d in "${dirs[@]}"; do
+    [[ $i -ge $to_remove ]] && break
+    rm -rf "$d"
+    i=$((i + 1))
+  done
+}
+
 wait_for_primary_vms_healthy() {
   local expected="${DR_VALIDATION_EXPECTED_VMS:-4}"
   local max_tries="${DR_VALIDATION_HEALTH_WAIT_TRIES:-40}"
@@ -369,4 +447,27 @@ CHECK
   fi
   log "All ${ok} timestamp writer(s) running and recording."
   return 0
+}
+
+dr_validation_uses_hammerdb() {
+  [[ "${DR_VALIDATION_MODE}" == "hammerdb" ]]
+}
+
+get_hammerdb_vm_host() {
+  local kubeconfig="$1"
+  local target="${DR_VALIDATION_HAMMERDB_VM:-}"
+  while IFS=$'\t' read -r route_name host port; do
+    [[ -z "$route_name" ]] && continue
+    if [[ -n "$target" && "$route_name" != "$target" ]]; then
+      continue
+    fi
+    echo "${route_name}	${host}	${port:-22}"
+    return 0
+  done < <(list_vm_ssh_hosts "$kubeconfig")
+  if [[ -n "$target" ]]; then
+    err "HammerDB target VM '${target}' not found in gitops-vms SSH endpoints."
+    return 1
+  fi
+  err "No SSH endpoints for HammerDB target in gitops-vms."
+  return 1
 }

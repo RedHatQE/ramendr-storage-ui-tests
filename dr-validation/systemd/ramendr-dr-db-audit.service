@@ -1,0 +1,18 @@
+[Unit]
+Description=RamenDR PostgreSQL audit writer for HammerDB validation
+After=ramendr-postgresql.service
+Requires=ramendr-postgresql.service
+
+[Service]
+Type=simple
+User=cloud-user
+Group=cloud-user
+EnvironmentFile=-/etc/ramendr-dr-validation/db.env
+Environment=PYTHONPATH=/usr/local/lib/ramendr_dr_validation
+Environment=DR_VALIDATION_INTERVAL=10.0
+ExecStart=/usr/local/bin/ramendr-dr-db-audit
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

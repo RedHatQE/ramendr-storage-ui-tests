@@ -1,0 +1,17 @@
+[Unit]
+Description=RamenDR HammerDB TPC-C autopilot workload
+After=ramendr-postgresql.service
+Requires=ramendr-postgresql.service
+
+[Service]
+Type=simple
+User=cloud-user
+Group=cloud-user
+Environment=TMPDIR=/var/lib/ramendr-dr-validation/hammerdb/tmp
+EnvironmentFile=-/etc/ramendr-dr-validation/db.env
+ExecStart=/usr/local/bin/ramendr-hammerdb-autopilot
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

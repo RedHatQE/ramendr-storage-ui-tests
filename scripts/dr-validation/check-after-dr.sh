@@ -10,6 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+if dr_validation_uses_hammerdb; then
+  exec "$SCRIPT_DIR/check-after-dr-hammerdb.sh"
+fi
+
 export PYTHONPATH="${DR_VALIDATION_DIR}:${PYTHONPATH:-}"
 INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 # Default aligns with the 2m-vm DRPolicy: ≤120 s data loss is acceptable.

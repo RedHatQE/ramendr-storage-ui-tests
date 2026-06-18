@@ -4,7 +4,7 @@
 
 | When | What |
 |------|------|
-| After `./scripts/redeploy.sh` | Timestamp writers (every **10 s**) + rolling baseline snapshot every **5 min** (latest only) |
+| After `./scripts/redeploy.sh` | **HammerDB** (default): PostgreSQL TPC-C + audit writer on `rhel9-node-001`, initial baseline snapshot to `.work/dr-validation-db/auto/latest`. Capture a fresh baseline before DR with `./scripts/dr-validation/save-db-baseline-snapshot.sh` (sanity test does this automatically). Legacy: timestamp writers every **10 s** + rolling log snapshots every **5 min** when `DR_VALIDATION_MODE=timestamp`. |
 | After DR + UI cleanup message | Run **one** automation script (see below) |
 
 ---
@@ -32,13 +32,13 @@ This runs **automatically**, in order:
 
 1. **Cleanup** on non-primary only (with DRPC safety guards; no confirmation prompt).
 2. **Wait** until edge VMs are **Running** on the new primary.
-3. **Validate** timestamp logs and print **PASS/FAIL**.
+3. **Validate** HammerDB PostgreSQL data (default) or timestamp logs (`DR_VALIDATION_MODE=timestamp`) and print **PASS/FAIL**.
 
 You do **not** run `cleanup-gitops-vms-non-primary.sh` or `check-after-dr.sh` separately unless debugging.
 
 ### Playwright / sanity test
 
-The UI sanity test (`tests/ui/sanity/test_sanity.py`) runs timestamp validation
+The UI sanity test (`tests/ui/sanity/test_sanity.py`) runs DR validation
 automatically after each DR phase completes (healthy on the new primary):
 
 1. After **failover** to `ocp-secondary` — `./scripts/dr-validation/check-after-dr.sh`
@@ -96,7 +96,7 @@ After VMs and DataVolumes are removed, the script also deletes **all PVCs** in `
 
 ## Checklist
 
-- [ ] Redeploy done; auto snapshots running
+- [ ] Redeploy done; HammerDB baseline saved (or timestamp auto snapshots running in legacy mode)
 - [ ] DR completed in UI; cleanup message shown
 - [ ] Ran `./scripts/dr-validation/post-dr-automation.sh` → **PASS**
 - [ ] Attached output or report folder to ticket if needed
