@@ -13,10 +13,6 @@ if [[ "${SKIP_DR_VALIDATION_SNAPSHOTS:-0}" == "1" ]] || [[ "${SKIP_DR_VALIDATION
 fi
 
 mkdir -p "$(dirname "$SNAPSHOT_DAEMON_PID_FILE")" "$AUTO_SNAPSHOT_ROOT"
-if dr_validation_uses_hammerdb; then
-  mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"
-  seed_db_baseline_snapshot_if_missing
-fi
 
 SNAPSHOT_DAEMON_LOCK_DIR="${REPO_ROOT}/.work/dr-validation-snapshot-daemon.lock.d"
 if ! mkdir "$SNAPSHOT_DAEMON_LOCK_DIR" 2>/dev/null; then
@@ -31,6 +27,11 @@ if [[ -f "$SNAPSHOT_DAEMON_PID_FILE" ]]; then
     log "Snapshot daemon already running (pid ${old_pid})."
     exit 0
   fi
+fi
+
+if dr_validation_uses_hammerdb; then
+  mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"
+  seed_db_baseline_snapshot_if_missing
 fi
 
 nohup "$SCRIPT_DIR/snapshot-daemon.sh" >>"$SNAPSHOT_DAEMON_LOG" 2>&1 &

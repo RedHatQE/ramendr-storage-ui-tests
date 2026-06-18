@@ -29,6 +29,9 @@ def _snapshot(records: list[dict], tpcc: dict[str, int] | None = None) -> dict:
             "stock": 100_000,
             "item": 100_000,
             "orders": 900,
+            "order_line": 0,
+            "new_order": 0,
+            "history": 0,
         },
     }
 
@@ -110,6 +113,9 @@ def test_validate_tpcc_regression_against_baseline(tmp_path: Path) -> None:
                 "district": 10,
                 "stock": 100_000,
                 "item": 100_000,
+                "order_line": 0,
+                "new_order": 0,
+                "history": 0,
             },
         ),
     )
@@ -124,6 +130,9 @@ def test_validate_tpcc_regression_against_baseline(tmp_path: Path) -> None:
                 "district": 10,
                 "stock": 100_000,
                 "item": 100_000,
+                "order_line": 0,
+                "new_order": 0,
+                "history": 0,
             },
         ),
     )
@@ -167,3 +176,30 @@ def test_rpo_from_cutoff_uses_last_pre_cutoff_record(tmp_path: Path) -> None:
         cutoff_utc=datetime(2026, 6, 15, 12, 1, 0, tzinfo=timezone.utc).isoformat(),
     )
     assert payload["rpo_from_cutoff_seconds"] == 30.0
+
+
+def test_validate_fails_when_baseline_compare_missing(tmp_path: Path) -> None:
+    after = tmp_path / "edgenode-0.db-snapshot.json"
+    _write_snapshot(
+        after,
+        _snapshot(
+            [
+                {
+                    "seq": 1,
+                    "committed_at": "2026-06-15T12:00:01.000Z",
+                    "hostname": "edgenode-0",
+                    "source": "db_audit",
+                }
+            ]
+        ),
+    )
+    missing_baseline = tmp_path / "missing-baseline.json"
+
+    payload = validate_snapshot_file(
+        after,
+        before_path=missing_baseline,
+        interval=10.0,
+    )
+
+    assert payload["ok"] is False
+    assert any("Baseline snapshot not found" in err for err in payload["parse_errors"])

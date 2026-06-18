@@ -160,7 +160,7 @@ PRs that fail the checks cannot be merged.
 ## RamenDR data validation
 
 Default mode is **HammerDB TPC-C on PostgreSQL** (`DR_VALIDATION_MODE=hammerdb`) on
-`edgenode-0`. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
+`rhel9-node-001`. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
 builds populated TPC-C tables (customers with IDs, orders, stock, …), verifies recording,
 saves an initial baseline snapshot, and starts rolling snapshots every 5 minutes.
 

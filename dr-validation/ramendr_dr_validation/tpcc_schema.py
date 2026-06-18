@@ -42,11 +42,9 @@ def validate_tpcc_populated(tpcc_counts: dict[str, int]) -> list[str]:
     """Return errors when required TPC-C tables are missing or under minimum row counts."""
     errors: list[str] = []
     for table, minimum in TPCC_MIN_ROW_COUNTS.items():
-        if minimum <= 0:
-            continue
         count = tpcc_counts.get(table)
         if count is None:
-            errors.append(f"{table}: missing (expected at least {minimum} rows)")
-        elif count < minimum:
+            errors.append(f"{table}: missing (expected table to exist)")
+        elif minimum > 0 and count < minimum:
             errors.append(f"{table}: {count} rows (expected at least {minimum})")
     return errors

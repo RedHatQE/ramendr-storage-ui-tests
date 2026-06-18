@@ -10,8 +10,10 @@ import socket
 from datetime import datetime, timezone
 from pathlib import Path
 
+from psycopg2 import sql
+
 from ramendr_dr_validation.backends.postgres import PostgresBackend
-from ramendr_dr_validation.db_audit import load_env_file
+from ramendr_dr_validation.db_audit import load_env_file, validate_table_name
 
 
 def utc_now_iso() -> str:
@@ -21,13 +23,16 @@ def utc_now_iso() -> str:
 
 def fetch_audit_records(conn, backend: PostgresBackend) -> list[dict]:
     """Return all audit rows ordered by sequence."""
+    audit_table = validate_table_name(backend.audit_table)
     with conn.cursor() as cur:
         cur.execute(
-            f"""
+            sql.SQL(
+                """
             SELECT seq, committed_at, hostname, source
-            FROM {backend.audit_table}
+            FROM {}
             ORDER BY seq
             """
+            ).format(sql.Identifier(audit_table))
         )
         rows = cur.fetchall()
     records: list[dict] = []
@@ -66,7 +71,12 @@ def fetch_tpcc_counts(conn, backend: PostgresBackend) -> dict[str, int]:
             exists = bool(cur.fetchone()[0])
             if not exists:
                 continue
-            cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+            cur.execute(
+                sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                    sql.Identifier(backend.schema),
+                    sql.Identifier(table),
+                )
+            )
             counts[table] = int(cur.fetchone()[0])
     return counts
 

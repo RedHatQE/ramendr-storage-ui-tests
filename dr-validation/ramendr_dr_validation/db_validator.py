@@ -205,19 +205,24 @@ def validate_snapshot_file(
     comparison = None
     missing_count = 0
     report.tpcc_regressions = []
-    if before_path and before_path.is_file():
-        before_snapshot = json.loads(before_path.read_text(encoding="utf-8"))
-        before_records, before_errors = audit_records_from_snapshot(before_snapshot)
-        report.parse_errors.extend(before_errors)
-        comparison = compare_logs(
-            audit_to_timestamp_records(before_records),
-            audit_to_timestamp_records(records),
-        )
-        missing_count = int(comparison.get("missing_count", 0))
-        report.tpcc_regressions = compare_tpcc_counts(
-            dict(before_snapshot.get("tpcc") or {}),
-            report.tpcc_counts,
-        )
+    baseline_missing = False
+    if before_path is not None:
+        if not before_path.is_file():
+            baseline_missing = True
+            report.parse_errors.append(f"Baseline snapshot not found: {before_path}")
+        else:
+            before_snapshot = json.loads(before_path.read_text(encoding="utf-8"))
+            before_records, before_errors = audit_records_from_snapshot(before_snapshot)
+            report.parse_errors.extend(before_errors)
+            comparison = compare_logs(
+                audit_to_timestamp_records(before_records),
+                audit_to_timestamp_records(records),
+            )
+            missing_count = int(comparison.get("missing_count", 0))
+            report.tpcc_regressions = compare_tpcc_counts(
+                dict(before_snapshot.get("tpcc") or {}),
+                report.tpcc_counts,
+            )
     report.tpcc_regressions.extend(validate_tpcc_populated(report.tpcc_counts))
 
     max_gap = report.max_seq_gap()
@@ -231,7 +236,7 @@ def validate_snapshot_file(
         "rpo_from_cutoff_seconds": cutoff_rpo,
         "comparison": comparison,
         "missing_count": missing_count,
-        "ok": report.ok and missing_count == 0,
+        "ok": report.ok and missing_count == 0 and not baseline_missing,
     }
     return payload
 

@@ -206,7 +206,7 @@ pattern_install_recoverable() {
   acm_health=$(oc get application.argoproj.io acm \
     -n ramendr-starter-kit-hub \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
   [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]] \
     || [[ "$acm_health" == "Healthy" ]] || [[ "${joined:-0}" -ge 3 ]]
 }

@@ -444,12 +444,8 @@ get_hammerdb_vm_host() {
     return 0
   done < <(list_vm_ssh_hosts "$kubeconfig")
   if [[ -n "$target" ]]; then
-    warn "HammerDB target VM '${target}' not found; using first gitops-vms SSH endpoint."
-    while IFS=$'\t' read -r route_name host port; do
-      [[ -z "$route_name" ]] && continue
-      echo "${route_name}	${host}	${port:-22}"
-      return 0
-    done < <(list_vm_ssh_hosts "$kubeconfig")
+    err "HammerDB target VM '${target}' not found in gitops-vms SSH endpoints."
+    return 1
   fi
   err "No SSH endpoints for HammerDB target in gitops-vms."
   return 1

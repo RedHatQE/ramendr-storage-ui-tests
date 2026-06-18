@@ -67,10 +67,27 @@ def collect_db_snapshot(
     )
 
 
-def load_hammerdb_snapshot(snapshot_dir: Path) -> dict:
+def load_hammerdb_snapshot(
+    snapshot_dir: Path,
+    *,
+    vm_name: str | None = None,
+) -> dict:
+    vm_name = vm_name or os.getenv("DR_VALIDATION_HAMMERDB_VM", "rhel9-node-001")
+    expected = f"{vm_name}.db-snapshot.json"
+    snapshot_path = snapshot_dir / expected
+    if snapshot_path.is_file():
+        return json.loads(snapshot_path.read_text(encoding="utf-8"))
+
     files = sorted(snapshot_dir.glob("*.db-snapshot.json"))
     assert files, f"No DB snapshot JSON found under {snapshot_dir}"
-    return json.loads(files[0].read_text(encoding="utf-8"))
+    if len(files) == 1:
+        return json.loads(files[0].read_text(encoding="utf-8"))
+
+    available = ", ".join(f.name for f in files)
+    raise AssertionError(
+        f"No DB snapshot for VM {vm_name!r} ({expected}) under {snapshot_dir}; "
+        f"found: {available}"
+    )
 
 
 def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:

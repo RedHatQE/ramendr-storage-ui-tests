@@ -37,7 +37,9 @@ while true; do
   if [[ "$collect_ok" -eq 1 ]]; then
     if dr_validation_uses_hammerdb; then
       if is_auto_db_snapshot_dir "$dest"; then
-        update_latest_db_snapshot_link "$dest"
+        if ! update_latest_db_snapshot_link "$dest" 2>>"$SNAPSHOT_DAEMON_LOG"; then
+          echo "[$(date -u +%H:%M:%S)] WARN update_latest_db_snapshot_link failed for ${dest}" >>"$SNAPSHOT_DAEMON_LOG"
+        fi
       fi
       if ! prune_auto_snapshots_db 2>>"$SNAPSHOT_DAEMON_LOG"; then
         echo "[$(date -u +%H:%M:%S)] WARN prune_auto_snapshots_db failed" >>"$SNAPSHOT_DAEMON_LOG"

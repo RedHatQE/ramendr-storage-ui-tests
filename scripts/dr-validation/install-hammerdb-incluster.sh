@@ -80,6 +80,10 @@ fi
 KUBECONFIG="$SPOKE_KC" "${SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 KUBECONFIG="$SPOKE_KC" oc delete job ramendr-dr-hammerdb-install -n "$VM_NAMESPACE" --ignore-not-found
+if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-hammerdb-install -n "$VM_NAMESPACE" >/dev/null 2>&1; then
+  KUBECONFIG="$SPOKE_KC" oc wait --for=delete job/ramendr-dr-hammerdb-install \
+    -n "$VM_NAMESPACE" --timeout=120s
+fi
 KUBECONFIG="$SPOKE_KC" oc apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job

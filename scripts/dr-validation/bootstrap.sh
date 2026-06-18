@@ -39,7 +39,12 @@ fi
 initial_stamp="$(date +%Y%m%d-%H%M%S)"
 initial_dir="${AUTO_SNAPSHOT_ROOT}/${initial_stamp}"
 log "Saving initial timestamp baseline snapshot -> ${initial_dir}"
-if ! "$SCRIPT_DIR/collect-logs-incluster.sh" "$initial_dir"; then
+if [[ "${DR_VALIDATION_INCLUSTER_COLLECT:-1}" == "1" ]]; then
+  if ! "$SCRIPT_DIR/collect-logs-incluster.sh" "$initial_dir"; then
+    err "Could not collect initial timestamp baseline snapshot."
+    exit 1
+  fi
+elif ! collect_logs_to_dir "$initial_dir"; then
   err "Could not collect initial timestamp baseline snapshot."
   exit 1
 fi
