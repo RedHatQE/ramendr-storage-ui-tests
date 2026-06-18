@@ -4,7 +4,7 @@
 
 | When | What |
 |------|------|
-| After `./scripts/redeploy.sh` | **HammerDB** (default): PostgreSQL TPC-C + audit writer on `edgenode-0`, DB snapshot every **5 min**. Legacy: timestamp writers every **10 s** when `DR_VALIDATION_MODE=timestamp`. |
+| After `./scripts/redeploy.sh` | **HammerDB** (default): PostgreSQL TPC-C + audit writer on `rhel9-node-001`, initial baseline snapshot to `.work/dr-validation-db/auto/latest`. Capture a fresh baseline before DR with `./scripts/dr-validation/save-db-baseline-snapshot.sh` (sanity test does this automatically). Legacy: timestamp writers every **10 s** + rolling log snapshots every **5 min** when `DR_VALIDATION_MODE=timestamp`. |
 | After DR + UI cleanup message | Run **one** automation script (see below) |
 
 ---
@@ -96,7 +96,7 @@ After VMs and DataVolumes are removed, the script also deletes **all PVCs** in `
 
 ## Checklist
 
-- [ ] Redeploy done; auto snapshots running
+- [ ] Redeploy done; HammerDB baseline saved (or timestamp auto snapshots running in legacy mode)
 - [ ] DR completed in UI; cleanup message shown
 - [ ] Ran `./scripts/dr-validation/post-dr-automation.sh` → **PASS**
 - [ ] Attached output or report folder to ticket if needed
