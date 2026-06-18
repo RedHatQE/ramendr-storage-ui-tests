@@ -7,6 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+if dr_validation_uses_hammerdb; then
+  exec "$SCRIPT_DIR/status-hammerdb.sh"
+fi
+
 hub_install_dir="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
 if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${hub_install_dir}/auth/kubeconfig" ]]; then
   export KUBECONFIG="${hub_install_dir}/auth/kubeconfig"

@@ -160,12 +160,24 @@ ensure_podman_ready() {
   if [[ "$(uname -s)" == "Darwin" ]] && command -v podman &>/dev/null; then
     local machine
     machine=$(podman machine list --format '{{.Name}}' 2>/dev/null | head -1 || true)
+    machine="${machine%\*}"
     if [[ -n "$machine" ]]; then
       log "Starting podman machine ${machine}..."
-      if podman machine start "$machine" &>/dev/null; then
-        sleep 3
-        podman info &>/dev/null && { log "Podman is ready."; return 0; }
+      podman machine start "$machine" &>/dev/null || true
+      local socket
+      socket=$(podman machine inspect "$machine" --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)
+      if [[ -n "$socket" && -S "$socket" ]]; then
+        export DOCKER_HOST="unix://${socket}"
       fi
+      local tries=0
+      while [[ $tries -lt 30 ]]; do
+        if podman info &>/dev/null; then
+          log "Podman is ready."
+          return 0
+        fi
+        sleep 2
+        tries=$((tries + 1))
+      done
     fi
     err "Start Podman manually, then re-run: podman machine start"
     err "Or install the helper: sudo podman-mac-helper install && podman machine start"
@@ -174,6 +186,29 @@ ensure_podman_ready() {
 
   err "Podman is not running. Start the Podman service/socket, then re-run deploy."
   return 1
+}
+
+hub_pattern_app_health() {
+  oc get application.argoproj.io ramendr-starter-kit-hub \
+    -n vp-gitops \
+    -o jsonpath='{.status.health.status}' 2>/dev/null \
+    || oc get application.argoproj.io ramendr-starter-kit-hub \
+      -n ramendr-starter-kit-hub \
+      -o jsonpath='{.status.health.status}' 2>/dev/null || true
+}
+
+pattern_install_recoverable() {
+  local hub_health rdr_health joined acm_health
+  hub_health="$(hub_pattern_app_health)"
+  rdr_health=$(oc get application.argoproj.io regional-dr \
+    -n ramendr-starter-kit-hub \
+    -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+  acm_health=$(oc get application.argoproj.io acm \
+    -n ramendr-starter-kit-hub \
+    -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+  joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]] \
+    || [[ "$acm_health" == "Healthy" ]] || [[ "${joined:-0}" -ge 3 ]]
 }
 
 prepare_upstream() {
@@ -192,6 +227,11 @@ prepare_upstream() {
     # is a bare commit SHA. Without a branch name the upstream pattern's Makefile
     # cannot derive target_branch and aborts with "Could not determine target branch".
     git checkout -B "$UPSTREAM_BRANCH" "$UPSTREAM_REF"
+    # pattern-install derives target_origin from the branch upstream; checkout -B from
+    # a bare SHA leaves no tracking branch unless we set it explicitly.
+    if git show-ref --verify --quiet "refs/remotes/origin/${UPSTREAM_BRANCH}"; then
+      git branch --set-upstream-to="origin/${UPSTREAM_BRANCH}" "$UPSTREAM_BRANCH"
+    fi
   )
 
   # Patch upstream pattern.sh for automation (non-TTY) and Apple Silicon (amd64 container).
@@ -653,7 +693,11 @@ scale_hub_workers() {
   # ODF DaemonSets. Without this, all 6 nodes pull the ~1.4 GB cephcsi image
   # simultaneously; nodes that get slow/stalled TCP connections to registry.redhat.io
   # can hang for hours, blocking Nooba and downstream apps (opp-policy, regional-dr).
-  prepull_odf_images
+  if [[ "${SKIP_ODF_PREPULL:-0}" != "1" ]]; then
+    prepull_odf_images
+  else
+    log "SKIP_ODF_PREPULL=1 — skipping hub ODF image pre-pull."
+  fi
 }
 
 finalize_byoc_cluster_deployments() {
@@ -907,7 +951,7 @@ deploy_pattern() {
 
   # Run pattern.sh in the background so a parallel watcher can cut it short when only
   # known-stable drift remains, instead of waiting the full 60-minute convergence loop.
-  ( cd "$UPSTREAM_DIR" && VALUES_SECRET="$VALUES_SECRET" ./pattern.sh make install 2>&1 ) &
+  ( cd "$UPSTREAM_DIR" && VALUES_SECRET="$VALUES_SECRET" TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" ./pattern.sh make install 2>&1 ) &
   local pattern_pid=$!
 
   # Background watcher: once ALL apps except the two known-drift apps
@@ -923,9 +967,7 @@ deploy_pattern() {
       rdr_health=$(oc get application.argoproj.io regional-dr \
         -n ramendr-starter-kit-hub \
         -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-      hub_health=$(oc get application.argoproj.io ramendr-starter-kit-hub \
-        -n ramendr-starter-kit-hub \
-        -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+      hub_health="$(hub_pattern_app_health)"
       # Count apps that are neither Synced/Healthy nor one of the two known-drift apps.
       other_bad=$(oc get application.argoproj.io -A \
         -o jsonpath='{range .items[*]}{.metadata.name}|{.status.sync.status}|{.status.health.status}{"\n"}{end}' \
@@ -962,15 +1004,13 @@ deploy_pattern() {
     # only hard-exit for genuine install failures (no hub app, operators missing).
     warn "pattern.sh make install returned non-zero — checking whether this is recoverable drift..."
     local hub_health rdr_health
-    hub_health=$(oc get application.argoproj.io ramendr-starter-kit-hub \
-      -n ramendr-starter-kit-hub \
-      -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+    hub_health="$(hub_pattern_app_health)"
     rdr_health=$(oc get application.argoproj.io regional-dr \
       -n ramendr-starter-kit-hub \
       -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-    if [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]]; then
+    if pattern_install_recoverable; then
       warn "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
-      warn "Treating as recoverable OutOfSync/Healthy drift — continuing with fix-up functions."
+      warn "Treating as recoverable drift — continuing with fix-up functions."
     else
       err "Pattern install failed and cluster appears non-recoverable."
       err "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
@@ -1043,17 +1083,22 @@ run_post_pattern_steps() {
 
 setup_dr_validation() {
   if [[ "${SKIP_DR_VALIDATION:-0}" == "1" ]]; then
-    log "SKIP_DR_VALIDATION=1 — skipping timestamp writers (redeploy unchanged from main)."
+    log "SKIP_DR_VALIDATION=1 — skipping DR validation bootstrap and snapshots."
     return 0
   fi
 
   local bootstrap="$REPO_ROOT/scripts/dr-validation/bootstrap.sh"
   if [[ ! -x "$bootstrap" ]]; then
-    warn "DR validation bootstrap not found: $bootstrap"
-    return 0
+    err "DR validation bootstrap not found: $bootstrap"
+    return 1
   fi
 
-  log "Post-redeploy: starting DR timestamp validation on edge VMs..."
+  local max_attempts="${DR_VALIDATION_BOOTSTRAP_RETRIES:-6}"
+  local retry_sleep="${DR_VALIDATION_BOOTSTRAP_RETRY_SLEEP:-120}"
+  local attempt=1
+  local bootstrap_ok=0
+
+  log "Post-redeploy: starting DR validation (mode=${DR_VALIDATION_MODE:-hammerdb})..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
   local ssh_key="${SSH_IDENTITY_FILE:-}"
   if [[ -z "$ssh_key" ]]; then
@@ -1064,27 +1109,57 @@ setup_dr_validation() {
     fi
   fi
 
-  if HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
-    PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
-    SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
-    SSH_USER="${SSH_USER:-cloud-user}" \
-    SSH_IDENTITY_FILE="$ssh_key" \
-    "$bootstrap"; then
-    log "DR timestamp validation is running on edge VMs."
-    if [[ "${SKIP_DR_VALIDATION_SNAPSHOTS:-0}" != "1" ]] && \
-      [[ -x "$REPO_ROOT/scripts/dr-validation/start-snapshot-daemon.sh" ]]; then
-      HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
+  while [[ $attempt -le $max_attempts ]]; do
+    log "DR validation bootstrap attempt ${attempt}/${max_attempts}..."
+    if HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
+      PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
+      SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
+      SSH_USER="${SSH_USER:-cloud-user}" \
+      SSH_IDENTITY_FILE="$ssh_key" \
+      "$bootstrap"; then
+      if HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
         PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
         SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
-        "$REPO_ROOT/scripts/dr-validation/start-snapshot-daemon.sh" || \
-        warn "Could not start automatic log snapshot daemon (every 5 min)."
+        "$REPO_ROOT/scripts/dr-validation/status.sh"; then
+        bootstrap_ok=1
+        break
+      fi
+      warn "Bootstrap finished but status verification failed on attempt ${attempt}."
+    else
+      warn "DR validation bootstrap failed on attempt ${attempt}/${max_attempts}."
     fi
-    return 0
+    if [[ $attempt -lt $max_attempts ]]; then
+      log "Retrying DR validation bootstrap in ${retry_sleep}s..."
+      sleep "$retry_sleep"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  if [[ "$bootstrap_ok" -ne 1 ]]; then
+    if HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
+      PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
+      SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
+      "$REPO_ROOT/scripts/dr-validation/status.sh"; then
+      warn "Bootstrap did not finish cleanly, but DR validation workload looks healthy; continuing."
+      bootstrap_ok=1
+    else
+      err "DR validation is not ready after ${max_attempts} automatic bootstrap attempt(s)."
+      err "Fix edge VM SSH/cloud-init or HammerDB install logs, then re-run redeploy."
+      return 1
+    fi
   fi
 
-  warn "Redeploy finished but DR timestamp validation is not ready yet."
-  warn "When VMs are up: ./scripts/dr-validation/bootstrap.sh"
-  [[ "${REQUIRE_DR_VALIDATION:-0}" == "1" ]] && return 1
+  log "DR validation is running (mode=${DR_VALIDATION_MODE:-hammerdb})."
+  if [[ "${SKIP_DR_VALIDATION_SNAPSHOTS:-0}" != "1" ]] && \
+    [[ -x "$REPO_ROOT/scripts/dr-validation/start-snapshot-daemon.sh" ]]; then
+    if ! HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
+      PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
+      SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
+      "$REPO_ROOT/scripts/dr-validation/start-snapshot-daemon.sh"; then
+      err "Could not start automatic DB snapshot daemon."
+      return 1
+    fi
+  fi
   return 0
 }
 
@@ -1112,7 +1187,11 @@ show_status() {
   else
     if [[ -f "$REPO_ROOT/.work/dr-validation-snapshot-daemon.pid" ]] && \
       kill -0 "$(cat "$REPO_ROOT/.work/dr-validation-snapshot-daemon.pid")" 2>/dev/null; then
-      echo "Auto snapshots: running every 5 min -> .work/dr-validation-logs/auto/latest"
+      if [[ "${DR_VALIDATION_MODE:-hammerdb}" == "hammerdb" ]]; then
+        echo "Auto snapshots: running every 5 min -> .work/dr-validation-db/auto/latest"
+      else
+        echo "Auto snapshots: running every 5 min -> .work/dr-validation-logs/auto/latest"
+      fi
     else
       echo "Auto snapshots: not running (./scripts/dr-validation/start-snapshot-daemon.sh)"
     fi
@@ -1123,13 +1202,18 @@ show_status() {
       PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
       SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
       "$REPO_ROOT/scripts/dr-validation/status.sh" 2>&1 || \
-      echo "Writers not verified. Run: ./scripts/dr-validation/bootstrap.sh"
+      echo "DR validation status check failed (re-run ./scripts/redeploy.sh --dr-bootstrap-only)."
   fi
   echo ""
   echo "--- Access ---"
   echo "Hub Console: https://console-openshift-console.apps.hub.${BASE_DOMAIN}"
   echo "KUBECONFIG: $HUB_INSTALL_DIR/auth/kubeconfig"
-  echo "Timestamp log (each edge VM): /var/lib/ramendr-dr-validation/timestamps.log"
+  echo "DR validation mode: ${DR_VALIDATION_MODE:-hammerdb}"
+  if [[ "${DR_VALIDATION_MODE:-hammerdb}" == "hammerdb" ]]; then
+    echo "HammerDB VM: ${DR_VALIDATION_HAMMERDB_VM:-rhel9-node-001} (PostgreSQL TPC-C + audit table)"
+  else
+    echo "Timestamp log (each edge VM): /var/lib/ramendr-dr-validation/timestamps.log"
+  fi
   echo ""
 }
 
@@ -1196,7 +1280,7 @@ case "${1:-}" in
     echo " (no args) Full redeploy: destroy clusters in current AWS account + install all 3 + deploy pinned upstream pattern"
     echo " --destroy-only Destroy clusters that exist in the current AWS account (hosted zone preserved)"
     echo " --pattern-only Deploy pattern on an existing hub cluster"
-    echo " --dr-bootstrap-only Wait for convergence + install/verify timestamp writers (existing env)"
+    echo " --dr-bootstrap-only Wait for convergence + automatic DR validation bootstrap (existing env)"
     echo " --status Show current environment status"
     echo ""
     echo "Pinning:"
@@ -1213,9 +1297,12 @@ case "${1:-}" in
     echo " HOSTED_ZONE_ID        Route53 hosted zone ID (verified, never deleted)"
     echo " BASE_DOMAIN           Base domain for the clusters (required, no default)"
     echo " CLEANUP_DNS           Set to 1 to bulk-delete DNS records in the hosted zone before install"
-    echo " SKIP_DR_VALIDATION    Set to 1 to skip timestamp writers and auto snapshots"
+    echo " DR_VALIDATION_MODE   hammerdb (default) or timestamp for legacy log validation"
+    echo " DR_VALIDATION_HAMMERDB_VM  Edge VM name for PostgreSQL workload (default rhel9-node-001)"
+    echo " SKIP_DR_VALIDATION    Set to 1 to skip automatic DR validation bootstrap and snapshots"
     echo " SKIP_DR_VALIDATION_SNAPSHOTS  Set to 1 to skip only the 5-min snapshot daemon"
-    echo " REQUIRE_DR_VALIDATION Set to 1 to fail redeploy if writers are not recording"
+    echo " DR_VALIDATION_BOOTSTRAP_RETRIES  Automatic bootstrap retries during redeploy (default 6)"
+    echo " DR_VALIDATION_BOOTSTRAP_RETRY_SLEEP Seconds between bootstrap retries (default 120)"
     echo " SSH_USER / SSH_IDENTITY_FILE  SSH access to edge VMs (default: cloud-user, ~/.ssh/id_rsa)"
     ;;
   *)

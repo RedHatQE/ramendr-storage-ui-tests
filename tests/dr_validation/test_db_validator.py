@@ -1,0 +1,169 @@
+"""Unit tests for HammerDB PostgreSQL snapshot validation."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ramendr_dr_validation.db_validator import validate_snapshot_file
+
+
+def _snapshot(records: list[dict], tpcc: dict[str, int] | None = None) -> dict:
+    return {
+        "collected_at_utc": "2026-06-15T12:00:00.000Z",
+        "vm_name": "edgenode-0",
+        "database_backend": "postgres",
+        "database": "tpcc",
+        "audit": {
+            "record_count": len(records),
+            "first_seq": records[0]["seq"] if records else None,
+            "last_seq": records[-1]["seq"] if records else None,
+            "records": records,
+        },
+        "tpcc": tpcc
+        or {
+            "warehouse": 1,
+            "district": 10,
+            "customer": 3000,
+            "stock": 100_000,
+            "item": 100_000,
+            "orders": 900,
+        },
+    }
+
+
+def _write_snapshot(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def test_validate_continuous_audit_passes(tmp_path: Path) -> None:
+    records = [
+        {
+            "seq": i,
+            "committed_at": f"2026-06-15T12:00:{i:02d}.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        }
+        for i in range(1, 6)
+    ]
+    after = tmp_path / "edgenode-0.db-snapshot.json"
+    _write_snapshot(after, _snapshot(records))
+
+    payload = validate_snapshot_file(after, interval=10.0)
+    assert payload["ok"] is True
+    assert payload["seq_gaps"] == []
+
+
+def test_validate_detects_audit_gap(tmp_path: Path) -> None:
+    records = [
+        {
+            "seq": 1,
+            "committed_at": "2026-06-15T12:00:01.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        },
+        {
+            "seq": 3,
+            "committed_at": "2026-06-15T12:00:11.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        },
+    ]
+    after = tmp_path / "edgenode-0.db-snapshot.json"
+    _write_snapshot(after, _snapshot(records))
+
+    payload = validate_snapshot_file(after, interval=10.0)
+    assert payload["ok"] is False
+    assert payload["max_seq_gap"] == 1
+    assert payload["estimated_rpo_seconds_upper_bound"] == 10.0
+
+
+def test_validate_tpcc_regression_against_baseline(tmp_path: Path) -> None:
+    before_records = [
+        {
+            "seq": i,
+            "committed_at": f"2026-06-15T12:00:{i:02d}.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        }
+        for i in range(1, 4)
+    ]
+    after_records = before_records + [
+        {
+            "seq": 4,
+            "committed_at": "2026-06-15T12:00:40.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        }
+    ]
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    _write_snapshot(
+        before,
+        _snapshot(
+            before_records,
+            tpcc={
+                "customer": 3000,
+                "orders": 900,
+                "warehouse": 1,
+                "district": 10,
+                "stock": 100_000,
+                "item": 100_000,
+            },
+        ),
+    )
+    _write_snapshot(
+        after,
+        _snapshot(
+            after_records,
+            tpcc={
+                "customer": 2990,
+                "orders": 890,
+                "warehouse": 1,
+                "district": 10,
+                "stock": 100_000,
+                "item": 100_000,
+            },
+        ),
+    )
+
+    payload = validate_snapshot_file(
+        after,
+        before_path=before,
+        interval=10.0,
+    )
+    assert payload["ok"] is False
+    assert payload["tpcc_regressions"]
+
+
+def test_rpo_from_cutoff_uses_last_pre_cutoff_record(tmp_path: Path) -> None:
+    records = [
+        {
+            "seq": 1,
+            "committed_at": "2026-06-15T12:00:00.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        },
+        {
+            "seq": 2,
+            "committed_at": "2026-06-15T12:00:30.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        },
+        {
+            "seq": 3,
+            "committed_at": "2026-06-15T12:02:00.000Z",
+            "hostname": "edgenode-0",
+            "source": "db_audit",
+        },
+    ]
+    after = tmp_path / "edgenode-0.db-snapshot.json"
+    _write_snapshot(after, _snapshot(records))
+
+    payload = validate_snapshot_file(
+        after,
+        interval=10.0,
+        cutoff_utc=datetime(2026, 6, 15, 12, 1, 0, tzinfo=timezone.utc).isoformat(),
+    )
+    assert payload["rpo_from_cutoff_seconds"] == 30.0

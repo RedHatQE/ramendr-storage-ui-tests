@@ -1,8 +1,9 @@
 """Post-deployment smoke tests for the RamenDR environment.
 
-Run after scripts/redeploy.sh completes.
+Run after scripts/redeploy.sh completes (HammerDB PostgreSQL should be populated).
 
-TestInfraSmoke — point-in-time assertions against live cluster state via oc.
+TestInfraSmoke — point-in-time assertions against live cluster state via oc,
+                 plus HammerDB PostgreSQL table checks after automatic redeploy bootstrap.
                  No polling, no Playwright.
 TestUiSmoke    — Playwright tests against the ACM hub console UI.
 
@@ -20,6 +21,13 @@ from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
 from utils.oc import run_oc
+from tests.utils.dr_validation import (
+    assert_hammerdb_snapshot_ready,
+    collect_db_snapshot,
+    hammerdb_mode_active,
+    load_hammerdb_snapshot,
+    run_status_hammerdb,
+)
 
 # ArgoCD apps that are expected to be OutOfSync due to known drift.
 # These are still required to be Healthy; only the sync status is tolerated.
@@ -376,6 +384,47 @@ class TestInfraSmoke:
             "VMs were deployed without ExternalSecrets — "
             "cloud-init and SSH login will not work"
         )
+
+    # ------------------------------------------------------------------
+    # HammerDB PostgreSQL DR validation workload
+    # ------------------------------------------------------------------
+
+    def test_hammerdb_postgres_tables_populated(self, hub_kubeconfig, tmp_path):
+        """HammerDB TPC-C database is deployed with populated tables after redeploy.
+
+        Validates the production-like schema (customer IDs, orders, stock, …) and
+        the dr_validation_audit trail on the DR-protected PostgreSQL instance.
+        """
+        if not hammerdb_mode_active():
+            pytest.skip("HammerDB DR validation is disabled")
+
+        status = run_status_hammerdb(kubeconfig=hub_kubeconfig)
+        assert status.returncode == 0, (
+            "HammerDB PostgreSQL workload is not healthy after redeploy.\n"
+            f"stdout:\n{status.stdout}\n"
+            f"stderr:\n{status.stderr}"
+        )
+
+        snapshot_dir = tmp_path / "hammerdb-smoke"
+        collected = collect_db_snapshot(
+            kubeconfig=hub_kubeconfig,
+            out_dir=snapshot_dir,
+        )
+        assert collected.returncode == 0, (
+            "Could not collect HammerDB DB snapshot during smoke test.\n"
+            f"stdout:\n{collected.stdout}\n"
+            f"stderr:\n{collected.stderr}"
+        )
+
+        snapshot = load_hammerdb_snapshot(snapshot_dir)
+        assert_hammerdb_snapshot_ready(snapshot)
+
+        tpcc = snapshot["tpcc"]
+        assert tpcc["customer"] >= 3000, (
+            "customer table must contain 3000 rows per warehouse"
+        )
+        assert tpcc["warehouse"] >= 1
+        assert tpcc["item"] >= 100_000
 
     # ------------------------------------------------------------------
     # DRPolicy

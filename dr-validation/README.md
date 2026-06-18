@@ -1,4 +1,46 @@
-# RamenDR data validation (continuous timestamps)
+# RamenDR data validation
+
+Default mode (`DR_VALIDATION_MODE=hammerdb`) runs **HammerDB TPC-C** against
+**PostgreSQL** on one DR-protected edge VM (`DR_VALIDATION_HAMMERDB_VM`, default
+`edgenode-0`). Data files live under `/var/lib/ramendr-dr-validation/` on the
+replicated VM disk. A continuous audit table (`dr_validation_audit`) plus TPC-C
+row-count checks replace the legacy timestamp log for post-DR validation.
+
+Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
+(described below).
+
+## HammerDB workflow (default)
+
+1. **Deploy environment** — `./scripts/redeploy.sh` automatically installs PostgreSQL +
+   HammerDB on `edgenode-0`, verifies TPC-C tables are populated, and saves the first baseline
+   snapshot (unless `SKIP_DR_VALIDATION=1`).
+2. **Automatic baseline** — DB snapshots every 5 minutes in
+   `.work/dr-validation-db/auto/latest`.
+3. **Run DR** — failover / relocate on DRPC `gitops-vm-protection`.
+4. **After DR** — sanity test or `./scripts/dr-validation/post-dr-automation.sh` validates
+   PostgreSQL table data automatically.
+
+A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline,
+and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
+
+| Path | Purpose |
+|------|---------|
+| `hammerdb/install-on-vm.sh` | PostgreSQL + HammerDB install on edge VM |
+| `ramendr_dr_validation/db_audit.py` | Continuous audit inserts (systemd) |
+| `ramendr_dr_validation/db_snapshot.py` | Export DB snapshot JSON |
+| `ramendr_dr_validation/db_validator.py` | Gap/RPO/TPC-C validation |
+| `scripts/dr-validation/install-hammerdb-incluster.sh` | In-cluster SSH install job |
+| `scripts/dr-validation/collect-db-snapshot-incluster.sh` | In-cluster snapshot collect |
+| `scripts/dr-validation/check-after-dr-hammerdb.sh` | Post-DR HammerDB validation |
+
+Future backends (e.g. SQL Server on Windows VMs) plug in under
+`ramendr_dr_validation/backends/`.
+
+Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
+
+---
+
+## Legacy timestamp mode (`DR_VALIDATION_MODE=timestamp`)
 
 Validates that data on DR-protected VM disks stays continuous across failover by appending
 sequence + UTC timestamp records to a log on each edge VM, then checking for gaps after DR.
@@ -23,18 +65,12 @@ replicated with the protected KubeVirt workload.
 ## Workflow
 
 1. **Deploy environment** — `./scripts/redeploy.sh` (four `edgenode` RHEL VMs in `gitops-vms`).
-   When redeploy finishes, it **automatically** waits for VMs, installs the timestamp writer on
-   each edge VM, and verifies recording (unless `SKIP_DR_VALIDATION=1`).
+   When redeploy finishes, it **automatically** waits for VMs, installs timestamp writers on
+   each edge VM, verifies recording, and saves the first baseline snapshot
+   (unless `SKIP_DR_VALIDATION=1`).
    Edge VMs need **cloud-init** from Vault: keep `disableExternalSecrets: false` in
    `overrides/values-egv-dr.yaml`, and include `ssh_pwauth: true` in `~/values-secret.yaml`
    `cloud-init` userData (see `examples/cloud-init-fragment.yaml`).
-2. **Optional manual install** — if bootstrap was skipped or failed:
-
-   ```bash
-   export KUBECONFIG=~/git/hub-cluster-install/auth/kubeconfig
-   ./scripts/dr-validation/bootstrap.sh
-   ```
-
 3. **Automatic baseline** — a daemon saves logs every 5 minutes to
    `.work/dr-validation-logs/auto/latest` (started by redeploy).
 4. **Run DR** — failover / relocate / failback via console (DRPC `gitops-vm-protection`).

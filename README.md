@@ -11,7 +11,7 @@ It contains:
 
 - Deployment automation (`scripts/redeploy.sh`) that pins the fork to an immutable commit SHA and executes the full deployment flow.
 - UI and sanity tests using **Playwright + Python** (`tests/`).
-- **RamenDR data validation** — continuous timestamp writer + post-failover log checks ([`dr-validation/README.md`](dr-validation/README.md)).
+- **RamenDR data validation** — HammerDB PostgreSQL TPC-C by default ([`dr-validation/README.md`](dr-validation/README.md), [`dr-validation/DATABASE-SCHEMA.md`](dr-validation/DATABASE-SCHEMA.md)).
 
 ## What this repo does
 
@@ -159,28 +159,34 @@ PRs that fail the checks cannot be merged.
 
 ## RamenDR data validation
 
-A full `./scripts/redeploy.sh` run ends with timestamp writers **running on all edge VMs** (one
-record every **10 seconds**) and a **rolling baseline snapshot** refreshed every 5 minutes (only the
-latest snapshot is kept as the pre-failover baseline). After failover/relocate and the UI cleanup step, run:
+Default mode is **HammerDB TPC-C on PostgreSQL** (`DR_VALIDATION_MODE=hammerdb`) on
+`edgenode-0`. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
+builds populated TPC-C tables (customers with IDs, orders, stock, …), verifies recording,
+saves an initial baseline snapshot, and starts rolling snapshots every 5 minutes.
+
+Smoke tests assert the database tables are populated after redeploy; sanity tests validate
+table data continuity after failover/relocate via `check-after-dr.sh`.
+
+After DR in the UI, run:
 
 ```bash
 ./scripts/dr-validation/post-dr-automation.sh
 ```
 
-That single command runs cleanup (with safety guards), waits for healthy VMs, and validates data — no other manual steps.
-Defaults enforce a **2-minute RPO** and **20-minute RTO** (warn at 15 minutes): `DR_VALIDATION_MAX_RPO_SECONDS=120`,
-`RAMENDR_SANITY_MAX_RTO_SECONDS=1200`, and `RAMENDR_SANITY_RTO_WARN_SECONDS=900` (override via env vars if your target changes).
+Defaults enforce a **2-minute RPO** and **20-minute RTO** (warn at 15 minutes):
+`DR_VALIDATION_MAX_RPO_SECONDS=120`, `RAMENDR_SANITY_MAX_RTO_SECONDS=1200`, and
+`RAMENDR_SANITY_RTO_WARN_SECONDS=900`.
 
-See [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md) for the Jira-ready procedure.
+See [`dr-validation/DATABASE-SCHEMA.md`](dr-validation/DATABASE-SCHEMA.md) for table details.
 
-Set `SKIP_DR_VALIDATION=1` to skip writers and snapshots, or `REQUIRE_DR_VALIDATION=1` to fail redeploy if writers are not recording.
+Set `SKIP_DR_VALIDATION=1` only to intentionally skip automatic DR validation.
+Set `DR_VALIDATION_MODE=timestamp` for the legacy per-VM timestamp log mode.
 
-If pattern deploy finished but timestamp bootstrap was skipped (e.g. interrupted redeploy), recover with:
+If redeploy was interrupted, re-run automatic bootstrap on an existing environment:
 
 ```bash
 export KUBECONFIG=~/git/hub-cluster-install/auth/kubeconfig
 ./scripts/redeploy.sh --dr-bootstrap-only
-# or: ./scripts/dr-validation/bootstrap.sh && ./scripts/dr-validation/status.sh
 ```
 
-See [`dr-validation/README.md`](dr-validation/README.md) for the full workflow.
+See [`dr-validation/README.md`](dr-validation/README.md) and [`docs/QA-DR-data-validation.md`](docs/QA-DR-data-validation.md).

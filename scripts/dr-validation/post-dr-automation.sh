@@ -40,9 +40,9 @@ if ! wait_for_primary_vms_healthy; then
 fi
 echo ""
 
-log "Step 3/3: Validate DR timestamp logs..."
+log "Step 3/3: Validate DR data (${DR_VALIDATION_MODE})..."
 if ! "$SCRIPT_DIR/check-after-dr.sh"; then
-  err "Data validation FAILED (sequence gaps or collect errors)."
+  err "Data validation FAILED (continuity/RPO or collect errors)."
   exit 1
 fi
 
