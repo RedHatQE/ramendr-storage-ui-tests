@@ -7,9 +7,7 @@ Requires=ramendr-postgresql.service
 Type=simple
 User=cloud-user
 Group=cloud-user
-WorkingDirectory=/opt/hammerdb/current
 Environment=TMPDIR=/var/lib/ramendr-dr-validation/hammerdb/tmp
-Environment=LD_LIBRARY_PATH=/opt/pgdistro/percona-postgresql16/lib
 EnvironmentFile=-/etc/ramendr-dr-validation/db.env
 ExecStart=/usr/local/bin/ramendr-hammerdb-autopilot
 Restart=always

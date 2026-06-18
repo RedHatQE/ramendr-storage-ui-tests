@@ -2,8 +2,13 @@
 # Build HammerDB TPC-C schema once, then run continuous timed OLTP load.
 set -euo pipefail
 
-HAMMERDB_HOME="${HAMMERDB_HOME:-/opt/hammerdb/current}"
 ENV_FILE="${DR_VALIDATION_DB_ENV_FILE:-/etc/ramendr-dr-validation/db.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+
+HAMMERDB_HOME="${HAMMERDB_HOME:-${DR_VALIDATION_HAMMERDB_HOME:-/opt/hammerdb/current}}"
 WAREHOUSES="${DR_VALIDATION_HAMMERDB_WAREHOUSES:-1}"
 VUS="${DR_VALIDATION_HAMMERDB_VUS:-2}"
 BUILD_VUS="${VUS}"
@@ -12,11 +17,6 @@ if [[ "${WAREHOUSES}" -lt "${BUILD_VUS}" ]]; then
 fi
 PG_SUPERUSER="${DR_VALIDATION_PG_SUPERUSER:-postgres}"
 PG_SUPERUSER_PASSWORD="${DR_VALIDATION_PG_SUPERUSER_PASSWORD:-postgres}"
-
-if [[ -f "$ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-fi
 
 PG_HOST="${DR_VALIDATION_PG_HOST:-127.0.0.1}"
 PG_PORT="${DR_VALIDATION_PG_PORT:-5432}"
@@ -32,7 +32,7 @@ chmod 700 "$STATE_DIR"
 export TMPDIR="${STATE_DIR}/tmp"
 mkdir -p "$STATE_DIR/tmp"
 chmod 700 "$STATE_DIR/tmp"
-export LD_LIBRARY_PATH="/opt/pgdistro/percona-postgresql16/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${DR_VALIDATION_PG_LIB_DIR:+${DR_VALIDATION_PG_LIB_DIR}:}${LD_LIBRARY_PATH:-/opt/pgdistro/percona-postgresql16/lib}"
 
 write_build_script() {
   cat >"${STATE_DIR}/buildschema.tcl" <<EOF

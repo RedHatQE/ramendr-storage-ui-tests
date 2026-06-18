@@ -239,10 +239,12 @@ DR_VALIDATION_PG_HOST=127.0.0.1
 DR_VALIDATION_PG_PORT=5432
 DR_VALIDATION_PG_DATABASE=${PG_DATABASE}
 DR_VALIDATION_PG_USER=${PG_USER}
-DR_VALIDATION_PG_PASSWORD=${PG_PASSWORD}
+DR_VALIDATION_PG_PASSWORD="${PG_PASSWORD}"
 DR_VALIDATION_PG_SCHEMA=public
 DR_VALIDATION_PG_AUDIT_TABLE=dr_validation_audit
 DR_VALIDATION_HAMMERDB_WAREHOUSES=${WAREHOUSES}
+DR_VALIDATION_HAMMERDB_HOME=${HAMMERDB_HOME}
+DR_VALIDATION_PG_LIB_DIR=${PG_HOME}/lib
 ENV
 sudo chown root:cloud-user "$ENV_FILE"
 sudo chmod 0640 "$ENV_FILE"
@@ -274,7 +276,25 @@ sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/backends/__init__.py" \
 sudo touch /usr/local/lib/ramendr_dr_validation/__init__.py
 
 sudo install -m 0644 "${REPO_ROOT}/systemd/ramendr-dr-db-audit.service" /etc/systemd/system/
-sudo install -m 0644 "${REPO_ROOT}/systemd/ramendr-dr-hammerdb.service" /etc/systemd/system/
+sudo tee /etc/systemd/system/ramendr-dr-hammerdb.service >/dev/null <<EOF
+[Unit]
+Description=RamenDR HammerDB TPC-C autopilot workload
+After=ramendr-postgresql.service
+Requires=ramendr-postgresql.service
+
+[Service]
+Type=simple
+User=cloud-user
+Group=cloud-user
+Environment=TMPDIR=${DATA_ROOT}/hammerdb/tmp
+EnvironmentFile=-${ENV_FILE}
+ExecStart=/usr/local/bin/ramendr-hammerdb-autopilot
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
 tpcc_tables="$(sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
   "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('customer','orders','warehouse');" \

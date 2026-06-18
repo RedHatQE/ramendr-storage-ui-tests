@@ -31,7 +31,10 @@ fi
 
 if dr_validation_uses_hammerdb; then
   mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"
-  seed_db_baseline_snapshot_if_missing
+  if ! seed_db_baseline_snapshot_if_missing; then
+    err "DB baseline seeding failed."
+    exit 1
+  fi
 fi
 
 nohup "$SCRIPT_DIR/snapshot-daemon.sh" >>"$SNAPSHOT_DAEMON_LOG" 2>&1 &

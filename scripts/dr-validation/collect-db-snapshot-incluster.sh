@@ -49,6 +49,10 @@ fi
 KUBECONFIG="$SPOKE_KC" "${COLLECT_SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 KUBECONFIG="$SPOKE_KC" oc delete job ramendr-dr-db-collect -n "$VM_NAMESPACE" --ignore-not-found
+if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-db-collect -n "$VM_NAMESPACE" >/dev/null 2>&1; then
+  KUBECONFIG="$SPOKE_KC" oc wait --for=delete job/ramendr-dr-db-collect \
+    -n "$VM_NAMESPACE" --timeout=120s
+fi
 KUBECONFIG="$SPOKE_KC" oc apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -62,7 +66,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: collect
-        image: quay.io/validatedpatterns/utility-container:latest
+        image: ${DR_VALIDATION_UTILITY_CONTAINER_IMAGE}
         env:
         - name: SSH_USER
           value: "${SSH_USER}"
@@ -161,7 +165,12 @@ while i + 1 < len(parts):
     if start < 0 or end < start:
         i += 2
         continue
-    payload = json.loads(content[start : end + 1])
+    try:
+        payload = json.loads(content[start : end + 1])
+    except json.JSONDecodeError as exc:
+        print(f"WARN: invalid JSON for snapshot {name}: {exc}", file=sys.stderr)
+        i += 2
+        continue
     (out / f"{name}.db-snapshot.json").write_text(json.dumps(payload, indent=2) + "\n")
     count += 1
     i += 2

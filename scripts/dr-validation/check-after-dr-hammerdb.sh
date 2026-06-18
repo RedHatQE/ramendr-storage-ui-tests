@@ -114,7 +114,7 @@ estimated = float(data.get("estimated_rpo_seconds_upper_bound", 0.0))
 missing = int(data.get("missing_count", 0))
 gap_exceeded = 1 if estimated > max_rpo else 0
 cutoff_val = data.get("rpo_from_cutoff_seconds")
-cutoff_rpo = float(cutoff_val) if cutoff_val is not None else -1.0
+cutoff_rpo = int(cutoff_val) if cutoff_val is not None else -1
 cutoff_exceeded = 1 if (cutoff_val is not None and cutoff_rpo > max_rpo) else 0
 tpcc_issues = len(data.get("tpcc_regressions") or [])
 print(estimated, missing, gap_exceeded, cutoff_rpo, cutoff_exceeded, tpcc_issues)

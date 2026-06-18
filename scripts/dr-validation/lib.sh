@@ -17,6 +17,8 @@ DR_VALIDATION_LOG_PATH="${DR_VALIDATION_LOG_PATH:-/var/lib/ramendr-dr-validation
 DR_VALIDATION_MODE="${DR_VALIDATION_MODE:-hammerdb}"
 DR_VALIDATION_HAMMERDB_VM="${DR_VALIDATION_HAMMERDB_VM:-rhel9-node-001}"
 DR_VALIDATION_DB_SNAPSHOT_ROOT="${DR_VALIDATION_DB_SNAPSHOT_ROOT:-${REPO_ROOT}/.work/dr-validation-db/auto}"
+# Pinned digest for reproducible in-cluster DR validation Jobs (override via env).
+DR_VALIDATION_UTILITY_CONTAINER_IMAGE="${DR_VALIDATION_UTILITY_CONTAINER_IMAGE:-quay.io/validatedpatterns/utility-container@sha256:05575d196a37ee5317b472408e552ff3eafa58cdfc26ba4454954e0d24337cec}"
 DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 DR_VALIDATION_SNAPSHOT_INTERVAL="${DR_VALIDATION_SNAPSHOT_INTERVAL:-300}"
 DR_VALIDATION_SNAPSHOT_KEEP="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
@@ -334,7 +336,10 @@ seed_db_baseline_snapshot_if_missing() {
   stamp="$(date +%Y%m%d-%H%M%S)"
   dest="${DR_VALIDATION_DB_SNAPSHOT_ROOT}/${stamp}"
   log "Seeding initial DB baseline snapshot -> ${dest}"
-  "$DR_VALIDATION_SCRIPT_DIR/collect-db-snapshot-incluster.sh" "$dest"
+  if ! "$DR_VALIDATION_SCRIPT_DIR/collect-db-snapshot-incluster.sh" "$dest"; then
+    err "Could not seed initial DB baseline snapshot."
+    return 1
+  fi
 }
 
 prune_auto_snapshots_db() {

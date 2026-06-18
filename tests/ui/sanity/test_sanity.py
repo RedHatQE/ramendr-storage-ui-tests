@@ -477,7 +477,7 @@ def _run_dr_data_validation(
     """Collect DR validation data and assert continuity after failover or relocate.
 
     Uses check-after-dr.sh, which defaults to HammerDB PostgreSQL validation on
-    DR_VALIDATION_HAMMERDB_VM (edgenode-0). Set DR_VALIDATION_MODE=timestamp for
+    DR_VALIDATION_HAMMERDB_VM (rhel9-node-001). Set DR_VALIDATION_MODE=timestamp for
     the legacy per-VM timestamp log checks.
 
     initiated_utc: UTC datetime of the "Initiate" UI click that started the DR

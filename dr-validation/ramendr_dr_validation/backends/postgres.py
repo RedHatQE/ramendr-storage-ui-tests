@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from ramendr_dr_validation.tpcc_schema import TPCC_TABLE_NAMES
+
 
 @dataclass(frozen=True)
 class PostgresBackend:
@@ -48,14 +50,4 @@ class PostgresBackend:
     @property
     def tpcc_tables(self) -> tuple[str, ...]:
         """HammerDB TPC-C tables used for row-count integrity checks."""
-        return (
-            "warehouse",
-            "district",
-            "customer",
-            "stock",
-            "item",
-            "orders",
-            "order_line",
-            "new_order",
-            "history",
-        )
+        return TPCC_TABLE_NAMES

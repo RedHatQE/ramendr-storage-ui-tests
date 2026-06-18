@@ -44,10 +44,13 @@ while true; do
       if ! prune_auto_snapshots_db 2>>"$SNAPSHOT_DAEMON_LOG"; then
         echo "[$(date -u +%H:%M:%S)] WARN prune_auto_snapshots_db failed" >>"$SNAPSHOT_DAEMON_LOG"
       fi
-    elif ! update_latest_snapshot_link "$dest" 2>>"$SNAPSHOT_DAEMON_LOG"; then
-      echo "[$(date -u +%H:%M:%S)] WARN update_latest_snapshot_link failed for ${dest}" >>"$SNAPSHOT_DAEMON_LOG"
-    elif ! prune_auto_snapshots 2>>"$SNAPSHOT_DAEMON_LOG"; then
-      echo "[$(date -u +%H:%M:%S)] WARN prune_auto_snapshots failed" >>"$SNAPSHOT_DAEMON_LOG"
+    else
+      if ! update_latest_snapshot_link "$dest" 2>>"$SNAPSHOT_DAEMON_LOG"; then
+        echo "[$(date -u +%H:%M:%S)] WARN update_latest_snapshot_link failed for ${dest}" >>"$SNAPSHOT_DAEMON_LOG"
+      fi
+      if ! prune_auto_snapshots 2>>"$SNAPSHOT_DAEMON_LOG"; then
+        echo "[$(date -u +%H:%M:%S)] WARN prune_auto_snapshots failed" >>"$SNAPSHOT_DAEMON_LOG"
+      fi
     fi
     echo "[$(date -u +%H:%M:%S)] Auto-snapshot saved: ${dest}" >>"$SNAPSHOT_DAEMON_LOG"
   else

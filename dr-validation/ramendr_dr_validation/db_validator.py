@@ -186,6 +186,12 @@ def rpo_from_cutoff_seconds(
     return (cutoff_dt - last_ts).total_seconds()
 
 
+def require_positive_interval(interval: float) -> None:
+    """Reject non-positive intervals used for RPO upper-bound math."""
+    if interval <= 0:
+        raise ValueError(f"interval must be positive, got {interval}")
+
+
 def validate_snapshot_file(
     after_path: Path,
     *,
@@ -194,6 +200,7 @@ def validate_snapshot_file(
     cutoff_utc: str = "",
 ) -> dict:
     """Validate one after snapshot, optionally comparing to a baseline snapshot."""
+    require_positive_interval(interval)
     snapshot = json.loads(after_path.read_text(encoding="utf-8"))
     records, parse_errors = audit_records_from_snapshot(snapshot)
     report = validate_audit_records(records)
@@ -264,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
         "-o", "--output", type=Path, help="Write validation JSON report"
     )
     args = parser.parse_args(argv)
+
+    try:
+        require_positive_interval(args.interval)
+    except ValueError as exc:
+        print(exc, file=__import__("sys").stderr)
+        return 2
 
     payload = validate_snapshot_file(
         args.after_snapshot,

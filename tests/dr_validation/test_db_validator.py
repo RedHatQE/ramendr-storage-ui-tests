@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from ramendr_dr_validation.db_validator import validate_snapshot_file
 
 
@@ -203,3 +205,23 @@ def test_validate_fails_when_baseline_compare_missing(tmp_path: Path) -> None:
 
     assert payload["ok"] is False
     assert any("Baseline snapshot not found" in err for err in payload["parse_errors"])
+
+
+def test_validate_rejects_non_positive_interval(tmp_path: Path) -> None:
+    after = tmp_path / "edgenode-0.db-snapshot.json"
+    _write_snapshot(
+        after,
+        _snapshot(
+            [
+                {
+                    "seq": 1,
+                    "committed_at": "2026-06-15T12:00:01.000Z",
+                    "hostname": "edgenode-0",
+                    "source": "db_audit",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="interval must be positive"):
+        validate_snapshot_file(after, interval=0)

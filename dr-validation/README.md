@@ -2,7 +2,7 @@
 
 Default mode (`DR_VALIDATION_MODE=hammerdb`) runs **HammerDB TPC-C** against
 **PostgreSQL** on one DR-protected edge VM (`DR_VALIDATION_HAMMERDB_VM`, default
-`edgenode-0`). Data files live under `/var/lib/ramendr-dr-validation/` on the
+`rhel9-node-001`). Data files live under `/var/lib/ramendr-dr-validation/` on the
 replicated VM disk. A continuous audit table (`dr_validation_audit`) plus TPC-C
 row-count checks replace the legacy timestamp log for post-DR validation.
 
@@ -12,7 +12,7 @@ Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
 ## HammerDB workflow (default)
 
 1. **Deploy environment** — `./scripts/redeploy.sh` automatically installs PostgreSQL +
-   HammerDB on `edgenode-0`, verifies TPC-C tables are populated, and saves the first baseline
+   HammerDB on `rhel9-node-001`, verifies TPC-C tables are populated, and saves the first baseline
    snapshot (unless `SKIP_DR_VALIDATION=1`).
 2. **Automatic baseline** — DB snapshots every 5 minutes in
    `.work/dr-validation-db/auto/latest`.

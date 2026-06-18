@@ -98,7 +98,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: install
-        image: quay.io/validatedpatterns/utility-container:latest
+        image: ${DR_VALIDATION_UTILITY_CONTAINER_IMAGE}
         env:
         - name: SSH_USER
           value: "${SSH_USER}"

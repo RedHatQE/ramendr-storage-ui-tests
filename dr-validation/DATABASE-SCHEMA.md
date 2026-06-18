@@ -1,7 +1,7 @@
 # HammerDB PostgreSQL schema (default DR validation mode)
 
 HammerDB **TPC-C** builds a production-style OLTP database on the DR-protected edge VM
-(`edgenode-0` by default). There is no separate literal `users` table; **`customer`**
+(`rhel9-node-001` by default). There is no separate literal `users` table; **`customer`**
 serves that role with numeric IDs and profile fields.
 
 ## Application tables (HammerDB TPC-C)
