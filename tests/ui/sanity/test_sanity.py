@@ -499,6 +499,8 @@ def _run_dr_data_validation(
     env["KUBECONFIG"] = HUB_KUBECONFIG
     if initiated_utc is not None:
         env["DR_VALIDATION_CUTOFF_UTC"] = initiated_utc.isoformat()
+    else:
+        env.pop("DR_VALIDATION_CUTOFF_UTC", None)
     cmd = ["bash", str(script_path)]
     try:
         result = subprocess.run(  # noqa: S603

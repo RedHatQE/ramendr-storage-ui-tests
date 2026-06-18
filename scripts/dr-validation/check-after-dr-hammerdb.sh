@@ -40,7 +40,7 @@ fi
 echo ""
 
 BASELINE_DIR=""
-if [[ -L "${AUTO_DB_SNAPSHOT_ROOT}/latest" ]]; then
+if [[ -d "${AUTO_DB_SNAPSHOT_ROOT}/latest" ]]; then
   BASELINE_DIR="$(cd "${AUTO_DB_SNAPSHOT_ROOT}/latest" && pwd)"
   echo "Baseline (auto DB snapshot): ${BASELINE_DIR}"
 else

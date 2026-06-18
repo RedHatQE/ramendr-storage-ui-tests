@@ -28,6 +28,7 @@ cd "$HAMMERDB_HOME"
 
 STATE_DIR="/var/lib/ramendr-dr-validation/hammerdb"
 mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
 export TMPDIR="${STATE_DIR}/tmp"
 mkdir -p "$STATE_DIR/tmp"
 chmod 700 "$STATE_DIR/tmp"
@@ -60,8 +61,9 @@ EOF
 write_run_script() {
   cat >"${STATE_DIR}/runload.tcl" <<'EOF'
 proc wait_to_complete {} {
-  if {![vucomplete]} {
-    after 10000 wait_to_complete
+  while {![vucomplete]} {
+    update
+    after 100
   }
 }
 EOF

@@ -5,34 +5,54 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import socket
 import sys
 import time
 from pathlib import Path
 
+from psycopg2 import sql
+
 from ramendr_dr_validation.backends.postgres import PostgresBackend
+
+_VALID_TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def validate_table_name(table: str) -> str:
+    """Reject unexpected table names before composing SQL."""
+    if not _VALID_TABLE_NAME.match(table):
+        raise ValueError(f"Invalid audit table name: {table!r}")
+    return table
 
 
 def read_last_seq(conn, table: str) -> int:
     """Return the highest audit sequence number, or 0 when the table is empty."""
+    table = validate_table_name(table)
     with conn.cursor() as cur:
-        cur.execute(f"SELECT COALESCE(MAX(seq), 0) FROM {table}")
+        cur.execute(
+            sql.SQL("SELECT COALESCE(MAX(seq), 0) FROM {}").format(
+                sql.Identifier(table)
+            )
+        )
         row = cur.fetchone()
     return int(row[0]) if row else 0
 
 
 def ensure_audit_table(conn, table: str) -> None:
     """Create the audit table if bootstrap did not already."""
+    table = validate_table_name(table)
     with conn.cursor() as cur:
         cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {table} (
+            sql.SQL(
+                """
+            CREATE TABLE IF NOT EXISTS {} (
                 seq BIGINT PRIMARY KEY,
                 committed_at TIMESTAMPTZ NOT NULL,
                 hostname TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'db_audit'
             )
             """
+            ).format(sql.Identifier(table))
         )
     conn.commit()
 
@@ -46,12 +66,15 @@ def append_audit_record(
     source: str,
 ) -> None:
     """Insert one audit row and commit immediately (fsync via PostgreSQL WAL)."""
+    table = validate_table_name(table)
     with conn.cursor() as cur:
         cur.execute(
-            f"""
-            INSERT INTO {table} (seq, committed_at, hostname, source)
-            VALUES (%s, NOW() AT TIME ZONE 'UTC', %s, %s)
-            """,
+            sql.SQL(
+                """
+            INSERT INTO {} (seq, committed_at, hostname, source)
+            VALUES (%s, NOW(), %s, %s)
+            """
+            ).format(sql.Identifier(table)),
             (seq, hostname, source),
         )
     conn.commit()

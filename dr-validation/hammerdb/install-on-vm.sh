@@ -24,9 +24,19 @@ PG_BIN_DIR=""
 PG_CTL=""
 PSQL=""
 
+pg_quote_ident() {
+  local s="${1//\"/\"\"}"
+  printf '"%s"' "$s"
+}
+
+pg_quote_literal() {
+  local s="${1//\'/\'\'}"
+  printf "'%s'" "$s"
+}
+
 echo "=== RamenDR HammerDB install (PostgreSQL) ==="
 
-sudo mkdir -p "$DATA_ROOT/postgres" "$ENV_DIR" "${DATA_ROOT}/hammerdb" "${DATA_ROOT}/hammerdb/tmp"
+sudo install -m 0755 -d "$DATA_ROOT/postgres" "$ENV_DIR" "${DATA_ROOT}/hammerdb" "${DATA_ROOT}/hammerdb/tmp"
 sudo chown -R cloud-user:cloud-user "${DATA_ROOT}/hammerdb" || true
 
 dnf_rhel_repos_enabled() {
@@ -204,21 +214,26 @@ WRAPPER
 sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PG_USER}') THEN
-    CREATE ROLE ${PG_USER} LOGIN PASSWORD '${PG_PASSWORD}';
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $(pg_quote_literal "$PG_USER")) THEN
+    EXECUTE format(
+      'CREATE ROLE %I LOGIN PASSWORD %L',
+      $(pg_quote_literal "$PG_USER"),
+      $(pg_quote_literal "$PG_PASSWORD")
+    );
   END IF;
 END
 \$\$;
 SQL
 
-if ! sudo -u postgres "$PSQL" -Atqc "SELECT 1 FROM pg_database WHERE datname='${PG_DATABASE}'" | grep -q 1; then
+if ! sudo -u postgres "$PSQL" -Atqc \
+  "SELECT 1 FROM pg_database WHERE datname=$(pg_quote_literal "$PG_DATABASE")" | grep -q 1; then
   sudo -u postgres "${PG_BIN_DIR}/createdb" -O "${PG_USER}" "${PG_DATABASE}"
 fi
 
 sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 -c \
-  "GRANT ALL PRIVILEGES ON DATABASE ${PG_DATABASE} TO ${PG_USER};"
+  "GRANT ALL PRIVILEGES ON DATABASE $(pg_quote_ident "$PG_DATABASE") TO $(pg_quote_ident "$PG_USER");"
 
-sudo install -m 0750 -d "$ENV_DIR"
+sudo install -m 0755 -d "$ENV_DIR"
 sudo tee "$ENV_FILE" >/dev/null <<ENV
 DR_VALIDATION_PG_HOST=127.0.0.1
 DR_VALIDATION_PG_PORT=5432
@@ -268,10 +283,10 @@ if [[ "${tpcc_tables:-0}" -lt 3 ]]; then
   sudo rm -f "${DATA_ROOT}/hammerdb/schema-built"
   sudo systemctl stop ramendr-dr-hammerdb.service ramendr-dr-db-audit.service 2>/dev/null || true
   sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 <<SQL
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${PG_DATABASE}' AND pid <> pg_backend_pid();
-DROP DATABASE IF EXISTS ${PG_DATABASE};
-CREATE DATABASE ${PG_DATABASE} OWNER ${PG_USER};
-GRANT ALL PRIVILEGES ON DATABASE ${PG_DATABASE} TO ${PG_USER};
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$(pg_quote_literal "$PG_DATABASE") AND pid <> pg_backend_pid();
+DROP DATABASE IF EXISTS $(pg_quote_ident "$PG_DATABASE");
+CREATE DATABASE $(pg_quote_ident "$PG_DATABASE") OWNER $(pg_quote_ident "$PG_USER");
+GRANT ALL PRIVILEGES ON DATABASE $(pg_quote_ident "$PG_DATABASE") TO $(pg_quote_ident "$PG_USER");
 SQL
 fi
 
@@ -300,9 +315,9 @@ fi
 sudo -u postgres "$PSQL" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
   -f "${REPO_ROOT}/hammerdb/sql/init-audit.sql"
 sudo -u postgres "$PSQL" -d "$PG_DATABASE" -c \
-  "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${PG_USER};"
+  "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $(pg_quote_ident "$PG_USER");"
 sudo -u postgres "$PSQL" -d "$PG_DATABASE" -c \
-  "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${PG_USER};"
+  "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $(pg_quote_ident "$PG_USER");"
 
 sudo systemctl restart ramendr-dr-db-audit.service
 
@@ -326,4 +341,6 @@ if [[ "${audit_count:-0}" -lt 1 ]]; then
 fi
 
 echo "HammerDB install OK: audit_rows=${audit_count} tpcc_core_tables=${tpcc_tables}"
+set +o pipefail
 sudo /usr/local/bin/ramendr-dr-db-snapshot | head -n 20
+set -o pipefail
