@@ -162,7 +162,10 @@ PRs that fail the checks cannot be merged.
 Default mode is **HammerDB TPC-C on PostgreSQL** (`DR_VALIDATION_MODE=hammerdb`) on
 `rhel9-node-001`. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
 builds populated TPC-C tables (customers with IDs, orders, stock, …), verifies recording,
-saves an initial baseline snapshot, and starts rolling snapshots every 5 minutes.
+and saves an initial baseline snapshot to `.work/dr-validation-db/auto/latest`.
+
+For DR validation, capture a fresh baseline immediately before Initiate (the sanity test
+does this automatically; for manual runs use `./scripts/dr-validation/save-db-baseline-snapshot.sh`).
 
 Smoke tests assert the database tables are populated after redeploy; sanity tests validate
 table data continuity after failover/relocate via `check-after-dr.sh`.

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Validate HammerDB PostgreSQL data after failover/relocate.
-# Uses the latest automatic DB snapshot as baseline when available.
+# Uses the pre-DR baseline snapshot (auto/latest) when available.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -40,12 +40,16 @@ fi
 echo ""
 
 BASELINE_DIR=""
-if [[ -d "${AUTO_DB_SNAPSHOT_ROOT}/latest" ]]; then
-  BASELINE_DIR="$(cd "${AUTO_DB_SNAPSHOT_ROOT}/latest" && pwd)"
-  echo "Baseline (auto DB snapshot): ${BASELINE_DIR}"
+if [[ -L "${AUTO_DB_SNAPSHOT_ROOT}/latest" ]]; then
+  if BASELINE_DIR="$(cd "${AUTO_DB_SNAPSHOT_ROOT}/latest" 2>/dev/null && pwd)"; then
+    echo "Baseline (DB snapshot): ${BASELINE_DIR}"
+  else
+    warn "Baseline symlink auto/latest is dangling (target directory was removed)."
+    echo "  Tip: run ./scripts/dr-validation/save-db-baseline-snapshot.sh before DR."
+  fi
 else
-  warn "No automatic DB baseline yet (daemon may still be warming up)."
-  echo "  Tip: wait 5 minutes after redeploy, or run: ./scripts/dr-validation/start-snapshot-daemon.sh"
+  warn "No DB baseline snapshot yet."
+  echo "  Tip: run redeploy or ./scripts/dr-validation/save-db-baseline-snapshot.sh before DR."
 fi
 echo ""
 

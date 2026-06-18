@@ -35,6 +35,9 @@ if dr_validation_uses_hammerdb; then
     err "DB baseline seeding failed."
     exit 1
   fi
+  log "HammerDB mode uses a single pre-DR baseline (not a rolling daemon)."
+  log "Capture before DR with: ./scripts/dr-validation/save-db-baseline-snapshot.sh"
+  exit 0
 fi
 
 nohup "$SCRIPT_DIR/snapshot-daemon.sh" >>"$SNAPSHOT_DAEMON_LOG" 2>&1 &

@@ -12,10 +12,10 @@ Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
 ## HammerDB workflow (default)
 
 1. **Deploy environment** — `./scripts/redeploy.sh` automatically installs PostgreSQL +
-   HammerDB on `rhel9-node-001`, verifies TPC-C tables are populated, and saves the first baseline
-   snapshot (unless `SKIP_DR_VALIDATION=1`).
-2. **Automatic baseline** — DB snapshots every 5 minutes in
-   `.work/dr-validation-db/auto/latest`.
+   HammerDB on `rhel9-node-001`, verifies TPC-C tables are populated, and saves an initial
+   baseline snapshot to `.work/dr-validation-db/auto/latest` (unless `SKIP_DR_VALIDATION=1`).
+2. **Before DR** — capture a fresh baseline immediately before Initiate (sanity test does
+   this automatically; for manual runs use `./scripts/dr-validation/save-db-baseline-snapshot.sh`).
 3. **Run DR** — failover / relocate on DRPC `gitops-vm-protection`.
 4. **After DR** — sanity test or `./scripts/dr-validation/post-dr-automation.sh` validates
    PostgreSQL table data automatically.
@@ -31,6 +31,7 @@ and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 | `ramendr_dr_validation/db_validator.py` | Gap/RPO/TPC-C validation |
 | `scripts/dr-validation/install-hammerdb-incluster.sh` | In-cluster SSH install job |
 | `scripts/dr-validation/collect-db-snapshot-incluster.sh` | In-cluster snapshot collect |
+| `scripts/dr-validation/save-db-baseline-snapshot.sh` | Capture pre-DR DB baseline (updates `auto/latest`) |
 | `scripts/dr-validation/check-after-dr-hammerdb.sh` | Post-DR HammerDB validation |
 
 Future backends (e.g. SQL Server on Windows VMs) plug in under

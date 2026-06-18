@@ -322,6 +322,22 @@ update_latest_db_snapshot_link() {
   ln -sfn "$(basename "$snap_dir")" "${DR_VALIDATION_DB_SNAPSHOT_ROOT}/latest"
 }
 
+# Resolve auto/latest to an absolute baseline directory.
+# Returns 0 and prints the path when valid; 1 when missing; 2 when dangling.
+resolve_db_baseline_dir() {
+  local root="$1"
+  local link="${root}/latest"
+  local resolved=""
+  if [[ ! -L "$link" ]]; then
+    return 1
+  fi
+  if resolved="$(cd "$link" 2>/dev/null && pwd)"; then
+    echo "$resolved"
+    return 0
+  fi
+  return 2
+}
+
 seed_db_baseline_snapshot_if_missing() {
   local stamp dest count
   mkdir -p "$DR_VALIDATION_DB_SNAPSHOT_ROOT"

@@ -471,14 +471,58 @@ def _delete_probe_pod(
         pass
 
 
+def _save_hammerdb_baseline_snapshot(*, phase: str) -> None:
+    """Capture a fresh DB baseline on the HammerDB VM immediately before Initiate."""
+    if _SKIP_DR_TIMESTAMP_VALIDATION:
+        return
+    if os.getenv("DR_VALIDATION_MODE", "hammerdb") != "hammerdb":
+        return
+
+    script_path = (
+        _repo_root() / "scripts" / "dr-validation" / "save-db-baseline-snapshot.sh"
+    )
+    assert script_path.exists(), f"Baseline snapshot script not found: {script_path}"
+
+    env = os.environ.copy()
+    env["KUBECONFIG"] = HUB_KUBECONFIG
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["bash", str(script_path)],  # noqa: S607
+            cwd=_repo_root(),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_DR_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        pytest.fail(
+            f"HammerDB baseline snapshot timed out before {phase} "
+            f"(limit={_DR_VALIDATION_TIMEOUT_SECONDS:.0f}s).\n"
+            f"stdout:\n{stdout}\n"
+            f"stderr:\n{stderr}"
+        )
+    assert result.returncode == 0, (
+        f"HammerDB baseline snapshot failed before {phase}.\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
+
 def _run_dr_data_validation(
     *, phase: str, initiated_utc: datetime | None = None
 ) -> None:
     """Collect DR validation data and assert continuity after failover or relocate.
 
-    Uses check-after-dr.sh, which defaults to HammerDB PostgreSQL validation on
-    DR_VALIDATION_HAMMERDB_VM (rhel9-node-001). Set DR_VALIDATION_MODE=timestamp for
-    the legacy per-VM timestamp log checks.
+    Uses check-after-dr.sh with HammerDB PostgreSQL validation on
+    DR_VALIDATION_HAMMERDB_VM (default `rhel9-node-001`). Set
+    DR_VALIDATION_MODE=timestamp for the legacy per-VM timestamp log checks.
 
     initiated_utc: UTC datetime of the "Initiate" UI click that started the DR
     operation.  When provided it is forwarded as DR_VALIDATION_CUTOFF_UTC so
@@ -918,6 +962,7 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.open_failover_dialog(drpc_name)
     drpc_page.assert_failover_dialog_contents()
+    _save_hammerdb_baseline_snapshot(phase="failover")
     failover_started_at = time.monotonic()
     failover_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_failover_dialog()
@@ -975,6 +1020,7 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.open_relocate_dialog(drpc_name)
     drpc_page.assert_relocate_dialog_contents()
+    _save_hammerdb_baseline_snapshot(phase="relocate")
     relocate_started_at = time.monotonic()
     relocate_initiated_utc = datetime.now(timezone.utc)
     drpc_page.initiate_relocate_dialog()
@@ -1109,6 +1155,7 @@ class TestUiSanity:
             # --- Failover popup (initiate path) ---
             drpc_page.open_failover_dialog("gitops-vm-protection")
             drpc_page.assert_failover_dialog_contents()
+            _save_hammerdb_baseline_snapshot(phase="failover")
             failover_started_at = time.monotonic()
             failover_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_failover_dialog()
@@ -1197,6 +1244,7 @@ class TestUiSanity:
             # --- Relocate from secondary back to primary ---
             drpc_page.open_relocate_dialog("gitops-vm-protection")
             drpc_page.assert_relocate_dialog_contents()
+            _save_hammerdb_baseline_snapshot(phase="relocate")
             relocate_started_at = time.monotonic()
             relocate_initiated_utc = datetime.now(timezone.utc)
             drpc_page.initiate_relocate_dialog()

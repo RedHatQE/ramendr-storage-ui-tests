@@ -1150,13 +1150,14 @@ setup_dr_validation() {
   fi
 
   log "DR validation is running (mode=${DR_VALIDATION_MODE:-hammerdb})."
-  if [[ "${SKIP_DR_VALIDATION_SNAPSHOTS:-0}" != "1" ]] && \
+  if [[ "${DR_VALIDATION_MODE:-hammerdb}" != "hammerdb" ]] && \
+    [[ "${SKIP_DR_VALIDATION_SNAPSHOTS:-0}" != "1" ]] && \
     [[ -x "$REPO_ROOT/scripts/dr-validation/start-snapshot-daemon.sh" ]]; then
     if ! HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
       PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
       SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
       "$REPO_ROOT/scripts/dr-validation/start-snapshot-daemon.sh"; then
-      err "Could not start automatic DB snapshot daemon."
+      err "Could not start automatic timestamp snapshot daemon."
       return 1
     fi
   fi
@@ -1185,13 +1186,20 @@ show_status() {
   if [[ "${SKIP_DR_VALIDATION:-0}" == "1" ]]; then
     echo "Skipped (SKIP_DR_VALIDATION=1)"
   else
-    if [[ -f "$REPO_ROOT/.work/dr-validation-snapshot-daemon.pid" ]] && \
-      kill -0 "$(cat "$REPO_ROOT/.work/dr-validation-snapshot-daemon.pid")" 2>/dev/null; then
-      if [[ "${DR_VALIDATION_MODE:-hammerdb}" == "hammerdb" ]]; then
-        echo "Auto snapshots: running every 5 min -> .work/dr-validation-db/auto/latest"
+    if [[ "${DR_VALIDATION_MODE:-hammerdb}" == "hammerdb" ]]; then
+      baseline_dir=""
+      if [[ -L "$REPO_ROOT/.work/dr-validation-db/auto/latest" ]]; then
+        if baseline_dir="$(cd "$REPO_ROOT/.work/dr-validation-db/auto/latest" 2>/dev/null && pwd)"; then
+          echo "DB baseline: ${baseline_dir} (.work/dr-validation-db/auto/latest)"
+        else
+          echo "DB baseline: dangling symlink (.work/dr-validation-db/auto/latest)"
+        fi
       else
-        echo "Auto snapshots: running every 5 min -> .work/dr-validation-logs/auto/latest"
+        echo "DB baseline: not set (./scripts/dr-validation/save-db-baseline-snapshot.sh)"
       fi
+    elif [[ -f "$REPO_ROOT/.work/dr-validation-snapshot-daemon.pid" ]] && \
+      kill -0 "$(cat "$REPO_ROOT/.work/dr-validation-snapshot-daemon.pid")" 2>/dev/null; then
+      echo "Auto snapshots: running every 5 min -> .work/dr-validation-logs/auto/latest"
     else
       echo "Auto snapshots: not running (./scripts/dr-validation/start-snapshot-daemon.sh)"
     fi
