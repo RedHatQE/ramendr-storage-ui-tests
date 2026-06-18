@@ -1187,12 +1187,14 @@ show_status() {
     echo "Skipped (SKIP_DR_VALIDATION=1)"
   else
     if [[ "${DR_VALIDATION_MODE:-hammerdb}" == "hammerdb" ]]; then
+      local db_snapshot_root="${DR_VALIDATION_DB_SNAPSHOT_ROOT:-${REPO_ROOT}/.work/dr-validation-db/auto}"
+      local db_baseline_link="${db_snapshot_root}/latest"
       baseline_dir=""
-      if [[ -L "$REPO_ROOT/.work/dr-validation-db/auto/latest" ]]; then
-        if baseline_dir="$(cd "$REPO_ROOT/.work/dr-validation-db/auto/latest" 2>/dev/null && pwd)"; then
-          echo "DB baseline: ${baseline_dir} (.work/dr-validation-db/auto/latest)"
+      if [[ -L "$db_baseline_link" ]]; then
+        if baseline_dir="$(cd "$db_baseline_link" 2>/dev/null && pwd)"; then
+          echo "DB baseline: ${baseline_dir} (${db_baseline_link})"
         else
-          echo "DB baseline: dangling symlink (.work/dr-validation-db/auto/latest)"
+          echo "DB baseline: dangling symlink (${db_baseline_link})"
         fi
       else
         echo "DB baseline: not set (./scripts/dr-validation/save-db-baseline-snapshot.sh)"
