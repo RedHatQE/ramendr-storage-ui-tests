@@ -13,10 +13,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-c025108811561fef71b59f797123d9e1066d93b0}"
+UPSTREAM_REF="${UPSTREAM_REF:-ed0e7420182338a4c9364922c3dc4b779eb91454}"
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-v1.1}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
 
 WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
