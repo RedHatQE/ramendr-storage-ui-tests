@@ -57,6 +57,7 @@ install -m 0755 "$DR_VALIDATION_DIR/hammerdb/run-autopilot.sh" "$TMP_DIR/hammerd
 install -m 0644 "$DR_VALIDATION_DIR/hammerdb/sql/init-audit.sql" "$TMP_DIR/hammerdb/sql/init-audit.sql"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_audit.py" "$TMP_DIR/ramendr_dr_validation/db_audit.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot.py"
+install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/tpcc_schema.py" "$TMP_DIR/ramendr_dr_validation/tpcc_schema.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/backends/postgres.py" "$TMP_DIR/ramendr_dr_validation/backends/postgres.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/backends/__init__.py" "$TMP_DIR/ramendr_dr_validation/backends/__init__.py"
 touch "$TMP_DIR/ramendr_dr_validation/__init__.py"

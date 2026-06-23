@@ -268,6 +268,8 @@ sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/db_audit.py" \
   /usr/local/lib/ramendr_dr_validation/db_audit.py
 sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/db_snapshot.py" \
   /usr/local/lib/ramendr_dr_validation/db_snapshot.py
+sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/tpcc_schema.py" \
+  /usr/local/lib/ramendr_dr_validation/tpcc_schema.py
 sudo chmod 0755 /usr/local/bin/ramendr-dr-db-audit /usr/local/bin/ramendr-dr-db-snapshot
 sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/backends/postgres.py" \
   /usr/local/lib/ramendr_dr_validation/backends/postgres.py
