@@ -2,10 +2,10 @@
 
 This repository is a **test harness** for the RamenDR validated pattern.
 It deploys from a maintained fork of the upstream starter kit —
-[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22`) —
+[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `windows_vms`, rebased on `ocp-4.22`) —
 which carries all environment-specific customizations (additional VM disks, BYOC cluster names,
 ODF channel pins, cost-optimized instance profiles). **`redeploy.sh` pins a fixed commit SHA**
-for the local pattern install; **hub Argo CD** reconciles from the fork's `ocp-4.22` branch on GitHub
+for the local pattern install; **hub Argo CD** reconciles from the fork's `windows_vms` branch on GitHub
 (see [Upstream pinning](#upstream-pinning) below).
 
 It contains:
@@ -18,12 +18,17 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` from the `ocp-4.22` branch into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `2cefc177f797e77f227fd753aaf2bd939ca34f59` from the `windows_vms` branch into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
 4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`.
 
-> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `ocp-4.22`) — local copies placed next to the checkout are invisible to it. Committing customizations into the fork's branch is the only way to have Argo CD reconcile them automatically.
+> **BYOC note:** The fork sets `byoc: true` and documents `make install-byoc` with
+> spoke kubeconfigs in `values-secret`. Full redeploy today uses `make install` plus
+> imperative import/Vault workarounds in `redeploy.sh` instead — see
+> [`docs/TODO-byoc-redeploy-refactor.md`](docs/TODO-byoc-redeploy-refactor.md).
+
+> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `windows_vms`) — local copies placed next to the checkout are invisible to it. The `windows_vms` branch is rebased on `ocp-4.22`; Windows VM chart values live there alongside the 4.22 baseline.
 
 ### Upstream pinning
 
@@ -31,8 +36,8 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` (on branch `ocp-4.22`) |
-| Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22` (tip unless an Application pins `targetRevision`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `2cefc177f797e77f227fd753aaf2bd939ca34f59` (on branch `windows_vms`) |
+| Hub Argo CD Applications | Remote fork on GitHub | Branch `windows_vms` (tip unless an Application pins `targetRevision`) |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
 `redeploy.sh`. For Argo CD to match that commit, push it to the tracked branch or pin
@@ -174,7 +179,10 @@ PRs that fail the checks cannot be merged.
 ## RamenDR data validation
 
 Default mode is **HammerDB TPC-C on PostgreSQL** (`DR_VALIDATION_MODE=hammerdb`) on
-`rhel9-node-001`. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
+`rhel9-node-001` (one of two Linux edge VMs). The default fleet is **four VMs** in
+`gitops-vms`: 2 Linux + 1 Windows Server 2022 + 1 Windows Server 2025. Add
+`privatevm-credentials` (Quay robot for `quay.io/martjack/*` images) to
+`~/values-secret.yaml` before redeploy. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
 builds populated TPC-C tables (customers with IDs, orders, stock, …), verifies recording,
 and saves an initial baseline snapshot to `.work/dr-validation-db/auto/latest`.
 

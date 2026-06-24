@@ -16,9 +16,17 @@ SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-$HOME/.ssh/id_rsa}"
 DR_VALIDATION_LOG_PATH="${DR_VALIDATION_LOG_PATH:-/var/lib/ramendr-dr-validation/timestamps.log}"
 DR_VALIDATION_MODE="${DR_VALIDATION_MODE:-hammerdb}"
 DR_VALIDATION_HAMMERDB_VM="${DR_VALIDATION_HAMMERDB_VM:-rhel9-node-001}"
+# Full fleet size in gitops-vms (2 Linux + 2 Windows); post-DR checks still use this.
+DR_VALIDATION_EXPECTED_VMS="${DR_VALIDATION_EXPECTED_VMS:-4}"
+# Bootstrap waits only for Linux edge VMs (Windows DR bootstrap is separate).
+DR_VALIDATION_BOOTSTRAP_VM_COUNT="${DR_VALIDATION_BOOTSTRAP_VM_COUNT:-2}"
+DR_VALIDATION_BOOTSTRAP_VM_PATTERN="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"
 DR_VALIDATION_DB_SNAPSHOT_ROOT="${DR_VALIDATION_DB_SNAPSHOT_ROOT:-${REPO_ROOT}/.work/dr-validation-db/auto}"
-# Pinned digest for reproducible in-cluster DR validation Jobs (override via env).
-DR_VALIDATION_UTILITY_CONTAINER_IMAGE="${DR_VALIDATION_UTILITY_CONTAINER_IMAGE:-quay.io/validatedpatterns/utility-container@sha256:05575d196a37ee5317b472408e552ff3eafa58cdfc26ba4454954e0d24337cec}"
+# Pinned amd64 manifest digest for in-cluster DR validation Jobs (override via env).
+# Must match quay.io/validatedpatterns/utility-container:latest (amd64); refresh with:
+#   skopeo inspect docker://quay.io/validatedpatterns/utility-container:latest | jq -r .Digest
+# then resolve amd64 manifest from the index if needed.
+DR_VALIDATION_UTILITY_CONTAINER_IMAGE="${DR_VALIDATION_UTILITY_CONTAINER_IMAGE:-quay.io/validatedpatterns/utility-container@sha256:03ddbab2e5473a7e5ca3ee073ac92682a480ebf5146c343e194369a76411a143}"
 DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 DR_VALIDATION_SNAPSHOT_INTERVAL="${DR_VALIDATION_SNAPSHOT_INTERVAL:-300}"
 DR_VALIDATION_SNAPSHOT_KEEP="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
@@ -191,7 +199,7 @@ print(int(age))
 
 wait_for_edge_vms() {
   require_cmd oc python3
-  local expected="${DR_VALIDATION_EXPECTED_VMS:-4}"
+  local expected="${DR_VALIDATION_EXPECTED_VMS}"
   local max_tries="${DR_VALIDATION_WAIT_MAX_TRIES:-60}"
   local sleep_sec="${DR_VALIDATION_WAIT_SLEEP:-30}"
 
@@ -229,6 +237,111 @@ wait_for_edge_vms() {
     tries=$((tries + 1))
   done
   err "Timed out waiting for edge VMs/routes."
+  return 1
+}
+
+_count_vms_on_spoke() {
+  local kubeconfig="$1" pattern="$2" status="${3:-}"
+  KUBECONFIG="$kubeconfig" oc get vm -n "$VM_NAMESPACE" --no-headers 2>/dev/null \
+    | awk -v pat="$pattern" -v st="$status" '
+      $1 ~ pat { if (st == "" || $3 ~ st) c++ } END { print c+0 }'
+}
+
+_count_ssh_hosts_on_spoke() {
+  local kubeconfig="$1" pattern="$2"
+  local count=0 route_name
+  while IFS=$'\t' read -r route_name _ _; do
+    [[ -z "$route_name" ]] && continue
+    [[ "$route_name" =~ $pattern ]] || continue
+    count=$((count + 1))
+  done < <(list_vm_ssh_hosts "$kubeconfig")
+  echo "$count"
+}
+
+# Wait for Linux (bootstrap) VMs only — do not block on Windows fleet readiness.
+wait_for_bootstrap_vms_healthy() {
+  local expected="${DR_VALIDATION_BOOTSTRAP_VM_COUNT:-2}"
+  local pattern="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"
+  local max_tries="${DR_VALIDATION_HEALTH_WAIT_TRIES:-40}"
+  local sleep_sec="${DR_VALIDATION_HEALTH_WAIT_SLEEP:-30}"
+
+  require_cmd oc python3
+  ensure_hub_kubeconfig
+
+  log "Waiting for ${expected} Running edge VM(s) matching '${pattern}' on current primary (up to $((max_tries * sleep_sec / 60)) min)..."
+  local tries=0
+  while [[ $tries -lt $max_tries ]]; do
+    local primary spoke_kc running
+    primary="$(determine_primary_cluster)"
+    [[ -z "$primary" ]] && primary="ocp-primary"
+    if ! spoke_kc="$(resolve_spoke_kubeconfig "$primary" 2>/dev/null)"; then
+      sleep "$sleep_sec"
+      tries=$((tries + 1))
+      continue
+    fi
+    running="$(_count_vms_on_spoke "$spoke_kc" "$pattern" "Running")"
+    log "  primary=${primary} running_bootstrap_vms=${running}/${expected} (pattern=${pattern})"
+    if [[ "$running" -ge "$expected" ]]; then
+      log "Bootstrap edge VMs are Running on ${primary}."
+      return 0
+    fi
+    sleep "$sleep_sec"
+    tries=$((tries + 1))
+  done
+  err "Timed out waiting for Running bootstrap VMs on primary."
+  return 1
+}
+
+wait_for_bootstrap_ssh_endpoints() {
+  local max_tries="${DR_VALIDATION_WAIT_MAX_TRIES:-60}"
+  local sleep_sec="${DR_VALIDATION_WAIT_SLEEP:-30}"
+
+  require_cmd oc python3
+  ensure_hub_kubeconfig
+
+  if dr_validation_uses_hammerdb; then
+    log "Waiting for SSH endpoint on HammerDB VM ${DR_VALIDATION_HAMMERDB_VM}..."
+    local tries=0
+    while [[ $tries -lt $max_tries ]]; do
+      local primary spoke_kc hosts
+      primary="$(determine_primary_cluster)"
+      [[ -z "$primary" ]] && primary="ocp-primary"
+      if spoke_kc="$(resolve_spoke_kubeconfig "$primary" 2>/dev/null)" && \
+        hosts="$(get_hammerdb_vm_host "$spoke_kc" 2>/dev/null)" && [[ -n "$hosts" ]]; then
+        log "SSH endpoint ready for ${DR_VALIDATION_HAMMERDB_VM} on ${primary}."
+        return 0
+      fi
+      log "  primary=${primary} waiting for ${DR_VALIDATION_HAMMERDB_VM} SSH endpoint (attempt $((tries + 1))/${max_tries})..."
+      sleep "$sleep_sec"
+      tries=$((tries + 1))
+    done
+    err "Timed out waiting for HammerDB VM SSH endpoint."
+    return 1
+  fi
+
+  local expected="${DR_VALIDATION_BOOTSTRAP_VM_COUNT:-2}"
+  local pattern="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"
+  log "Waiting for ${expected} SSH endpoint(s) matching '${pattern}' in ${VM_NAMESPACE}..."
+  local tries=0
+  while [[ $tries -lt $max_tries ]]; do
+    local primary spoke_kc routes
+    primary="$(determine_primary_cluster)"
+    [[ -z "$primary" ]] && primary="ocp-primary"
+    if ! spoke_kc="$(resolve_spoke_kubeconfig "$primary" 2>/dev/null)"; then
+      sleep "$sleep_sec"
+      tries=$((tries + 1))
+      continue
+    fi
+    routes="$(_count_ssh_hosts_on_spoke "$spoke_kc" "$pattern")"
+    log "  primary=${primary} ssh_endpoints=${routes}/${expected} (pattern=${pattern})"
+    if [[ "$routes" -ge "$expected" ]]; then
+      log "Bootstrap SSH endpoints are ready on ${primary}."
+      return 0
+    fi
+    sleep "$sleep_sec"
+    tries=$((tries + 1))
+  done
+  err "Timed out waiting for bootstrap SSH endpoints."
   return 1
 }
 
@@ -379,7 +492,7 @@ prune_auto_snapshots_db() {
 }
 
 wait_for_primary_vms_healthy() {
-  local expected="${DR_VALIDATION_EXPECTED_VMS:-4}"
+  local expected="${DR_VALIDATION_EXPECTED_VMS}"
   local max_tries="${DR_VALIDATION_HEALTH_WAIT_TRIES:-40}"
   local sleep_sec="${DR_VALIDATION_HEALTH_WAIT_SLEEP:-30}"
 
@@ -414,7 +527,7 @@ wait_for_primary_vms_healthy() {
 verify_writers_recording() {
   require_cmd ssh
   ssh_extra_opts
-  local expected="${DR_VALIDATION_EXPECTED_VMS:-4}"
+  local expected="${DR_VALIDATION_EXPECTED_VMS}"
 
   local primary spoke_kc
   primary="$(determine_primary_cluster)"

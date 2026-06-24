@@ -41,6 +41,11 @@ def _read_kubeadmin_password() -> str:
 
 HUB_PASSWORD = os.getenv("RAMENDR_HUB_PASSWORD") or _read_kubeadmin_password()
 
+# Edge VMs in gitops-vms: 2 Linux + 1 Windows 2022 + 1 Windows 2025.
+EXPECTED_EDGE_VM_COUNT = int(
+    os.getenv("RAMENDR_EXPECTED_VMS", os.getenv("RAMENDR_MIN_VM_COUNT", "4"))
+)
+
 HUB_KUBECONFIG = _expand(
     "RAMENDR_HUB_KUBECONFIG", "~/git/hub-cluster-install/auth/kubeconfig"
 )

@@ -145,19 +145,19 @@ spec:
               local scp_opts="-P \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local remote="mkdir -p /tmp/ramendr-dr-validation-install && tar -xzf /tmp/payload.tgz -C /tmp/ramendr-dr-validation-install && REPO_ROOT=/tmp/ramendr-dr-validation-install bash /tmp/ramendr-dr-validation-install/hammerdb/install-on-vm.sh"
-              if [[ -f /tmp/ssh-privatekey ]] && scp -i /tmp/ssh-privatekey \$scp_opts /payload/payload.tgz \
-                  "\${SSH_USER}@\${host}:/tmp/payload.tgz" && \
-                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote"; then
-                return 0
+              if [[ -f /tmp/ssh-privatekey ]]; then
+                scp -i /tmp/ssh-privatekey \$scp_opts /payload/payload.tgz "\${SSH_USER}@\${host}:/tmp/payload.tgz" && \
+                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote"
+                return \$?
               fi
               if [[ -n "\$PASS" ]]; then
                 sshpass -p "\$PASS" scp \$scp_opts /payload/payload.tgz "\${SSH_USER}@\${host}:/tmp/payload.tgz" && \
                 sshpass -p "\$PASS" ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   "\${SSH_USER}@\${host}" "\$remote"
-              else
-                return 1
+                return \$?
               fi
+              return 1
             }
             while IFS=\$'\t' read -r name host port; do
               [[ -z "\$name" ]] && continue

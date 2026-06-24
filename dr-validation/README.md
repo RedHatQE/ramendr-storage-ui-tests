@@ -65,7 +65,8 @@ replicated with the protected KubeVirt workload.
 
 ## Workflow
 
-1. **Deploy environment** — `./scripts/redeploy.sh` (four `edgenode` RHEL VMs in `gitops-vms`).
+1. **Deploy environment** — `./scripts/redeploy.sh` (four edge VMs in `gitops-vms`: 2 Linux + 1 Windows Server 2022 + 1 Windows Server 2025).
+   Add `privatevm-credentials` (Quay robot) and optional `windows-admin` to `~/values-secret.yaml` for Windows image import.
    When redeploy finishes, it **automatically** waits for VMs, installs timestamp writers on
    each edge VM, verifies recording, and saves the first baseline snapshot
    (unless `SKIP_DR_VALIDATION=1`).
@@ -101,7 +102,10 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SSH_USER` | `cloud-user` | VM SSH user |
+| `SSH_USER` | `cloud-user` | Linux VM SSH user (HammerDB / writer install); Windows guests use OpenSSH on port 22 |
+| `DR_VALIDATION_EXPECTED_VMS` | `4` | Full fleet in gitops-vms for post-DR automation |
+| `DR_VALIDATION_BOOTSTRAP_VM_COUNT` | `2` | Running Linux VMs required before HammerDB bootstrap |
+| `DR_VALIDATION_BOOTSTRAP_VM_PATTERN` | `rhel` | VM name substring matched during bootstrap wait |
 | `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key for direct/laptop SSH (`install-writer.sh`, non-in-cluster collect) |
 | `DR_VALIDATION_SSH_PASSWORD` | (from Vault) | Password for in-cluster install/collect Jobs (private keys are not copied to spokes) |
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |

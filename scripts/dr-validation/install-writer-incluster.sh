@@ -92,7 +92,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: install
-        image: quay.io/validatedpatterns/utility-container:latest
+        image: ${DR_VALIDATION_UTILITY_CONTAINER_IMAGE}
         env:
         - name: SSH_USER
           value: "${SSH_USER}"
@@ -193,7 +193,7 @@ for _ in $(seq 1 40); do
     logs="$(KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-writer-install --tail=120 2>/dev/null || true)"
     echo "$logs"
     cleanup_writer_install_secret
-    expected_vms="${DR_VALIDATION_EXPECTED_VMS:-4}"
+    expected_vms="${DR_VALIDATION_EXPECTED_VMS}"
     if echo "$logs" | grep -qE 'Permission denied \(publickey|ssh: connect to host.*Permission denied'; then
       err "SSH to edge VMs failed. Ensure values-secret vm-ssh/cloud-init match Vault and VMs were provisioned with cloud-init."
       exit 1

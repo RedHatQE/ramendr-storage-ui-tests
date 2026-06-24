@@ -11,17 +11,18 @@ set -euo pipefail
 #
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# shellcheck source=scripts/lib/resilient-spokes.sh
+# shellcheck source=lib/spoke-metal.sh
+source "$REPO_ROOT/scripts/lib/spoke-metal.sh"
+# shellcheck source=lib/resilient-spokes.sh
 source "$REPO_ROOT/scripts/lib/resilient-spokes.sh"
 # shellcheck source=scripts/lib/odf-golden-images.sh
 source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-04b9d2f29d2d3844294ec957bd679bd2ba7452ac}"  # ocp-4.22
+UPSTREAM_REF="${UPSTREAM_REF:-2cefc177f797e77f227fd753aaf2bd939ca34f59}"  # windows_vms (rebased on ocp-4.22)
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-windows_vms}"
 
 WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
@@ -516,84 +517,6 @@ install_spokes() {
   [[ "$failed" -eq 0 ]]
 }
 
-create_spoke_metal_machinesets() {
-  log "Creating c5n.metal MachineSets on spoke clusters (300 GiB root disk)..."
-  for entry in "ocp-primary:$PRIMARY_INSTALL_DIR" "ocp-secondary:$SECONDARY_INSTALL_DIR"; do
-    local cluster="${entry%%:*}"
-    local dir="${entry##*:}"
-    local kubeconfig="$dir/auth/kubeconfig"
-    [[ -f "$kubeconfig" ]] || { warn " No kubeconfig for $cluster � skipping metal MachineSet."; continue; }
-
-    local infra_id
-    infra_id=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['infraID'])")
-
-    local template_name
-    template_name=$(KUBECONFIG="$kubeconfig" oc get machineset -n openshift-machine-api \
-      --no-headers -o custom-columns=':.metadata.name' 2>/dev/null | sort | head -1)
-    [[ -n "$template_name" ]] || { warn " No MachineSet template found for $cluster � skipping."; continue; }
-
-    local metal_name="${infra_id}-metal"
-    log " Cloning $template_name -> $metal_name (c5n.metal, 300 GiB) on $cluster..."
-
-    KUBECONFIG="$kubeconfig" oc get machineset "$template_name" \
-      -n openshift-machine-api -o json 2>/dev/null | \
-      python3 -c "
-import sys, json, copy
-ms = json.load(sys.stdin)
-new_name = '${metal_name}'
-n = copy.deepcopy(ms)
-for k in ('resourceVersion','uid','generation','creationTimestamp','managedFields','annotations'):
-  n['metadata'].pop(k, None)
-n['metadata']['name'] = new_name
-n.pop('status', None)
-n['spec']['replicas'] = 1
-n['spec']['selector']['matchLabels']['machine.openshift.io/cluster-api-machineset'] = new_name
-n['spec']['template']['metadata']['labels']['machine.openshift.io/cluster-api-machineset'] = new_name
-pv = n['spec']['template']['spec']['providerSpec']['value']
-pv['instanceType'] = 'c5n.metal'
-bdm = pv.get('blockDeviceMappings', [])
-root_dev = bdm[0].get('deviceName', '/dev/xvda') if bdm else '/dev/xvda'
-pv['blockDeviceMappings'] = [{'deviceName': root_dev, 'ebs': {
-  'encrypted': True, 'kmsKey': {}, 'volumeSize': 300, 'volumeType': 'gp3'}}]
-print(json.dumps(n))
-" | KUBECONFIG="$kubeconfig" oc apply -f - 2>/dev/null && \
-      log " MachineSet $metal_name created on $cluster." || \
-      warn " MachineSet $metal_name may already exist on $cluster (apply failed � continuing)."
-  done
-}
-
-wait_for_spoke_metal_nodes() {
-  log "Waiting for c5n.metal nodes on spoke clusters and labeling workers for ODF..."
-  for entry in "ocp-primary:$PRIMARY_INSTALL_DIR" "ocp-secondary:$SECONDARY_INSTALL_DIR"; do
-    local cluster="${entry%%:*}"
-    local dir="${entry##*:}"
-    local kubeconfig="$dir/auth/kubeconfig"
-    [[ -f "$kubeconfig" ]] || continue
-
-    log " Waiting for c5n.metal node on $cluster (up to 30 min)..."
-    local tries=0
-    while [[ $tries -lt 60 ]]; do
-      local ready
-      ready=$(KUBECONFIG="$kubeconfig" oc get nodes \
-        -l node.kubernetes.io/instance-type=c5n.metal \
-        --no-headers 2>/dev/null | grep -c " Ready " || true)
-      [[ "$ready" -ge 1 ]] && { log " c5n.metal node is Ready on $cluster."; break; }
-      sleep 30
-      tries=$((tries + 1))
-    done
-    [[ $tries -ge 60 ]] && \
-      warn " Timeout waiting for c5n.metal node on $cluster � ODF may need manual intervention."
-
-    log " Labeling worker nodes for ODF storage on $cluster..."
-    while IFS= read -r node; do
-      KUBECONFIG="$kubeconfig" oc label "$node" \
-        cluster.ocs.openshift.io/openshift-storage="" --overwrite 2>/dev/null || true
-    done < <(KUBECONFIG="$kubeconfig" oc get nodes \
-      -l node-role.kubernetes.io/worker -o name 2>/dev/null)
-    log " All workers labeled for ODF on $cluster."
-  done
-}
-
 scale_hub_workers() {
   log "Scaling hub workers to 6 (required for ODF)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
@@ -945,9 +868,26 @@ run_post_pattern_steps() {
   fi
 
   wait_for_convergence
+  stabilize_windows_edge_vms
   setup_dr_validation
   show_status
   log "Post-pattern deploy steps complete!"
+}
+
+stabilize_windows_edge_vms() {
+  local script="$REPO_ROOT/scripts/stabilize-windows-vms.sh"
+  if [[ ! -x "$script" ]]; then
+    warn "Windows VM stabilization script not found: $script"
+    return 0
+  fi
+  log "Recovering paused/unhealthy Windows edge VMs (sequential restart, LiveMigrate unchanged)..."
+  if ! HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
+    PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
+    SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
+    "$script"; then
+    warn "Windows VM stabilization failed (HammerDB bootstrap may still proceed on Linux VMs)."
+    [[ "${REQUIRE_WINDOWS_VMS:-0}" == "1" ]] && return 1
+  fi
 }
 
 setup_dr_validation() {
@@ -1191,6 +1131,7 @@ case "${1:-}" in
     echo " SPOKE_RESILIENT_GITOPS_WAIT_ATTEMPTS  Wait for spoke vp-gitops parent app (default 60)"
     echo " SPOKE_RESILIENT_GITOPS_WAIT_SLEEP     Seconds between spoke GitOps polls (default 60)"
     echo " SKIP_ODF_GOLDEN_IMAGE_FIX  Set to 1 to skip post-ODF CNV golden image re-import fix"
+    echo " ODF_GOLDEN_PROTECTED_DATASOURCES  Never delete these os-images DataSources/PVCs (default: windows2k22,windows2k25)"
     echo " ODF_GOLDEN_IMAGE_WAIT_ATTEMPTS  Wait for golden image re-import per spoke (default 30)"
     echo " ODF_GOLDEN_IMAGE_WAIT_SLEEP     Seconds between golden image polls (default 60)"
     echo " SPOKE_ODF_STORAGE_WAIT_ATTEMPTS   Wait for ODF Available before golden image fix (default 30)"

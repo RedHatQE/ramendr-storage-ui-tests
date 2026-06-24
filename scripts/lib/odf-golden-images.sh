@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Post-ODF golden image fix-up for spoke clusters.
 #
-# CNV may import common boot images to the cluster default SC (gp3-csi) before ODF
-# is ready. After ODF converges, set the virt-default SC to ODF RBD and re-import
-# golden images onto ODF. redeploy.sh runs this after spoke ODF GitOps converges and
-# before wait_for_convergence (regional-dr / gitops-vms VM rollout).
+# CNV may import common boot images (RHEL, Fedora, …) to the cluster default SC
+# (gp3-csi) before ODF is ready. After ODF converges, set the virt-default SC to
+# ODF RBD and re-import CNV golden images onto ODF. Private-registry Windows
+# images (externalDataSources: windows2k22, windows2k25) are not CNV crons and
+# are never deleted by this module. redeploy.sh runs this after spoke ODF GitOps
+# converges and before wait_for_convergence (regional-dr / gitops-vms VM rollout).
 
 : "${VIRT_SC_NAME:=ocs-storagecluster-ceph-rbd-virtualization}"
 : "${OS_IMAGES_NS:=openshift-virtualization-os-images}"
 : "${ODF_GOLDEN_IMAGE_WAIT_ATTEMPTS:=30}"
 : "${ODF_GOLDEN_IMAGE_WAIT_SLEEP:=60}"
 : "${ODF_GOLDEN_IMAGE_REFERENCE_DS:=rhel9}"
+# Comma-separated DataSource/PVC names to never delete (fork externalDataSources).
+: "${ODF_GOLDEN_PROTECTED_DATASOURCES:=windows2k22,windows2k25}"
 : "${SPOKE_ODF_STORAGE_WAIT_ATTEMPTS:=30}"
 : "${SPOKE_ODF_STORAGE_WAIT_SLEEP:=30}"
 : "${GITOPS_VMS_NS:=gitops-vms}"
@@ -31,6 +35,32 @@ _ogi_warn() {
   else
     echo "[golden-images] WARNING: $*" >&2
   fi
+}
+
+_golden_image_name_protected() {
+  local name="$1" entry
+  for entry in ${ODF_GOLDEN_PROTECTED_DATASOURCES//,/ }; do
+    [[ -z "$entry" ]] && continue
+    [[ "$name" == "$entry" ]] && return 0
+  done
+  return 1
+}
+
+_cnv_datasource_names() {
+  local kubeconfig="$1"
+  KUBECONFIG="$kubeconfig" oc get datasource -n "$OS_IMAGES_NS" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.cdi\.kubevirt\.io/dataImportCron}{"\n"}{end}' 2>/dev/null \
+    | awk -F '\t' '$2 != "" { print $1 }'
+}
+
+_cnv_dataimportcron_names() {
+  local kubeconfig="$1"
+  KUBECONFIG="$kubeconfig" oc get dataimportcron -n "$OS_IMAGES_NS" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null
+}
+
+_reference_golden_ready_on_odf() {
+  datasource_ready_on_storage_class "$1" "$ODF_GOLDEN_IMAGE_REFERENCE_DS" "$VIRT_SC_NAME"
 }
 
 _ocp_minor_version() {
@@ -169,36 +199,78 @@ wait_for_golden_image_reimport() {
   return 1
 }
 
-force_golden_image_reimport() {
+force_cnv_golden_image_reimport() {
   local kubeconfig="$1" cluster="$2"
-  local pvc_name pvc_sc
+  local pvc_name pvc_sc cron_name ds_name snap_name
 
-  _ogi_log "[$cluster] Removing golden images not on $VIRT_SC_NAME so CNV can re-import..."
+  _ogi_log "[$cluster] Removing CNV golden images not on $VIRT_SC_NAME (preserving: ${ODF_GOLDEN_PROTECTED_DATASOURCES})..."
 
-  KUBECONFIG="$kubeconfig" oc delete dataimportcron --all -n "$OS_IMAGES_NS" --ignore-not-found --wait=false
-  KUBECONFIG="$kubeconfig" oc delete datasource --all -n "$OS_IMAGES_NS" --ignore-not-found --wait=false
-  KUBECONFIG="$kubeconfig" oc delete dv --all -n "$OS_IMAGES_NS" --ignore-not-found --wait=false
-  KUBECONFIG="$kubeconfig" oc delete volumesnapshot --all -n "$OS_IMAGES_NS" --ignore-not-found --wait=false
+  while read -r cron_name; do
+    [[ -n "$cron_name" ]] || continue
+    KUBECONFIG="$kubeconfig" oc delete dataimportcron "$cron_name" -n "$OS_IMAGES_NS" \
+      --ignore-not-found --wait=false &>/dev/null \
+      && _ogi_log "[$cluster] Deleted dataimportcron $cron_name."
+  done < <(_cnv_dataimportcron_names "$kubeconfig")
+
+  while read -r ds_name; do
+    [[ -n "$ds_name" ]] || continue
+    _golden_image_name_protected "$ds_name" && continue
+    KUBECONFIG="$kubeconfig" oc delete datasource "$ds_name" -n "$OS_IMAGES_NS" \
+      --ignore-not-found --wait=false &>/dev/null \
+      && _ogi_log "[$cluster] Deleted CNV datasource $ds_name."
+  done < <(_cnv_datasource_names "$kubeconfig")
+
+  while read -r cron_name; do
+    [[ -n "$cron_name" ]] || continue
+    KUBECONFIG="$kubeconfig" oc delete dv -n "$OS_IMAGES_NS" \
+      -l "cdi.kubevirt.io/dataImportCron=${cron_name}" \
+      --ignore-not-found --wait=false &>/dev/null || true
+  done < <(_cnv_dataimportcron_names "$kubeconfig")
+
+  while read -r snap_name; do
+    [[ -n "$snap_name" ]] || continue
+    _golden_image_name_protected "$snap_name" && continue
+    case "$snap_name" in
+      prime-*|*-scratch) continue ;;
+    esac
+    # CNV cron imports use hashed PVC/snapshot names; protected names are exact matches.
+    KUBECONFIG="$kubeconfig" oc delete volumesnapshot "$snap_name" -n "$OS_IMAGES_NS" \
+      --ignore-not-found --wait=false &>/dev/null || true
+  done < <(KUBECONFIG="$kubeconfig" oc get volumesnapshot -n "$OS_IMAGES_NS" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
 
   while read -r pvc_name pvc_sc; do
     [[ -n "$pvc_name" ]] || continue
+    _golden_image_name_protected "$pvc_name" && continue
+    case "$pvc_name" in
+      prime-*|*-scratch) continue ;;
+    esac
     [[ "$pvc_sc" == "$VIRT_SC_NAME" ]] && continue
-    _ogi_log "[$cluster] Deleting golden image PVC $pvc_name (storageClass=$pvc_sc)."
+    _ogi_log "[$cluster] Deleting CNV golden image PVC $pvc_name (storageClass=$pvc_sc)."
     KUBECONFIG="$kubeconfig" oc delete pvc "$pvc_name" -n "$OS_IMAGES_NS" --ignore-not-found --wait=false
   done < <(KUBECONFIG="$kubeconfig" oc get pvc -n "$OS_IMAGES_NS" \
     -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName --no-headers 2>/dev/null || true)
+}
+
+# Backward-compatible alias (tests/docs may reference the old name).
+force_golden_image_reimport() {
+  force_cnv_golden_image_reimport "$@"
 }
 
 golden_images_need_cleanup() {
   local kubeconfig="$1"
   local pvc_name pvc_sc
 
-  if datasource_ready_on_storage_class "$kubeconfig" "$ODF_GOLDEN_IMAGE_REFERENCE_DS" "$VIRT_SC_NAME"; then
+  if _reference_golden_ready_on_odf "$kubeconfig"; then
     return 1
   fi
 
   while read -r pvc_name pvc_sc; do
     [[ -n "$pvc_name" ]] || continue
+    _golden_image_name_protected "$pvc_name" && continue
+    case "$pvc_name" in
+      prime-*|*-scratch) continue ;;
+    esac
     [[ "$pvc_sc" != "$VIRT_SC_NAME" ]] && return 0
   done < <(KUBECONFIG="$kubeconfig" oc get pvc -n "$OS_IMAGES_NS" \
     -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName --no-headers 2>/dev/null || true)
@@ -247,12 +319,12 @@ fix_spoke_golden_images() {
   fi
 
   if spoke_gitops_vms_exist "$kubeconfig"; then
-    if datasource_ready_on_storage_class "$kubeconfig" "$ODF_GOLDEN_IMAGE_REFERENCE_DS" "$VIRT_SC_NAME"; then
-      _ogi_log "[$cluster] gitops-vms VMs exist and golden images are already on $VIRT_SC_NAME — skipping."
+    if _reference_golden_ready_on_odf "$kubeconfig"; then
+      _ogi_log "[$cluster] gitops-vms VMs exist and $ODF_GOLDEN_IMAGE_REFERENCE_DS is on $VIRT_SC_NAME — skipping CNV re-import."
       return 0
     fi
-    _ogi_warn "[$cluster] gitops-vms VMs already exist — too late to re-import golden images on this spoke."
-    _ogi_warn "[$cluster] Delete gitops-vms VMs first or redeploy from scratch to use ODF-backed golden images."
+    _ogi_warn "[$cluster] gitops-vms VMs already exist — too late to re-import CNV golden images on this spoke."
+    _ogi_warn "[$cluster] Delete gitops-vms VMs first or redeploy from scratch to use ODF-backed CNV golden images."
     return 1
   fi
 
@@ -269,18 +341,17 @@ for item in json.load(sys.stdin).get('items', []):
 ")"
 
   if [[ "$cluster_default_sc" == "$VIRT_SC_NAME" ]]; then
-    _ogi_log "[$cluster] Cluster default SC is already $VIRT_SC_NAME; verifying imported golden images."
+    _ogi_log "[$cluster] Cluster default SC is already $VIRT_SC_NAME; verifying CNV golden images."
   fi
 
-  if datasource_ready_on_storage_class "$kubeconfig" "$ODF_GOLDEN_IMAGE_REFERENCE_DS" "$VIRT_SC_NAME"; then
-    _ogi_log "[$cluster] Golden images already on $VIRT_SC_NAME — skipping cleanup."
+  if _reference_golden_ready_on_odf "$kubeconfig"; then
+    _ogi_log "[$cluster] $ODF_GOLDEN_IMAGE_REFERENCE_DS already on $VIRT_SC_NAME — skipping CNV re-import."
     return 0
   fi
 
   run_odf_fix_dataimportcrons_playbook "$kubeconfig" "$cluster" || true
-  if golden_images_need_cleanup "$kubeconfig" || \
-    ! datasource_ready_on_storage_class "$kubeconfig" "$ODF_GOLDEN_IMAGE_REFERENCE_DS" "$VIRT_SC_NAME"; then
-    force_golden_image_reimport "$kubeconfig" "$cluster"
+  if golden_images_need_cleanup "$kubeconfig" || ! _reference_golden_ready_on_odf "$kubeconfig"; then
+    force_cnv_golden_image_reimport "$kubeconfig" "$cluster"
   fi
   wait_for_golden_image_reimport "$kubeconfig" "$cluster" || return 1
 }
@@ -300,7 +371,7 @@ fix_spoke_golden_images_on_all_spokes() {
   fi
 
   local failed=0
-  _ogi_log "Preparing spoke golden images on ODF before regional-dr deploys gitops-vms..."
+  _ogi_log "Preparing CNV golden images (RHEL reference: $ODF_GOLDEN_IMAGE_REFERENCE_DS) on ODF before regional-dr deploys gitops-vms..."
   for entry in "ocp-primary:${PRIMARY_INSTALL_DIR}" "ocp-secondary:${SECONDARY_INSTALL_DIR}"; do
     local cluster="${entry%%:*}"
     local install_dir="${entry##*:}"

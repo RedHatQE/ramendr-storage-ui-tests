@@ -32,6 +32,7 @@ import pytest
 
 from config.settings import (
     BASE_URL,
+    EXPECTED_EDGE_VM_COUNT,
     HUB_KUBECONFIG,
     HUB_PASSWORD,
     HUB_USERNAME,
@@ -64,8 +65,8 @@ _CLEANUP_TIMEOUT_SECONDS = float(
         os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600"),
     )
 )
-# How many edge VMs the test expects (must all be SSHable for RTO to be satisfied).
-_EXPECTED_VMS = int(os.getenv("RAMENDR_EXPECTED_VMS", "4"))
+# How many edge VMs the test expects (2 Linux + 2 Windows; SSH on port 22).
+_EXPECTED_VMS = int(os.getenv("RAMENDR_EXPECTED_VMS", str(EXPECTED_EDGE_VM_COUNT)))
 # Hard timeout for the SSH-reachability polling that ends the RTO clock (default 30 min).
 _SSH_RTO_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_SSH_RTO_TIMEOUT_SECONDS", "1800"))
 # Image used for the ephemeral in-cluster SSH-probe pod.  busybox ships nc and is tiny.
