@@ -77,6 +77,10 @@ ensure_virt_default_storage_class() {
   fi
 
   _ogi_log "[$cluster] Setting virt default storage class to $VIRT_SC_NAME (was: ${current:-unset})."
+  if [[ -n "$current" && "$current" != "$VIRT_SC_NAME" ]]; then
+    KUBECONFIG="$kubeconfig" oc annotate sc "$current" \
+      storageclass.kubevirt.io/is-default-virt-class- --overwrite 2>/dev/null || true
+  fi
   KUBECONFIG="$kubeconfig" oc annotate sc "$VIRT_SC_NAME" \
     storageclass.kubevirt.io/is-default-virt-class=true --overwrite
 }
@@ -265,8 +269,7 @@ for item in json.load(sys.stdin).get('items', []):
 ")"
 
   if [[ "$cluster_default_sc" == "$VIRT_SC_NAME" ]]; then
-    _ogi_log "[$cluster] Cluster default SC is already $VIRT_SC_NAME — no golden image cleanup needed."
-    return 0
+    _ogi_log "[$cluster] Cluster default SC is already $VIRT_SC_NAME; verifying imported golden images."
   fi
 
   if datasource_ready_on_storage_class "$kubeconfig" "$ODF_GOLDEN_IMAGE_REFERENCE_DS" "$VIRT_SC_NAME"; then

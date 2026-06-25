@@ -37,14 +37,18 @@
     - name: Find default storageclass
       ansible.builtin.shell: |
         set -o pipefail
-        oc get storageclass -o json | jq -r '.items[] | select(.metadata.annotations."storageclass.kubernetes.io/is-default-class")'
+        oc get storageclass -o json | jq -r '.items[] | select(.metadata.annotations."storageclass.kubernetes.io/is-default-class" == "true")'
+      args:
+        executable: /bin/bash
       register: default_sc_output
       changed_when: false
 
     - name: Find virtualization default storageclass
       ansible.builtin.shell: |
         set -o pipefail
-        oc get storageclass -o json | jq -r '.items[] | select(.metadata.annotations."storageclass.kubevirt.io/is-default-virt-class")'
+        oc get storageclass -o json | jq -r '.items[] | select(.metadata.annotations."storageclass.kubevirt.io/is-default-virt-class" == "true")'
+      args:
+        executable: /bin/bash
       register: default_virt_sc_output
       changed_when: false
 
@@ -109,7 +113,13 @@
           when:
             - item['metadata']['labels']['cdi.kubevirt.io/dataImportCron'] is defined
             - item['metadata']['labels']['cdi.kubevirt.io/dataImportCron'] in dic_names
-            - item.status.conditions[0].message != "DataSource is ready to be consumed"
+            - >-
+              (
+                item.status.conditions | default([])
+                | selectattr('type', 'equalto', 'Ready')
+                | selectattr('message', 'equalto', 'DataSource is ready to be consumed')
+                | list
+              ) | length == 0
 
         - name: Check on removables
           ansible.builtin.debug:

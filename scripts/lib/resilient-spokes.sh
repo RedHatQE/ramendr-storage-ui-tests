@@ -11,6 +11,7 @@
 : "${SPOKE_CLUSTERS:=ocp-primary ocp-secondary}"
 : "${SPOKE_GITOPS_NS:=vp-gitops}"
 : "${RESILIENT_PARENT_APP:=ramendr-starter-kit-resilient}"
+: "${RESILIENT_APP_RECOVERY_AFTER_SECONDS:=900}"
 : "${PRIMARY_INSTALL_DIR:=$HOME/git/ocp-primary-install}"
 : "${SECONDARY_INSTALL_DIR:=$HOME/git/ocp-secondary-install}"
 
@@ -32,19 +33,19 @@ _rs_warn() {
 
 managedcluster_api_available() {
   oc api-resources --api-group=cluster.open-cluster-management.io 2>/dev/null \
-    | awk '$2 == "ManagedCluster" { found=1 } END { exit !found }'
+    | awk '$NF == "ManagedCluster" { found=1 } END { exit !found }'
 }
 
 placement_api_available() {
   oc api-resources --api-group=cluster.open-cluster-management.io 2>/dev/null \
-    | awk '$2 == "Placement" { found=1 } END { exit !found }'
+    | awk '$NF == "Placement" { found=1 } END { exit !found }'
 }
 
 ensure_spoke_managed_cluster_labels() {
   local cluster="$1"
   managedcluster_api_available || return 0
   oc label managedcluster "$cluster" \
-    "clusterGroup=${SPOKE_CLUSTER_GROUP_LABEL}" --overwrite &>/dev/null
+    "clusterGroup=${SPOKE_CLUSTER_GROUP_LABEL}" --overwrite &>/dev/null || return 1
 }
 
 register_spoke_managed_cluster() {
@@ -54,7 +55,10 @@ register_spoke_managed_cluster() {
   fi
 
   if oc get managedcluster "$cluster" &>/dev/null; then
-    ensure_spoke_managed_cluster_labels "$cluster"
+    if ! ensure_spoke_managed_cluster_labels "$cluster"; then
+      _rs_warn "[placement] Failed to label existing ManagedCluster ${cluster}."
+      return 1
+    fi
     return 0
   fi
 
@@ -129,8 +133,14 @@ refresh_resilient_placements() {
       deleted=$((deleted + 1))
     fi
   done < <(
-    oc get placementdecision -n "$ACM_PLACEMENT_NAMESPACE" -o name 2>/dev/null \
-      | grep -E '/(resilient|hub-argo-ca-resilient)' || true
+    {
+      oc get placementdecision -n "$ACM_PLACEMENT_NAMESPACE" \
+        -l "cluster.open-cluster-management.io/placement=${RESILIENT_PLACEMENT_NAME}" \
+        -o name 2>/dev/null
+      oc get placementdecision -n "$ACM_PLACEMENT_NAMESPACE" \
+        -l "cluster.open-cluster-management.io/placement=hub-argo-ca-resilient" \
+        -o name 2>/dev/null
+    } | sort -u
   )
   if [[ "$deleted" -gt 0 ]]; then
     _rs_log "[placement] Deleted ${deleted} stale PlacementDecision(s); ACM will reschedule."
@@ -224,7 +234,7 @@ spoke_resilient_app_exists() {
 
 spoke_resilient_app_needs_recovery() {
   local cluster="$1"
-  local kc sync health op_phase op_msg invalid
+  local kc sync health op_phase op_msg invalid op_started started_s now_s
 
   kc=$(_spoke_kubeconfig "$cluster") || return 1
   [[ -f "$kc" ]] || return 1
@@ -250,6 +260,8 @@ spoke_resilient_app_needs_recovery() {
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.operationState.message}' 2>/dev/null || true)
   op_phase=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+  op_started=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
+    -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.operationState.startedAt}' 2>/dev/null || true)
 
   if [[ -n "$invalid" ]] \
     || [[ "$op_msg" == *InvalidSpecError* ]] \
@@ -257,7 +269,11 @@ spoke_resilient_app_needs_recovery() {
     return 0
   fi
   if [[ "$op_phase" == "Running" && "$sync" != "Synced" ]]; then
-    return 0
+    started_s=$(date -d "$op_started" +%s 2>/dev/null || echo 0)
+    now_s=$(date +%s)
+    if [[ "$started_s" -gt 0 && $((now_s - started_s)) -ge "$RESILIENT_APP_RECOVERY_AFTER_SECONDS" ]]; then
+      return 0
+    fi
   fi
   return 1
 }

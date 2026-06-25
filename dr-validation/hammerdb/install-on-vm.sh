@@ -213,6 +213,7 @@ install_postgresql() {
 PGDATA=${PGDATA}
 PG_CTL=${PG_CTL}
 PG_LIB_DIR=${PG_LIB_DIR}
+DR_VALIDATION_PG_LIB_DIR=${PG_LIB_DIR}
 EOF
   sudo chmod 0640 "$PG_ENV_FILE"
 
