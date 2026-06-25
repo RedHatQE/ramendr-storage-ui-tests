@@ -37,7 +37,7 @@
     - name: Find default storageclass
       ansible.builtin.shell: |
         set -o pipefail
-        oc get storageclass -o json | jq -r '.items[] | select(.metadata.annotations."storageclass.kubernetes.io/is-default-class" == "true")'
+        oc get storageclass -o json | jq -c '[.items[] | select(.metadata.annotations."storageclass.kubernetes.io/is-default-class" == "true")]'
       args:
         executable: /bin/bash
       register: default_sc_output
@@ -46,7 +46,7 @@
     - name: Find virtualization default storageclass
       ansible.builtin.shell: |
         set -o pipefail
-        oc get storageclass -o json | jq -r '.items[] | select(.metadata.annotations."storageclass.kubevirt.io/is-default-virt-class" == "true")'
+        oc get storageclass -o json | jq -c '[.items[] | select(.metadata.annotations."storageclass.kubevirt.io/is-default-virt-class" == "true")]'
       args:
         executable: /bin/bash
       register: default_virt_sc_output
@@ -54,10 +54,25 @@
 
     - name: Compare default virtualization storageclass and default storageclass to determine whether to clean PVCs
       block:
-        - name: Parse results
+        - name: Parse storageclass lists
           ansible.builtin.set_fact:
-            default_sc: '{{ default_sc_output.stdout | from_json }}'
-            default_virt_sc: '{{ default_virt_sc_output.stdout | from_json }}'
+            default_sc_list: '{{ default_sc_output.stdout | from_json }}'
+            default_virt_sc_list: '{{ default_virt_sc_output.stdout | from_json }}'
+
+        - name: Require exactly one cluster default and one virt-default storageclass
+          ansible.builtin.assert:
+            that:
+              - default_sc_list | length == 1
+              - default_virt_sc_list | length == 1
+            fail_msg: >-
+              Expected exactly one cluster default and one virt-default storage class;
+              found {{ default_sc_list | length }} cluster default(s) and
+              {{ default_virt_sc_list | length }} virt default(s).
+
+        - name: Parse single storageclass objects
+          ansible.builtin.set_fact:
+            default_sc: '{{ default_sc_list[0] }}'
+            default_virt_sc: '{{ default_virt_sc_list[0] }}'
 
         - name: Commit to dataimportcron cleanup
           ansible.builtin.set_fact:
