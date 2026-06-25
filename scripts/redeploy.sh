@@ -12,8 +12,13 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# shellcheck source=scripts/lib/resilient-spokes.sh
+source "$REPO_ROOT/scripts/lib/resilient-spokes.sh"
+# shellcheck source=scripts/lib/odf-golden-images.sh
+source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
+
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-ed0e7420182338a4c9364922c3dc4b779eb91454}"
+UPSTREAM_REF="${UPSTREAM_REF:-04b9d2f29d2d3844294ec957bd679bd2ba7452ac}"  # ocp-4.22
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
@@ -589,80 +594,6 @@ wait_for_spoke_metal_nodes() {
   done
 }
 
-prepull_odf_images() {
-  # Pre-pull the large ODF CSI image (~1.4 GB) on all hub workers before ArgoCD
-  # deploys ODF DaemonSets. Concurrent pulls from registry.redhat.io across 6 nodes
-  # frequently stall TCP connections on 1-2 nodes, blocking Nooba initialization
-  # for hours (AWS NAT gateway 350s idle TCP timeout kills long-running downloads).
-  # The image is pulled into each node's local cache here so the ODF DaemonSet
-  # finds it already present (imagePullPolicy: IfNotPresent skips the pull).
-  log "Pre-pulling ODF CSI image on all hub workers (prevents concurrent-pull stalls)..."
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-
-  local image="registry.redhat.io/odf4/cephcsi-rhel9:latest"
-  local ns="odf-prepull"
-
-  # Use a temporary namespace so this works before openshift-storage exists.
-  oc create namespace "$ns" 2>/dev/null || true
-
-  oc apply -n "$ns" -f - <<EOF
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: odf-image-prepull
-  namespace: ${ns}
-  labels:
-    app: odf-image-prepull
-spec:
-  selector:
-    matchLabels:
-      app: odf-image-prepull
-  template:
-    metadata:
-      labels:
-        app: odf-image-prepull
-    spec:
-      nodeSelector:
-        node-role.kubernetes.io/worker: ""
-      tolerations:
-        - operator: Exists
-      initContainers:
-        - name: pull
-          image: ${image}
-          command: ["/bin/true"]
-          imagePullPolicy: IfNotPresent
-      containers:
-        - name: done
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
-          command: ["sleep", "infinity"]
-          imagePullPolicy: IfNotPresent
-      terminationGracePeriodSeconds: 5
-EOF
-
-  log "Waiting up to 20 min for ODF image pre-pull to complete on all nodes..."
-  local tries=0
-  while [[ $tries -lt 40 ]]; do
-    local desired ready
-    desired=$(oc get daemonset odf-image-prepull -n "$ns" \
-      -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo 0)
-    ready=$(oc get daemonset odf-image-prepull -n "$ns" \
-      -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)
-    if [[ "$desired" -gt 0 && "$ready" -ge "$desired" ]]; then
-      log "ODF image pre-pull complete on all $ready nodes."
-      break
-    fi
-    # Restart pods stuck in ContainerCreating for >5 min (stalled pull).
-    oc get pods -n "$ns" -l app=odf-image-prepull --no-headers 2>/dev/null \
-      | awk '$4~/^([5-9]|[1-9][0-9]+)m/ && $3=="ContainerCreating" {print $1}' \
-      | xargs -r oc delete pod -n "$ns" 2>/dev/null || true
-    log "  $ready/$desired nodes ready (attempt $((tries+1))/40)..."
-    sleep 30
-    tries=$((tries + 1))
-  done
-
-  oc delete namespace "$ns" --wait=false 2>/dev/null || true
-}
-
 scale_hub_workers() {
   log "Scaling hub workers to 6 (required for ODF)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
@@ -688,16 +619,6 @@ scale_hub_workers() {
   for node in $(oc get nodes -l node-role.kubernetes.io/worker -o name 2>/dev/null); do
     oc label "$node" cluster.ocs.openshift.io/openshift-storage="" --overwrite 2>/dev/null
   done
-
-  # Pre-pull the large ODF CSI image on every hub node before ArgoCD deploys the
-  # ODF DaemonSets. Without this, all 6 nodes pull the ~1.4 GB cephcsi image
-  # simultaneously; nodes that get slow/stalled TCP connections to registry.redhat.io
-  # can hang for hours, blocking Nooba and downstream apps (opp-policy, regional-dr).
-  if [[ "${SKIP_ODF_PREPULL:-0}" != "1" ]]; then
-    prepull_odf_images
-  else
-    log "SKIP_ODF_PREPULL=1 — skipping hub ODF image pre-pull."
-  fi
 }
 
 finalize_byoc_cluster_deployments() {
@@ -852,18 +773,7 @@ import_spoke_clusters() {
 
 _ensure_managedcluster_registered() {
   local cluster="$1"
-  if oc get managedcluster "$cluster" &>/dev/null; then
-    return 0
-  fi
-  oc apply -f - <<EOF
-apiVersion: cluster.open-cluster-management.io/v1
-kind: ManagedCluster
-metadata:
-  name: ${cluster}
-spec:
-  hubAcceptsClient: true
-EOF
-  log "[import] Registered ManagedCluster ${cluster} for BYOC import."
+  register_spoke_managed_cluster "$cluster"
 }
 
 _push_install_kubeconfig_to_namespace() {
@@ -937,71 +847,20 @@ deploy_pattern() {
   log "Deploying RamenDR pattern (upstream pinned, local overrides applied)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
-  # Store spoke kubeconfigs while the pattern install runs, to avoid ExternalSecrets caching failures.
+  # Vault and spoke import must run while pattern.sh is installing operators.
   store_spoke_kubeconfigs_in_vault &
   local store_pid=$!
-
-  # Create auto-import-secret for each spoke concurrently with pattern.sh.
-  # It waits for ArgoCD to create the spoke namespaces on the hub, then creates
-  # the secret so ACM can import the klusterlet without relying on Hive.
   import_spoke_clusters &
   local import_pid=$!
 
   log "Running upstream pattern install (this takes time for operators to settle)..."
-
-  # Run pattern.sh in the background so a parallel watcher can cut it short when only
-  # known-stable drift remains, instead of waiting the full 60-minute convergence loop.
-  ( cd "$UPSTREAM_DIR" && VALUES_SECRET="$VALUES_SECRET" TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" ./pattern.sh make install 2>&1 ) &
-  local pattern_pid=$!
-
-  # Background watcher: once ALL apps except the two known-drift apps
-  # (regional-dr and ramendr-starter-kit-hub) are Synced/Healthy, and those
-  # two are Healthy for 3 consecutive 30-second checks, terminate pattern.sh early.
-  _stable_drift_exit() {
-    local pid=$1
-    local consecutive=0
-    while kill -0 "$pid" 2>/dev/null; do
-      sleep 30
-      [[ -n "${KUBECONFIG:-}" ]] || return
-      local rdr_health hub_health other_bad
-      rdr_health=$(oc get application.argoproj.io regional-dr \
-        -n ramendr-starter-kit-hub \
-        -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-      hub_health="$(hub_pattern_app_health)"
-      # Count apps that are neither Synced/Healthy nor one of the two known-drift apps.
-      other_bad=$(oc get application.argoproj.io -A \
-        -o jsonpath='{range .items[*]}{.metadata.name}|{.status.sync.status}|{.status.health.status}{"\n"}{end}' \
-        2>/dev/null \
-        | grep -v "^regional-dr|" \
-        | grep -v "^ramendr-starter-kit-hub|" \
-        | grep -cv "Synced|Healthy" || true)
-      if [[ "$rdr_health" == "Healthy" ]] && [[ "$hub_health" == "Healthy" ]] \
-          && [[ "${other_bad:-1}" == "0" ]]; then
-        consecutive=$((consecutive + 1))
-        log "[early-exit] Stable drift detected (attempt $consecutive/3): only regional-dr + hub are OutOfSync/Healthy."
-        if [[ $consecutive -ge 3 ]]; then
-          log "[early-exit] Cutting pattern.sh short — all other apps converged, known drift remains."
-          kill "$pid" 2>/dev/null || true
-          return
-        fi
-      else
-        consecutive=0
-      fi
-    done
-  }
-  _stable_drift_exit "$pattern_pid" &
-  local drift_exit_pid=$!
-
   local pattern_exit=0
-  wait "$pattern_pid" || pattern_exit=$?
-  kill "$drift_exit_pid" 2>/dev/null || true
-  wait "$drift_exit_pid" 2>/dev/null || true
+  ( cd "$UPSTREAM_DIR" && VALUES_SECRET="$VALUES_SECRET" TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" ./pattern.sh make install 2>&1 ) \
+    || pattern_exit=$?
 
   if [[ $pattern_exit -ne 0 ]]; then
-    # pattern.sh often times out (or is killed by our early-exit watcher) because
-    # regional-dr and/or ramendr-starter-kit-hub are OutOfSync/Healthy — expected
-    # drift that the fix-up functions below correct. Continue if both are Healthy;
-    # only hard-exit for genuine install failures (no hub app, operators missing).
+    # pattern.sh often times out because regional-dr and/or ramendr-starter-kit-hub
+    # are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
     warn "pattern.sh make install returned non-zero — checking whether this is recoverable drift..."
     local hub_health rdr_health
     hub_health="$(hub_pattern_app_health)"
@@ -1022,14 +881,12 @@ deploy_pattern() {
     warn "store_spoke_kubeconfigs_in_vault background job failed -- retrying synchronously..."
     store_spoke_kubeconfigs_in_vault || true
   fi
-
-  kill "$import_pid" 2>/dev/null || true
   wait "$import_pid" 2>/dev/null || true
 
-  # Always run the safety-net check synchronously after pattern.sh returns.
-  # This catches any spoke that was skipped because the namespace appeared after
-  # the background job's per-cluster timeout.
+  # BYOC spokes import + resilient-placement refresh (fixes stale empty PlacementDecision).
   ensure_spoke_imports
+  ensure_resilient_spoke_gitops || warn "[placement] resilient-placement did not converge; spoke ODF may be delayed."
+  recover_all_spoke_resilient_apps || true
   finalize_byoc_cluster_deployments
 
   log "Force-refreshing kubeconfig ExternalSecrets..."
@@ -1066,6 +923,10 @@ wait_for_convergence() {
         oc patch applications.argoproj.io "$app" -n ramendr-starter-kit-hub --type merge \
           -p '{"operation":{"initiatedBy":{"automated":true},"sync":{}}}' 2>/dev/null || true
       done
+      if ! resilient_placement_satisfied 2; then
+        refresh_resilient_placements
+      fi
+      recover_all_spoke_resilient_apps || true
     fi
   done
 
@@ -1075,6 +936,14 @@ wait_for_convergence() {
 }
 
 run_post_pattern_steps() {
+  if ! wait_for_spoke_resilient_gitops; then
+    warn "Spoke resilient GitOps did not converge — spoke ODF may be missing; skipping golden image fix and DR validation."
+    export SKIP_DR_VALIDATION=1
+  else
+    fix_spoke_golden_images_on_all_spokes || \
+      warn "Golden image fix-up did not fully succeed — VM root disks may use slow EBS→ODF clones."
+  fi
+
   wait_for_convergence
   setup_dr_validation
   show_status
@@ -1084,6 +953,12 @@ run_post_pattern_steps() {
 setup_dr_validation() {
   if [[ "${SKIP_DR_VALIDATION:-0}" == "1" ]]; then
     log "SKIP_DR_VALIDATION=1 — skipping DR validation bootstrap and snapshots."
+    return 0
+  fi
+
+  if ! spoke_resilient_gitops_all_ready; then
+    warn "Spoke ODF prerequisites not met (${RESILIENT_PARENT_APP} not Synced or openshift-storage missing)."
+    warn "Skipping DR validation — re-run with --dr-bootstrap-only after spoke GitOps converges."
     return 0
   fi
 
@@ -1313,6 +1188,13 @@ case "${1:-}" in
     echo " SKIP_DR_VALIDATION_SNAPSHOTS  Set to 1 to skip only the 5-min snapshot daemon"
     echo " DR_VALIDATION_BOOTSTRAP_RETRIES  Automatic bootstrap retries during redeploy (default 6)"
     echo " DR_VALIDATION_BOOTSTRAP_RETRY_SLEEP Seconds between bootstrap retries (default 120)"
+    echo " SPOKE_RESILIENT_GITOPS_WAIT_ATTEMPTS  Wait for spoke vp-gitops parent app (default 60)"
+    echo " SPOKE_RESILIENT_GITOPS_WAIT_SLEEP     Seconds between spoke GitOps polls (default 60)"
+    echo " SKIP_ODF_GOLDEN_IMAGE_FIX  Set to 1 to skip post-ODF CNV golden image re-import fix"
+    echo " ODF_GOLDEN_IMAGE_WAIT_ATTEMPTS  Wait for golden image re-import per spoke (default 30)"
+    echo " ODF_GOLDEN_IMAGE_WAIT_SLEEP     Seconds between golden image polls (default 60)"
+    echo " SPOKE_ODF_STORAGE_WAIT_ATTEMPTS   Wait for ODF Available before golden image fix (default 30)"
+    echo " SPOKE_ODF_STORAGE_WAIT_SLEEP      Seconds between ODF Available polls (default 30)"
     echo " SSH_USER / SSH_IDENTITY_FILE  SSH access to edge VMs (default: cloud-user, ~/.ssh/id_rsa)"
     ;;
   *)

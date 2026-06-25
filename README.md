@@ -2,7 +2,7 @@
 
 This repository is a **test harness** for the RamenDR validated pattern.
 It deploys from a maintained fork of the upstream starter kit —
-[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `v1.1`) —
+[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22`) —
 which carries all environment-specific customizations (additional VM disks, BYOC cluster names,
 ODF channel pins, cost-optimized instance profiles) committed directly so that ArgoCD picks them
 up automatically on every sync.
@@ -17,10 +17,10 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at a pinned commit SHA (defaulting to the tip of `v1.1`) into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at a pinned commit SHA (defaulting to the tip of `ocp-4.22`) into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
-4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`. ArgoCD reads values files directly from the fork's `v1.1` branch on GitHub.
+4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`. ArgoCD reads values files directly from the fork's `ocp-4.22` branch on GitHub.
 
 > **Why a fork?** ArgoCD fetches all values files directly from the remote GitHub repository at the pinned ref — local copies placed next to the checkout are invisible to it. Committing customizations into the fork's branch is the only way to have ArgoCD reconcile them automatically.
 
