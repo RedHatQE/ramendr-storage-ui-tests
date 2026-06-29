@@ -5,7 +5,7 @@
 This repository (`ramendr-storage-ui-tests`) provides:
 
 - A reproducible way to deploy the fork of the upstream validated pattern
-  `elsapassaro/ramendr-starter-kit` (branch `v1.1`)
+  `elsapassaro/ramendr-starter-kit` (branch `ocp-4.22`, pinned locally by commit SHA)
 - A home for UI tests (Playwright + Python) to validate RamenDR workflows
 
 ## Non-goals
@@ -17,8 +17,19 @@ This repository (`ramendr-storage-ui-tests`) provides:
 
 The entrypoint is `scripts/redeploy.sh`.
 
-- It clones the fork (`elsapassaro/ramendr-starter-kit`, branch `v1.1`) into `.work/upstream/ramendr-starter-kit`.
-- All customizations (additionalDisks, chartVersion, byoc cluster names, ODF channel pins, cost-optimized values) live directly in the fork's `v1.1` branch. ArgoCD tracks the fork and picks them up automatically.
+**Upstream pinning (two references):**
+
+- **Local checkout** (`pattern.sh`, utility container): cloned into
+  `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`
+  (default `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` on branch `ocp-4.22`).
+  Override with `UPSTREAM_REPO` / `UPSTREAM_REF`.
+- **Hub Argo CD** (ongoing GitOps sync): reads values from the fork on GitHub at
+  branch `ocp-4.22` (branch tip unless Applications pin a specific revision).
+
+Customizations (additionalDisks, chartVersion, byoc cluster names, ODF channel pins,
+cost-optimized values) live in the fork's `ocp-4.22` branch under `overrides/` and
+values files. Local edits next to the checkout do not affect Argo CD.
+
 - It runs the deployment via upstream `pattern.sh` (utility-container).
 
 All sensitive inputs must be provided externally:

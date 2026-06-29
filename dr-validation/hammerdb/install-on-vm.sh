@@ -23,6 +23,7 @@ PG_HOME="${PERCONA_PG_ROOT}/percona-postgresql16"
 PG_BIN_DIR=""
 PG_CTL=""
 PSQL=""
+PG_LIB_DIR=""
 
 pg_quote_ident() {
   local s="${1//\"/\"\"}"
@@ -86,6 +87,7 @@ install_postgresql_from_packages() {
   fi
   PG_CTL="${PG_BIN_DIR}/pg_ctl"
   PSQL="${PG_BIN_DIR}/psql"
+  PG_LIB_DIR=""
 }
 
 install_postgresql_from_percona() {
@@ -103,13 +105,61 @@ install_postgresql_from_percona() {
   PG_BIN_DIR="${PG_HOME}/bin"
   PG_CTL="${PG_BIN_DIR}/pg_ctl"
   PSQL="${PG_BIN_DIR}/psql"
+  PG_LIB_DIR="${PG_HOME}/lib"
+}
+
+postgres_lib_path_env() {
+  if [[ -n "$PG_LIB_DIR" && -d "$PG_LIB_DIR" ]]; then
+    printf 'LD_LIBRARY_PATH=%s' "$PG_LIB_DIR"
+  fi
+}
+
+wait_for_postgresql_ready() {
+  local pg_isready="${PG_BIN_DIR}/pg_isready"
+  local lib_env
+  lib_env="$(postgres_lib_path_env)"
+  local tries=0
+  local max="${DR_VALIDATION_PG_READY_WAIT_ATTEMPTS:-60}"
+
+  echo "Waiting for PostgreSQL to accept connections (up to $((max * 2))s)..."
+  while [[ $tries -lt $max ]]; do
+    if [[ -x "$pg_isready" ]]; then
+      if [[ -n "$lib_env" ]]; then
+        sudo -u postgres env "$lib_env" "$pg_isready" -h localhost -p 5432 -q 2>/dev/null && return 0
+      else
+        sudo -u postgres "$pg_isready" -h localhost -p 5432 -q 2>/dev/null && return 0
+      fi
+    fi
+    if [[ -n "$lib_env" ]]; then
+      sudo -u postgres env "$lib_env" "$PSQL" -h localhost -p 5432 -d postgres -Atqc 'SELECT 1' \
+        &>/dev/null && return 0
+    else
+      sudo -u postgres "$PSQL" -h localhost -p 5432 -d postgres -Atqc 'SELECT 1' \
+        &>/dev/null && return 0
+    fi
+    tries=$((tries + 1))
+    sleep 2
+  done
+  return 1
+}
+
+log_postgresql_start_failure() {
+  echo "ERROR: PostgreSQL did not become ready after starting ramendr-postgresql.service"
+  sudo systemctl status ramendr-postgresql.service --no-pager -l 2>/dev/null || true
+  sudo journalctl -u ramendr-postgresql.service --no-pager -n 40 2>/dev/null || true
 }
 
 stop_existing_postgresql() {
   sudo systemctl stop ramendr-postgresql.service 2>/dev/null || true
   sudo systemctl reset-failed ramendr-postgresql.service 2>/dev/null || true
   if [[ -n "$PG_CTL" && -d "$PGDATA" ]]; then
-    sudo -u postgres "$PG_CTL" -D "$PGDATA" stop -m fast 2>/dev/null || true
+    local lib_env
+    lib_env="$(postgres_lib_path_env)"
+    if [[ -n "$lib_env" ]]; then
+      sudo -u postgres env "$lib_env" "$PG_CTL" -D "$PGDATA" stop -m fast 2>/dev/null || true
+    else
+      sudo -u postgres "$PG_CTL" -D "$PGDATA" stop -m fast 2>/dev/null || true
+    fi
   fi
   for _ in $(seq 1 20); do
     if ! sudo ss -ltn 2>/dev/null | grep -q ':5432 '; then
@@ -162,8 +212,15 @@ install_postgresql() {
   sudo tee "$PG_ENV_FILE" >/dev/null <<EOF
 PGDATA=${PGDATA}
 PG_CTL=${PG_CTL}
+PG_LIB_DIR=${PG_LIB_DIR}
+DR_VALIDATION_PG_LIB_DIR=${PG_LIB_DIR}
 EOF
   sudo chmod 0640 "$PG_ENV_FILE"
+
+  local pg_service_env=""
+  if [[ -n "$PG_LIB_DIR" && -d "$PG_LIB_DIR" ]]; then
+    pg_service_env="Environment=LD_LIBRARY_PATH=${PG_LIB_DIR}"
+  fi
 
   sudo tee /etc/systemd/system/ramendr-postgresql.service >/dev/null <<EOF
 [Unit]
@@ -174,6 +231,7 @@ After=network.target
 Type=simple
 User=postgres
 Group=postgres
+${pg_service_env}
 ExecStart=${PG_BIN_DIR}/postgres -D ${PGDATA}
 ExecStop=${PG_CTL} -D ${PGDATA} stop -m fast
 Restart=on-failure
@@ -187,7 +245,14 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable ramendr-postgresql.service
   stop_existing_postgresql
-  sudo systemctl start ramendr-postgresql.service
+  if ! sudo systemctl start ramendr-postgresql.service; then
+    log_postgresql_start_failure
+    exit 1
+  fi
+  if ! wait_for_postgresql_ready; then
+    log_postgresql_start_failure
+    exit 1
+  fi
 }
 
 install_postgresql

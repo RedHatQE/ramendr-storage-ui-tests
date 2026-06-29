@@ -2,10 +2,11 @@
 
 This repository is a **test harness** for the RamenDR validated pattern.
 It deploys from a maintained fork of the upstream starter kit —
-[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `v1.1`) —
+[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22`) —
 which carries all environment-specific customizations (additional VM disks, BYOC cluster names,
-ODF channel pins, cost-optimized instance profiles) committed directly so that ArgoCD picks them
-up automatically on every sync.
+ODF channel pins, cost-optimized instance profiles). **`redeploy.sh` pins a fixed commit SHA**
+for the local pattern install; **hub Argo CD** reconciles from the fork's `ocp-4.22` branch on GitHub
+(see [Upstream pinning](#upstream-pinning) below).
 
 It contains:
 
@@ -17,12 +18,25 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at a pinned commit SHA (defaulting to the tip of `v1.1`) into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` from the `ocp-4.22` branch into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
-4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`. ArgoCD reads values files directly from the fork's `v1.1` branch on GitHub.
+4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`.
 
-> **Why a fork?** ArgoCD fetches all values files directly from the remote GitHub repository at the pinned ref — local copies placed next to the checkout are invisible to it. Committing customizations into the fork's branch is the only way to have ArgoCD reconcile them automatically.
+> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `ocp-4.22`) — local copies placed next to the checkout are invisible to it. Committing customizations into the fork's branch is the only way to have Argo CD reconcile them automatically.
+
+### Upstream pinning
+
+Two different upstream references are in play:
+
+| Consumer | Source | Default |
+|----------|--------|---------|
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` (on branch `ocp-4.22`) |
+| Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22` (tip unless an Application pins `targetRevision`) |
+
+To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
+`redeploy.sh`. For Argo CD to match that commit, push it to the tracked branch or pin
+`targetRevision` on the hub Applications.
 
 ## Prerequisites
 
@@ -62,7 +76,7 @@ Do not commit secrets to this repository.
 
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
-- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/v1.1/values-secret.yaml.template)
+- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/ocp-4.22/values-secret.yaml.template)
 - For regional-dr cluster private-key ExternalSecrets, ensure `~/values-secret.yaml` includes hub `privatekey` paths (compare with your team's file via private DM), for example:
 
 ```yaml
@@ -77,7 +91,7 @@ Do not commit secrets to this repository.
 ## Customizing the deployment
 
 All environment-specific values (additional VM disks, BYOC cluster names, ODF channel pins,
-cost-optimized instance profiles) live in the fork's `v1.1` branch under `overrides/` and
+cost-optimized instance profiles) live in the fork's `ocp-4.22` branch under `overrides/` and
 `values-hub.yaml`. To adapt the deployment for a different AWS account or region:
 
 1. Fork `elsapassaro/ramendr-starter-kit` (or push a new branch on the existing fork).
