@@ -232,14 +232,16 @@ class TestInfraSmoke:
         )
         failures: list[str] = []
         min_gib = 40
+        windows_vms = [
+            vm
+            for vm in json.loads(raw)["items"]
+            if vm["metadata"]["name"].startswith("windows2k22-server-")
+            or vm["metadata"]["name"].startswith("windows2k25-server-")
+        ]
+        assert windows_vms, "No Windows VMs found in gitops-vms on ocp-primary"
 
-        for vm in json.loads(raw)["items"]:
+        for vm in windows_vms:
             name = vm["metadata"]["name"]
-            if not (
-                name.startswith("windows2k22-server-")
-                or name.startswith("windows2k25-server-")
-            ):
-                continue
 
             dvts = vm.get("spec", {}).get("dataVolumeTemplates", [])
             os_dvt = next(

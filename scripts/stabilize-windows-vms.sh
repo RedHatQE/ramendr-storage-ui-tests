@@ -227,8 +227,12 @@ main() {
   if [[ -x "$ensure_script" ]]; then
     log "Ensuring OpenSSH firewall/sshd on Windows VMs (both spokes)..."
     if ! "$ensure_script"; then
-      warn "OpenSSH ensure reported issues (sanity SSH probe may fail until fixed)."
+      err "OpenSSH ensure failed; sanity SSH probe may fail until fixed."
+      return 1
     fi
+  else
+    err "OpenSSH ensure script not executable: $ensure_script"
+    return 1
   fi
 
   log "Windows VM stabilization complete."

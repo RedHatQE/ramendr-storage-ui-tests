@@ -56,10 +56,15 @@ n['spec']['selector']['matchLabels']['machine.openshift.io/cluster-api-machinese
 n['spec']['template']['metadata']['labels']['machine.openshift.io/cluster-api-machineset'] = new_name
 pv = n['spec']['template']['spec']['providerSpec']['value']
 pv['instanceType'] = 'c5n.metal'
-bdm = pv.get('blockDeviceMappings', [])
-root_dev = bdm[0].get('deviceName', '/dev/xvda') if bdm else '/dev/xvda'
-pv['blockDeviceMappings'] = [{'deviceName': root_dev, 'ebs': {
-  'encrypted': True, 'kmsKey': {}, 'volumeSize': 300, 'volumeType': 'gp3'}}]
+existing = pv.get('blockDevices') or pv.get('blockDeviceMappings') or []
+vol = (existing[0].get('ebs') if existing else {}) or {}
+pv['blockDevices'] = [{'ebs': {
+  'encrypted': vol.get('encrypted', True),
+  'kmsKey': vol.get('kmsKey', {}),
+  'volumeSize': 300,
+  'volumeType': vol.get('volumeType', 'gp3'),
+}}]
+pv.pop('blockDeviceMappings', None)
 print(json.dumps(n))
 " | KUBECONFIG="$kubeconfig" oc apply -f - 2>/dev/null && \
         log " MachineSet $metal_name created on $cluster." || \

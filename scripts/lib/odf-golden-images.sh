@@ -46,6 +46,12 @@ _golden_image_name_protected() {
   return 1
 }
 
+_pvc_is_cnv_golden_import() {
+  local kubeconfig="$1" pvc_name="$2"
+  [[ -n "$(KUBECONFIG="$kubeconfig" oc get pvc "$pvc_name" -n "$OS_IMAGES_NS" \
+    -o jsonpath='{.metadata.labels.cdi\.kubevirt\.io/dataImportCron}' 2>/dev/null || true)" ]]
+}
+
 _cnv_datasource_names() {
   local kubeconfig="$1"
   KUBECONFIG="$kubeconfig" oc get datasource -n "$OS_IMAGES_NS" \
@@ -201,31 +207,35 @@ wait_for_golden_image_reimport() {
 
 force_cnv_golden_image_reimport() {
   local kubeconfig="$1" cluster="$2"
-  local pvc_name pvc_sc cron_name ds_name snap_name
+  local pvc_name pvc_sc cron_name ds_name snap_name source_pvc
+  local -a cron_names=() ds_names=()
+
+  mapfile -t cron_names < <(_cnv_dataimportcron_names "$kubeconfig")
+  mapfile -t ds_names < <(_cnv_datasource_names "$kubeconfig")
 
   _ogi_log "[$cluster] Removing CNV golden images not on $VIRT_SC_NAME (preserving: ${ODF_GOLDEN_PROTECTED_DATASOURCES})..."
 
-  while read -r cron_name; do
+  for cron_name in "${cron_names[@]}"; do
     [[ -n "$cron_name" ]] || continue
     KUBECONFIG="$kubeconfig" oc delete dataimportcron "$cron_name" -n "$OS_IMAGES_NS" \
       --ignore-not-found --wait=false &>/dev/null \
       && _ogi_log "[$cluster] Deleted dataimportcron $cron_name."
-  done < <(_cnv_dataimportcron_names "$kubeconfig")
+  done
 
-  while read -r ds_name; do
+  for ds_name in "${ds_names[@]}"; do
     [[ -n "$ds_name" ]] || continue
     _golden_image_name_protected "$ds_name" && continue
     KUBECONFIG="$kubeconfig" oc delete datasource "$ds_name" -n "$OS_IMAGES_NS" \
       --ignore-not-found --wait=false &>/dev/null \
       && _ogi_log "[$cluster] Deleted CNV datasource $ds_name."
-  done < <(_cnv_datasource_names "$kubeconfig")
+  done
 
-  while read -r cron_name; do
+  for cron_name in "${cron_names[@]}"; do
     [[ -n "$cron_name" ]] || continue
     KUBECONFIG="$kubeconfig" oc delete dv -n "$OS_IMAGES_NS" \
       -l "cdi.kubevirt.io/dataImportCron=${cron_name}" \
       --ignore-not-found --wait=false &>/dev/null || true
-  done < <(_cnv_dataimportcron_names "$kubeconfig")
+  done
 
   while read -r snap_name; do
     [[ -n "$snap_name" ]] || continue
@@ -233,7 +243,10 @@ force_cnv_golden_image_reimport() {
     case "$snap_name" in
       prime-*|*-scratch) continue ;;
     esac
-    # CNV cron imports use hashed PVC/snapshot names; protected names are exact matches.
+    source_pvc="$(KUBECONFIG="$kubeconfig" oc get volumesnapshot "$snap_name" -n "$OS_IMAGES_NS" \
+      -o jsonpath='{.spec.source.persistentVolumeClaimName}' 2>/dev/null || true)"
+    [[ -n "$source_pvc" ]] || continue
+    _pvc_is_cnv_golden_import "$kubeconfig" "$source_pvc" || continue
     KUBECONFIG="$kubeconfig" oc delete volumesnapshot "$snap_name" -n "$OS_IMAGES_NS" \
       --ignore-not-found --wait=false &>/dev/null || true
   done < <(KUBECONFIG="$kubeconfig" oc get volumesnapshot -n "$OS_IMAGES_NS" \
@@ -246,6 +259,7 @@ force_cnv_golden_image_reimport() {
       prime-*|*-scratch) continue ;;
     esac
     [[ "$pvc_sc" == "$VIRT_SC_NAME" ]] && continue
+    _pvc_is_cnv_golden_import "$kubeconfig" "$pvc_name" || continue
     _ogi_log "[$cluster] Deleting CNV golden image PVC $pvc_name (storageClass=$pvc_sc)."
     KUBECONFIG="$kubeconfig" oc delete pvc "$pvc_name" -n "$OS_IMAGES_NS" --ignore-not-found --wait=false
   done < <(KUBECONFIG="$kubeconfig" oc get pvc -n "$OS_IMAGES_NS" \
@@ -271,6 +285,7 @@ golden_images_need_cleanup() {
     case "$pvc_name" in
       prime-*|*-scratch) continue ;;
     esac
+    _pvc_is_cnv_golden_import "$kubeconfig" "$pvc_name" || continue
     [[ "$pvc_sc" != "$VIRT_SC_NAME" ]] && return 0
   done < <(KUBECONFIG="$kubeconfig" oc get pvc -n "$OS_IMAGES_NS" \
     -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName --no-headers 2>/dev/null || true)

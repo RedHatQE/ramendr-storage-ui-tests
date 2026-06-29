@@ -878,6 +878,9 @@ stabilize_windows_edge_vms() {
   local script="$REPO_ROOT/scripts/stabilize-windows-vms.sh"
   if [[ ! -x "$script" ]]; then
     warn "Windows VM stabilization script not found: $script"
+    if [[ "${REQUIRE_WINDOWS_VMS:-0}" == "1" ]]; then
+      return 1
+    fi
     return 0
   fi
   log "Recovering paused/unhealthy Windows edge VMs (sequential restart, LiveMigrate unchanged)..."
@@ -886,8 +889,11 @@ stabilize_windows_edge_vms() {
     SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
     "$script"; then
     warn "Windows VM stabilization failed (HammerDB bootstrap may still proceed on Linux VMs)."
-    [[ "${REQUIRE_WINDOWS_VMS:-0}" == "1" ]] && return 1
+    if [[ "${REQUIRE_WINDOWS_VMS:-0}" == "1" ]]; then
+      return 1
+    fi
   fi
+  return 0
 }
 
 setup_dr_validation() {

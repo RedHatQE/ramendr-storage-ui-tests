@@ -4,7 +4,7 @@ This document summarizes decisions and context from prior work so another agent 
 
 ## What this repository is
 
-- **Consumer / test harness** for upstream `[validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit)`, pinned by default to ref `**v1.1`** (upstream branch; tags may be empty on that repo).
+- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to the **`windows_vms`** branch at commit **`2cefc177f797e77f227fd753aaf2bd939ca34f59`** (rebased on `ocp-4.22`).
 - **Does not** long-term fork upstream. Local changes are **overlays** + **root `values-hub.yaml` replacement** + a small **patch** to upstream `pattern.sh`.
 - **Future:** Playwright + Python UI tests (not implemented yet). **Today:** deployment scripts, overrides, install-config examples.
 

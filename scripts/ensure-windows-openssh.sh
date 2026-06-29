@@ -11,6 +11,10 @@ VM_NAMESPACE="${VM_NAMESPACE:-gitops-vms}"
 WINDOWS_VM_PATTERN="${WINDOWS_VM_PATTERN:-windows}"
 PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
 SECONDARY_INSTALL_DIR="${SECONDARY_INSTALL_DIR:-$HOME/git/ocp-secondary-install}"
+AGENT_WAIT_TRIES="${WINDOWS_OPENSSH_AGENT_WAIT_TRIES:-60}"
+AGENT_WAIT_SLEEP="${WINDOWS_OPENSSH_AGENT_WAIT_SLEEP:-10}"
+GUEST_EXEC_STATUS_TRIES="${WINDOWS_OPENSSH_GUEST_EXEC_STATUS_TRIES:-180}"
+GUEST_EXEC_STATUS_SLEEP="${WINDOWS_OPENSSH_GUEST_EXEC_STATUS_SLEEP:-2}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -80,8 +84,8 @@ PY
     "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"powershell.exe\",\"arg\":${arg_json},\"capture-output\":true}}" \
     2>/dev/null) || return 1
   pid=$(printf '%s' "$out" | python3 -c "import sys,json; print(json.load(sys.stdin)['return']['pid'])")
-  for _ in $(seq 1 15); do
-    sleep 2
+  for _ in $(seq 1 "$GUEST_EXEC_STATUS_TRIES"); do
+    sleep "$GUEST_EXEC_STATUS_SLEEP"
     status_json=$(KUBECONFIG="$kubeconfig" oc exec -n "$VM_NAMESPACE" "$pod" -c compute -- \
       virsh qemu-agent-command "$domain" \
       "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":${pid}}}" 2>/dev/null) || continue
@@ -100,16 +104,31 @@ if err and 'CLIXML' not in err:
 sys.exit(0 if ret.get('exitcode') == 0 else 1)
 " && return 0
   done
+  warn "guest PowerShell command did not finish within $((GUEST_EXEC_STATUS_TRIES * GUEST_EXEC_STATUS_SLEEP))s"
+  return 1
+}
+
+wait_for_guest_agent() {
+  local kubeconfig="$1" vm="$2"
+  local tries=0 agent
+  while [[ $tries -lt $AGENT_WAIT_TRIES ]]; do
+    agent=$(KUBECONFIG="$kubeconfig" oc get vmi "$vm" -n "$VM_NAMESPACE" \
+      -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' 2>/dev/null || true)
+    if [[ "$agent" == "True" ]]; then
+      return 0
+    fi
+    log "  ${vm}: waiting for qemu guest agent (attempt $((tries + 1))/${AGENT_WAIT_TRIES})..."
+    sleep "$AGENT_WAIT_SLEEP"
+    tries=$((tries + 1))
+  done
+  warn "  ${vm}: qemu guest agent not connected after $((AGENT_WAIT_TRIES * AGENT_WAIT_SLEEP))s — skipping OpenSSH ensure"
   return 1
 }
 
 ensure_vm_openssh() {
   local kubeconfig="$1" vm="$2"
-  local pod domain agent
-  agent=$(KUBECONFIG="$kubeconfig" oc get vmi "$vm" -n "$VM_NAMESPACE" \
-    -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' 2>/dev/null || true)
-  if [[ "$agent" != "True" ]]; then
-    warn "  ${vm}: qemu guest agent not connected — skipping OpenSSH ensure"
+  local pod domain
+  if ! wait_for_guest_agent "$kubeconfig" "$vm"; then
     return 1
   fi
   pod="$(virt_launcher_pod "$kubeconfig" "$vm")"

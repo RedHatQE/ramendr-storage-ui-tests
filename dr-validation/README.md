@@ -105,7 +105,7 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `SSH_USER` | `cloud-user` | Linux VM SSH user (HammerDB / writer install); Windows guests use OpenSSH on port 22 |
 | `DR_VALIDATION_EXPECTED_VMS` | `4` | Full fleet in gitops-vms for post-DR automation |
 | `DR_VALIDATION_BOOTSTRAP_VM_COUNT` | `2` | Running Linux VMs required before HammerDB bootstrap |
-| `DR_VALIDATION_BOOTSTRAP_VM_PATTERN` | `rhel` | VM name substring matched during bootstrap wait |
+| `DR_VALIDATION_BOOTSTRAP_VM_PATTERN` | `rhel` | Regular expression matched against bootstrap VM / SSH endpoint names during bootstrap wait |
 | `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key for direct/laptop SSH (`install-writer.sh`, non-in-cluster collect) |
 | `DR_VALIDATION_SSH_PASSWORD` | (from Vault) | Password for in-cluster install/collect Jobs (private keys are not copied to spokes) |
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |

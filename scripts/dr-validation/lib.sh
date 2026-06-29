@@ -23,9 +23,10 @@ DR_VALIDATION_BOOTSTRAP_VM_COUNT="${DR_VALIDATION_BOOTSTRAP_VM_COUNT:-2}"
 DR_VALIDATION_BOOTSTRAP_VM_PATTERN="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"
 DR_VALIDATION_DB_SNAPSHOT_ROOT="${DR_VALIDATION_DB_SNAPSHOT_ROOT:-${REPO_ROOT}/.work/dr-validation-db/auto}"
 # Pinned amd64 manifest digest for in-cluster DR validation Jobs (override via env).
-# Must match quay.io/validatedpatterns/utility-container:latest (amd64); refresh with:
-#   skopeo inspect docker://quay.io/validatedpatterns/utility-container:latest | jq -r .Digest
-# then resolve amd64 manifest from the index if needed.
+# Spokes are amd64-only; a stale digest caused ImagePullBackOff (manifest unknown on Quay).
+# Refresh when utility-container is republished:
+#   skopeo inspect docker://quay.io/validatedpatterns/utility-container:latest \
+#     | jq -r '.Digest'  # index digest; then resolve amd64 platform manifest if needed
 DR_VALIDATION_UTILITY_CONTAINER_IMAGE="${DR_VALIDATION_UTILITY_CONTAINER_IMAGE:-quay.io/validatedpatterns/utility-container@sha256:03ddbab2e5473a7e5ca3ee073ac92682a480ebf5146c343e194369a76411a143}"
 DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 DR_VALIDATION_SNAPSHOT_INTERVAL="${DR_VALIDATION_SNAPSHOT_INTERVAL:-300}"
