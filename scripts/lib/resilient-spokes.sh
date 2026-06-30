@@ -12,6 +12,8 @@
 : "${SPOKE_GITOPS_NS:=vp-gitops}"
 : "${RESILIENT_PARENT_APP:=ramendr-starter-kit-resilient}"
 : "${RESILIENT_APP_RECOVERY_AFTER_SECONDS:=900}"
+: "${SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS:=40}"
+: "${SPOKE_APPPROJECT_PREP_WAIT_SLEEP:=15}"
 : "${PRIMARY_INSTALL_DIR:=$HOME/git/ocp-primary-install}"
 : "${SECONDARY_INSTALL_DIR:=$HOME/git/ocp-secondary-install}"
 
@@ -223,6 +225,54 @@ spec:
 EOF
 }
 
+# Parent resilient Application uses spec.project: default. On a fresh spoke, ACM/Argo can
+# auto-sync before AppProject/default exists, wedging the sync with InvalidSpecError and
+# blocking ODF (openshift-storage) child apps. Create the project early and unblock.
+prepare_spoke_argo_appprojects_on_all_spokes() {
+  local max_attempts="${SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS}"
+  local sleep_s="${SPOKE_APPPROJECT_PREP_WAIT_SLEEP}"
+  local tries=0 ready_count cluster kc
+
+  _rs_log "[spoke-gitops] Preparing AppProject/default on all spokes (before resilient parent sync)..."
+  while [[ $tries -lt $max_attempts ]]; do
+    ready_count=0
+    for cluster in $SPOKE_CLUSTERS; do
+      kc=$(_spoke_kubeconfig "$cluster") || continue
+      [[ -f "$kc" ]] || continue
+      if ! KUBECONFIG="$kc" oc get namespace "$SPOKE_GITOPS_NS" &>/dev/null; then
+        continue
+      fi
+      ensure_spoke_argo_appproject_default "$kc" "$SPOKE_GITOPS_NS"
+      if spoke_resilient_app_needs_recovery "$cluster"; then
+        recover_spoke_resilient_app "$cluster" || true
+      fi
+      ready_count=$((ready_count + 1))
+    done
+
+    if [[ "$ready_count" -ge 2 ]]; then
+      _rs_log "[spoke-gitops] AppProject/default ready on all spokes."
+      return 0
+    fi
+
+    tries=$((tries + 1))
+    _rs_log "[spoke-gitops] Waiting for ${SPOKE_GITOPS_NS} on all spokes (${tries}/${max_attempts})..."
+    sleep "$sleep_s"
+  done
+
+  _rs_warn "[spoke-gitops] Timed out pre-creating AppProject/default on all spokes."
+  for cluster in $SPOKE_CLUSTERS; do
+    kc=$(_spoke_kubeconfig "$cluster") || continue
+    [[ -f "$kc" ]] || continue
+    if KUBECONFIG="$kc" oc get namespace "$SPOKE_GITOPS_NS" &>/dev/null; then
+      ensure_spoke_argo_appproject_default "$kc" "$SPOKE_GITOPS_NS" || true
+      if spoke_resilient_app_needs_recovery "$cluster"; then
+        recover_spoke_resilient_app "$cluster" || true
+      fi
+    fi
+  done
+  return 1
+}
+
 spoke_resilient_app_exists() {
   local cluster="$1"
   local kc
@@ -371,12 +421,19 @@ _spoke_resilient_gitops_status_line() {
 wait_for_spoke_resilient_gitops() {
   local max_attempts="${SPOKE_RESILIENT_GITOPS_WAIT_ATTEMPTS:-60}"
   local sleep_s="${SPOKE_RESILIENT_GITOPS_WAIT_SLEEP:-60}"
-  local tries=0 ready_count=0
+  local tries=0 ready_count=0 cluster kc
+
+  prepare_spoke_argo_appprojects_on_all_spokes || true
 
   _rs_log "[spoke-gitops] Waiting for ${RESILIENT_PARENT_APP} + openshift-storage on all spokes..."
   while [[ $tries -lt $max_attempts ]]; do
     ready_count=0
     for cluster in $SPOKE_CLUSTERS; do
+      kc=$(_spoke_kubeconfig "$cluster") || continue
+      [[ -f "$kc" ]] || continue
+      if KUBECONFIG="$kc" oc get namespace "$SPOKE_GITOPS_NS" &>/dev/null; then
+        ensure_spoke_argo_appproject_default "$kc" "$SPOKE_GITOPS_NS"
+      fi
       if spoke_resilient_gitops_ready "$cluster"; then
         ready_count=$((ready_count + 1))
         continue

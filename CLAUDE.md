@@ -21,7 +21,7 @@ The entrypoint is `scripts/redeploy.sh`.
 
 - **Local checkout** (`pattern.sh`, utility container): cloned into
   `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`
-  (default `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` on branch `ocp-4.22`).
+  (default `e35c55c3645a3d89414a0915a0f894f3ab75c66b` on branch `ocp-4.22`).
   Override with `UPSTREAM_REPO` / `UPSTREAM_REF`.
 - **Hub Argo CD** (ongoing GitOps sync): reads values from the fork on GitHub at
   branch `ocp-4.22` (branch tip unless Applications pin a specific revision).
@@ -30,11 +30,15 @@ Customizations (additionalDisks, chartVersion, byoc cluster names, ODF channel p
 cost-optimized values) live in the fork's `ocp-4.22` branch under `overrides/` and
 values files. Local edits next to the checkout do not affect Argo CD.
 
-- It runs the deployment via upstream `pattern.sh` (utility-container).
+- It runs the deployment via upstream `pattern.sh make install-byoc` (utility-container).
+- After hub + spoke `openshift-install`, `redeploy.sh` copies `VALUES_SECRET` to
+  `.work/values-secret.yaml`, merges spoke kubeconfig file paths, and passes that file to
+  `install-byoc`. Vault + ExternalSecrets deliver kubeconfigs to ACM (no manual `oc create secret`).
 
 All sensitive inputs must be provided externally:
 
-- `VALUES_SECRET` should point to a local file (default `~/values-secret.yaml`).
+- `VALUES_SECRET` should point to a local file (default `~/values-secret.yaml`). Spoke kubeconfig
+  paths are refreshed automatically in `.work/values-secret.yaml` each redeploy.
 - AWS credentials are provided through the environment/standard AWS CLI configuration.
 
 ## Security requirements

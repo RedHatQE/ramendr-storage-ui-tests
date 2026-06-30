@@ -11,20 +11,24 @@ set -euo pipefail
 #
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 # shellcheck source=lib/spoke-metal.sh
 source "$REPO_ROOT/scripts/lib/spoke-metal.sh"
 # shellcheck source=lib/resilient-spokes.sh
 source "$REPO_ROOT/scripts/lib/resilient-spokes.sh"
-# shellcheck source=scripts/lib/odf-golden-images.sh
+# shellcheck source=lib/odf-golden-images.sh
 source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
+# shellcheck source=lib/byoc-kubeconfig-secrets.sh
+source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
+# shellcheck source=lib/byoc-import-wait.sh
+source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-2cefc177f797e77f227fd753aaf2bd939ca34f59}"  # windows_vms (rebased on ocp-4.22)
+UPSTREAM_REF="${UPSTREAM_REF:-e35c55c3645a3d89414a0915a0f894f3ab75c66b}"  # ocp-4.22 (includes merged windows_vms)
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-windows_vms}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
 
-WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
 HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
@@ -544,247 +548,26 @@ scale_hub_workers() {
   done
 }
 
-finalize_byoc_cluster_deployments() {
-  # BYOC: clusters are already installed. Hive may still run provision jobs when
-  # private-key secrets appear; mark deployments installed from openshift-install metadata.
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-  local entries=(
-    "ocp-primary:$PRIMARY_INSTALL_DIR"
-    "ocp-secondary:$SECONDARY_INSTALL_DIR"
-  )
-  for entry in "${entries[@]}"; do
-    local cluster="${entry%%:*}"
-    local dir="${entry##*:}"
-    local meta="$dir/metadata.json"
-    [[ -f "$meta" ]] || continue
-    oc get clusterdeployment "$cluster" -n "$cluster" &>/dev/null || continue
-
-    local cluster_id infra_id region
-    cluster_id=$(python3 -c "import json; print(json.load(open('$meta'))['clusterID'])" 2>/dev/null) || continue
-    infra_id=$(python3 -c "import json; print(json.load(open('$meta'))['infraID'])" 2>/dev/null) || continue
-    region=$(python3 -c "import json; print(json.load(open('$meta'))['aws']['region'])" 2>/dev/null) || continue
-
-    oc patch clusterdeployment "$cluster" -n "$cluster" --type merge -p "{
-      \"spec\": {
-        \"installed\": true,
-        \"clusterMetadata\": {
-          \"clusterID\": \"${cluster_id}\",
-          \"infraID\": \"${infra_id}\"
-        },
-        \"platform\": {
-          \"aws\": {
-            \"region\": \"${region}\"
-          }
-        }
-      }
-    }" &>/dev/null || warn "[byoc] Could not patch ClusterDeployment $cluster."
-
-    oc delete job -n "$cluster" -l "hive.openshift.io/cluster-deployment-name=${cluster}" --ignore-not-found &>/dev/null || true
-    log "[byoc] ClusterDeployment $cluster marked installed (clusterID ${cluster_id})."
-  done
-}
-
-store_spoke_kubeconfigs_in_vault() {
-  log "[vault-kc] Storing spoke kubeconfigs in Vault..."
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-
-  # Stage 1: wait for the vault-0 pod to be Running (up to 10 min).
-  local tries=0
-  log "[vault-kc] Waiting for vault-0 pod to be Running..."
-  until oc get pod vault-0 -n vault --no-headers 2>/dev/null | grep -q " Running "; do
-    [[ $tries -ge 40 ]] && { warn "[vault-kc] vault-0 pod not Running after 10 min -- skipping kubeconfig storage."; return 1; }
-    sleep 15
-    tries=$((tries + 1))
-  done
-
-  # Stage 2: wait for Vault to be initialised and unsealed (up to 20 min).
-  tries=0
-  log "[vault-kc] Waiting for Vault to be initialized and unsealed..."
-  until oc exec -n vault vault-0 -- vault status 2>/dev/null | grep -q "Initialized.*true" && \
-    oc exec -n vault vault-0 -- vault status 2>/dev/null | grep -q "Sealed.*false"; do
-    [[ $tries -ge 80 ]] && { warn "[vault-kc] Vault not ready after 20 min -- skipping kubeconfig storage."; return 1; }
-    sleep 15
-    tries=$((tries + 1))
-  done
-  log "[vault-kc] Vault is ready."
-
-  for entry in "ocp-primary:$PRIMARY_INSTALL_DIR" "ocp-secondary:$SECONDARY_INSTALL_DIR"; do
-    local cluster="${entry%%:*}"
-    local dir="${entry##*:}"
-    local kc_file="$dir/auth/kubeconfig"
-    [[ -f "$kc_file" ]] || { warn "[vault-kc] No kubeconfig at $kc_file -- skipping."; continue; }
-
-    # Store the kubeconfig as-is, preserving certificate-authority-data.
-    # Using insecure-skip-tls-verify instead of the real CA cert causes failures
-    # in clients (e.g. Ansible kubernetes.core modules) that do not honour
-    # that flag and perform TLS verification regardless.
-    local vault_path="secret/hub/${cluster}_cluster_kubeconfig"
-    local write_tries=0
-    local stored=false
-    while [[ $write_tries -lt 5 ]]; do
-      if oc cp "$kc_file" "vault/vault-0:/tmp/${cluster}-kubeconfig.yaml" 2>/dev/null && \
-        oc exec -n vault vault-0 -- \
-          vault kv put "$vault_path" "kubeconfig=@/tmp/${cluster}-kubeconfig.yaml" 2>/dev/null; then
-        oc exec -n vault vault-0 -- rm -f "/tmp/${cluster}-kubeconfig.yaml" 2>/dev/null || true
-        log "[vault-kc] Stored kubeconfig for $cluster at $vault_path."
-        stored=true
-        break
-      fi
-      write_tries=$((write_tries + 1))
-      warn "[vault-kc] Write attempt $write_tries/5 failed for $cluster -- retrying in 15s..."
-      sleep 15
-    done
-    [[ "$stored" == "false" ]] && warn "[vault-kc] Failed to store kubeconfig for $cluster in Vault after 5 attempts."
-  done
-}
-
-import_spoke_clusters() {
-  # The regional-dr chart creates ClusterDeployments with installed:false, which
-  # causes Hive to attempt provisioning and fail. Bypass that by creating an
-  # auto-import-secret in each spoke namespace on the hub: ACM detects it and
-  # deploys the klusterlet directly, with no Hive involvement.
-  #
-  # This function is idempotent and safe to call multiple times.
-  log "[import] Creating auto-import-secret for spoke clusters..."
-  local entries=(
-    "ocp-primary:$PRIMARY_INSTALL_DIR"
-    "ocp-secondary:$SECONDARY_INSTALL_DIR"
-  )
-  for entry in "${entries[@]}"; do
-    local cluster="${entry%%:*}"
-    local dir="${entry##*:}"
-    local kc_file="$dir/auth/kubeconfig"
-
-    if [[ ! -f "$kc_file" ]]; then
-      warn "[import] No kubeconfig at $kc_file -- skipping $cluster."
-      continue
-    fi
-
-    # Wait up to 20 min for ArgoCD to create the spoke namespace on the hub.
-    # On a fresh install pattern.sh can take well over 10 min before regional-dr
-    # syncs and the namespace appears; a short timeout causes silent skip which
-    # leaves the spoke unregistered and blocks the odf-ssl-certificate-extractor job.
-    # ensure_spoke_imports() acts as a safety net if this timeout is still exceeded.
-    local tries=0
-    until oc get namespace "$cluster" &>/dev/null || [[ $tries -ge 40 ]]; do
-      tries=$((tries + 1))
-      sleep 30
-    done
-    if ! oc get namespace "$cluster" &>/dev/null; then
-      warn "[import] Namespace $cluster never appeared on hub after 20 min -- skipping auto-import."
-      continue
-    fi
-
-    oc create secret generic auto-import-secret \
-      -n "$cluster" \
-      --from-file=kubeconfig="$kc_file" \
-      --dry-run=client -o yaml \
-      | oc apply -f - &>/dev/null \
-      && log "[import] auto-import-secret created for $cluster." \
-      || warn "[import] Failed to create auto-import-secret for $cluster (may already exist)."
-
-    _ensure_managedcluster_registered "$cluster"
-
-    # Push the openshift-install kubeconfig into the spoke namespace under a
-    # well-known name that sorts alphabetically before the ACM-generated secret
-    # (ocp-primary-0-...-admin-kubeconfig). The odf-ssl-certificate-extractor
-    # Ansible job picks the first matching secret; the ACM secret's CA does not
-    # validate the spoke API server cert, but the openshift-install one does.
-    _push_install_kubeconfig_to_namespace "$cluster" "$kc_file"
-  done
-}
-
-_ensure_managedcluster_registered() {
-  local cluster="$1"
-  register_spoke_managed_cluster "$cluster"
-}
-
-_push_install_kubeconfig_to_namespace() {
-  local cluster="$1" kc_file="$2"
-  oc create secret generic admin-kubeconfig \
-    -n "$cluster" \
-    --from-file=kubeconfig="$kc_file" \
-    --dry-run=client -o yaml \
-    | oc apply -f - &>/dev/null \
-    && log "[kc-push] admin-kubeconfig (install CA) created/updated for $cluster." \
-    || warn "[kc-push] Failed to create admin-kubeconfig for $cluster."
-}
-
-ensure_spoke_imports() {
-  # Safety-net: after pattern.sh returns, check whether each spoke is Joined
-  # and create the auto-import-secret for any that are still missing.
-  # Handles the race where import_spoke_clusters timed out waiting for the
-  # spoke namespace to appear (namespace is always present by this point).
-  log "[import] Verifying spoke cluster registration..."
-  local entries=(
-    "ocp-primary:$PRIMARY_INSTALL_DIR"
-    "ocp-secondary:$SECONDARY_INSTALL_DIR"
-  )
-  local any_missing=false
-  for entry in "${entries[@]}"; do
-    local cluster="${entry%%:*}"
-    local dir="${entry##*:}"
-    local kc_file="$dir/auth/kubeconfig"
-
-    local joined
-    joined=$(oc get managedcluster "$cluster" \
-      -o jsonpath='{.status.conditions[?(@.type=="ManagedClusterJoined")].status}' 2>/dev/null)
-    if [[ "$joined" == "True" ]]; then
-      log "[import] $cluster is already Joined -- nothing to do."
-      continue
-    fi
-
-    log "[import] $cluster is not Joined -- creating auto-import-secret now..."
-    any_missing=true
-    if [[ ! -f "$kc_file" ]]; then
-      warn "[import] No kubeconfig at $kc_file -- cannot import $cluster."
-      continue
-    fi
-    if ! oc get namespace "$cluster" &>/dev/null; then
-      warn "[import] Namespace $cluster does not exist on hub -- cannot import $cluster."
-      continue
-    fi
-    oc create secret generic auto-import-secret \
-      -n "$cluster" \
-      --from-file=kubeconfig="$kc_file" \
-      --dry-run=client -o yaml \
-      | oc apply -f - \
-      && log "[import] auto-import-secret created for $cluster." \
-      || warn "[import] Failed to create auto-import-secret for $cluster."
-
-    _ensure_managedcluster_registered "$cluster"
-    _push_install_kubeconfig_to_namespace "$cluster" "$kc_file"
-  done
-  if [[ "$any_missing" == "true" ]]; then
-    log "[import] Waiting 60 s for klusterlet agents to register..."
-    sleep 60
-    oc get managedcluster ocp-primary ocp-secondary \
-      -o custom-columns='NAME:.metadata.name,JOINED:.status.conditions[?(@.type=="ManagedClusterJoined")].status,AVAILABLE:.status.conditions[?(@.type=="ManagedClusterConditionAvailable")].status' \
-      2>/dev/null || true
-  fi
-}
-
-
 deploy_pattern() {
   ensure_podman_ready || exit 1
-  log "Deploying RamenDR pattern (upstream pinned, local overrides applied)..."
+  log "Deploying RamenDR pattern (BYOC: install-byoc with spoke kubeconfigs in values-secret)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
-  # Vault and spoke import must run while pattern.sh is installing operators.
-  store_spoke_kubeconfigs_in_vault &
-  local store_pid=$!
-  import_spoke_clusters &
-  local import_pid=$!
+  prepare_byoc_values_secret || exit 1
 
-  log "Running upstream pattern install (this takes time for operators to settle)..."
+  log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."
   local pattern_exit=0
-  ( cd "$UPSTREAM_DIR" && VALUES_SECRET="$VALUES_SECRET" TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" ./pattern.sh make install 2>&1 ) \
+  ( cd "$UPSTREAM_DIR" && \
+      KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig" \
+      VALUES_SECRET="$BYOC_VALUES_SECRET" \
+      TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" \
+      ./pattern.sh make install-byoc 2>&1 ) \
     || pattern_exit=$?
 
   if [[ $pattern_exit -ne 0 ]]; then
     # pattern.sh often times out because regional-dr and/or ramendr-starter-kit-hub
     # are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
-    warn "pattern.sh make install returned non-zero — checking whether this is recoverable drift..."
+    warn "pattern.sh make install-byoc returned non-zero — checking whether this is recoverable drift..."
     local hub_health rdr_health
     hub_health="$(hub_pattern_app_health)"
     rdr_health=$(oc get application.argoproj.io regional-dr \
@@ -800,17 +583,16 @@ deploy_pattern() {
     fi
   fi
 
-  if ! wait "$store_pid"; then
-    warn "store_spoke_kubeconfigs_in_vault background job failed -- retrying synchronously..."
-    store_spoke_kubeconfigs_in_vault || true
+  if ! wait_for_byoc_spoke_import; then
+    warn "BYOC spoke import did not complete within timeout; resilient GitOps and DR bootstrap may fail."
   fi
-  wait "$import_pid" 2>/dev/null || true
 
-  # BYOC spokes import + resilient-placement refresh (fixes stale empty PlacementDecision).
-  ensure_spoke_imports
+  prepare_spoke_argo_appprojects_on_all_spokes || \
+    warn "[spoke-gitops] AppProject/default pre-create incomplete; resilient parent sync may wedge."
+
   ensure_resilient_spoke_gitops || warn "[placement] resilient-placement did not converge; spoke ODF may be delayed."
+  prepare_spoke_argo_appprojects_on_all_spokes || true
   recover_all_spoke_resilient_apps || true
-  finalize_byoc_cluster_deployments
 
   log "Force-refreshing kubeconfig ExternalSecrets..."
   for cluster in ocp-primary ocp-secondary; do
@@ -849,6 +631,7 @@ wait_for_convergence() {
       if ! resilient_placement_satisfied 2; then
         refresh_resilient_placements
       fi
+      prepare_spoke_argo_appprojects_on_all_spokes || true
       recover_all_spoke_resilient_apps || true
     fi
   done
@@ -883,7 +666,7 @@ stabilize_windows_edge_vms() {
     fi
     return 0
   fi
-  log "Recovering paused/unhealthy Windows edge VMs (sequential restart, LiveMigrate unchanged)..."
+  log "Waiting for gitops-vms Windows VMs, then stabilizing (OS disk import + restart if needed)..."
   if ! HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
     PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
     SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
@@ -1136,13 +919,20 @@ case "${1:-}" in
     echo " DR_VALIDATION_BOOTSTRAP_RETRY_SLEEP Seconds between bootstrap retries (default 120)"
     echo " SPOKE_RESILIENT_GITOPS_WAIT_ATTEMPTS  Wait for spoke vp-gitops parent app (default 60)"
     echo " SPOKE_RESILIENT_GITOPS_WAIT_SLEEP     Seconds between spoke GitOps polls (default 60)"
+    echo " WINDOWS_VM_APPEAR_WAIT_TRIES          Wait for gitops-vms Windows VMs before stabilize (default 60)"
+    echo " WINDOWS_VM_APPEAR_WAIT_SLEEP          Seconds between Windows VM appear polls (default 30)"
+    echo " WINDOWS_VM_DV_WAIT_TRIES              Wait for Windows OS DataVolume clone/import (default 180)"
+    echo " WINDOWS_VM_STABILIZE_WAIT_TRIES       Wait for Running/ready after restart (default 40)"
+    echo " SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS    Wait for vp-gitops + AppProject/default per spoke (default 40)"
+    echo " SPOKE_APPPROJECT_PREP_WAIT_SLEEP       Seconds between AppProject prep polls (default 15)"
     echo " SKIP_ODF_GOLDEN_IMAGE_FIX  Set to 1 to skip post-ODF CNV golden image re-import fix"
     echo " ODF_GOLDEN_PROTECTED_DATASOURCES  Never delete these os-images DataSources/PVCs (default: windows2k22,windows2k25)"
     echo " ODF_GOLDEN_IMAGE_WAIT_ATTEMPTS  Wait for golden image re-import per spoke (default 30)"
     echo " ODF_GOLDEN_IMAGE_WAIT_SLEEP     Seconds between golden image polls (default 60)"
     echo " SPOKE_ODF_STORAGE_WAIT_ATTEMPTS   Wait for ODF Available before golden image fix (default 30)"
     echo " SPOKE_ODF_STORAGE_WAIT_SLEEP      Seconds between ODF Available polls (default 30)"
-    echo " SSH_USER / SSH_IDENTITY_FILE  SSH access to edge VMs (default: cloud-user, ~/.ssh/id_rsa)"
+    echo " BYOC_IMPORT_WAIT_ATTEMPTS      Wait for ESO/MC spoke import per step (default 40)"
+    echo " BYOC_IMPORT_WAIT_SLEEP         Seconds between BYOC import polls (default 30)"
     ;;
   *)
     full_redeploy

@@ -12,6 +12,10 @@ PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
 HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
 WAIT_TRIES="${WINDOWS_VM_STABILIZE_WAIT_TRIES:-40}"
 WAIT_SLEEP="${WINDOWS_VM_STABILIZE_WAIT_SLEEP:-30}"
+# regional-dr can be Synced/Healthy before gitops-vms Windows VM objects exist on the spoke.
+# Default 60 × 30s = 30 min.
+WINDOWS_VM_APPEAR_WAIT_TRIES="${WINDOWS_VM_APPEAR_WAIT_TRIES:-60}"
+WINDOWS_VM_APPEAR_WAIT_SLEEP="${WINDOWS_VM_APPEAR_WAIT_SLEEP:-30}"
 # Windows OS disks clone from a registry-imported golden image (~45Gi). The VM DV stays
 # CloneScheduled (progress N/A) until that import finishes; measured ~70 min on ODF.
 # Default 180 × 30s = 90 min.
@@ -66,7 +70,7 @@ vm_awaiting_os_disk() {
   dv_phase="$(vm_os_dv_phase "$kubeconfig" "$vm")"
 
   case "$printable" in
-    Provisioning|Starting|WaitingForVolumeBinding|DataVolumeProvisioning)
+    Provisioning|Starting|WaitingForVolumeBinding|DataVolumeProvisioning|DataVolumeError)
       return 0
       ;;
   esac
@@ -164,6 +168,25 @@ wait_vm_running() {
   return 1
 }
 
+wait_for_windows_vms_on_spoke() {
+  local kubeconfig="$1" cluster="$2"
+  local tries=0 count
+
+  while [[ $tries -lt $WINDOWS_VM_APPEAR_WAIT_TRIES ]]; do
+    count="$(list_windows_vms "$kubeconfig" | wc -l | tr -d ' ')"
+    if [[ "${count:-0}" -gt 0 ]]; then
+      log "Found ${count} Windows VM(s) in ${VM_NAMESPACE} on ${cluster}."
+      return 0
+    fi
+    log "Waiting for Windows VMs matching '${WINDOWS_VM_PATTERN}' in ${VM_NAMESPACE} on ${cluster} ($((tries + 1))/${WINDOWS_VM_APPEAR_WAIT_TRIES})..."
+    sleep "$WINDOWS_VM_APPEAR_WAIT_SLEEP"
+    tries=$((tries + 1))
+  done
+
+  warn "Timed out waiting for Windows VMs in ${VM_NAMESPACE} on ${cluster}."
+  return 1
+}
+
 main() {
   if [[ "${SKIP_WINDOWS_VM_STABILIZE:-0}" == "1" ]]; then
     log "SKIP_WINDOWS_VM_STABILIZE=1 — skipping Windows VM stabilization."
@@ -178,9 +201,16 @@ main() {
     return 0
   }
 
+  if ! wait_for_windows_vms_on_spoke "$spoke_kc" "$primary"; then
+    if [[ "${REQUIRE_WINDOWS_VMS:-0}" == "1" ]]; then
+      return 1
+    fi
+    return 0
+  fi
+
   mapfile -t windows_vms < <(list_windows_vms "$spoke_kc")
   if [[ ${#windows_vms[@]} -eq 0 ]]; then
-    log "No Windows VMs matching '${WINDOWS_VM_PATTERN}' in ${VM_NAMESPACE} on ${primary}."
+    warn "No Windows VMs matching '${WINDOWS_VM_PATTERN}' in ${VM_NAMESPACE} on ${primary}."
     return 0
   fi
 

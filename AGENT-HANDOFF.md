@@ -4,7 +4,7 @@ This document summarizes decisions and context from prior work so another agent 
 
 ## What this repository is
 
-- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to the **`windows_vms`** branch at commit **`2cefc177f797e77f227fd753aaf2bd939ca34f59`** (rebased on `ocp-4.22`).
+- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to branch **`ocp-4.22`** at commit **`e35c55c3645a3d89414a0915a0f894f3ab75c66b`** (includes merged `windows_vms` work).
 - **Does not** long-term fork upstream. Local changes are **overlays** + **root `values-hub.yaml` replacement** + a small **patch** to upstream `pattern.sh`.
 - **Future:** Playwright + Python UI tests (not implemented yet). **Today:** deployment scripts, overrides, install-config examples.
 
@@ -16,12 +16,12 @@ This document summarizes decisions and context from prior work so another agent 
 ## Key entrypoint: `scripts/redeploy.sh`
 
 1. Clones/fetches upstream into `**.work/upstream/ramendr-starter-kit`** (see `.gitignore`; not committed).
-2. Checks out `**UPSTREAM_REF`** (default `v1.1`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `WORK_DIR`, `UPSTREAM_DIR`, `UPSTREAM_OVERRIDES_DIR`.
+2. Checks out `**UPSTREAM_REF`** (default `e35c55c3645a3d89414a0915a0f894f3ab75c66b` on branch `ocp-4.22`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `WORK_DIR`, `UPSTREAM_DIR`, `UPSTREAM_OVERRIDES_DIR`.
 3. Copies `**overrides/*.yaml`** → upstream `overrides/`.
 4. Copies `**upstream-overrides/values-hub.yaml**` → upstream **root** `values-hub.yaml` when that file exists (fork-style hub: ODF channels `stable-4.20`, regional-dr `extraValueFiles` includes `values-aws-cost-optimized.yaml`, etc.).
 5. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal).
 6. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
-7. Runs `**./pattern.sh make install**` from the upstream checkout with `**VALUES_SECRET**` (default `~/values-secret.yaml`).
+7. Merges spoke kubeconfig paths into `**.work/values-secret.yaml**` (copy of `VALUES_SECRET`) and runs `**./pattern.sh make install-byoc**` from the upstream checkout.
 
 **Important bug fix:** any edit to upstream `pattern.sh` must run with `cd "$UPSTREAM_DIR"` so the correct file is patched.
 

@@ -2,10 +2,10 @@
 
 This repository is a **test harness** for the RamenDR validated pattern.
 It deploys from a maintained fork of the upstream starter kit —
-[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `windows_vms`, rebased on `ocp-4.22`) —
-which carries all environment-specific customizations (additional VM disks, BYOC cluster names,
+[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22`) —
+which carries all environment-specific customizations (Windows edge VMs, additional VM disks, BYOC cluster names,
 ODF channel pins, cost-optimized instance profiles). **`redeploy.sh` pins a fixed commit SHA**
-for the local pattern install; **hub Argo CD** reconciles from the fork's `windows_vms` branch on GitHub
+for the local pattern install; **hub Argo CD** reconciles from the fork's `ocp-4.22` branch on GitHub
 (see [Upstream pinning](#upstream-pinning) below).
 
 It contains:
@@ -18,17 +18,20 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `2cefc177f797e77f227fd753aaf2bd939ca34f59` from the `windows_vms` branch into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `e35c55c3645a3d89414a0915a0f894f3ab75c66b` from the `ocp-4.22` branch into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
-4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`.
+4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
+   paths (`ocp-primary_cluster_kubeconfig`, `ocp-secondary_cluster_kubeconfig`), and run
+   upstream `pattern.sh make install-byoc` (loads secrets to Vault, validates BYOC, deploys pattern).
+5. Wait for ExternalSecrets to create `auto-import-secret` and `admin-kubeconfig` on the hub; ACM
+   imports the spokes.
 
-> **BYOC note:** The fork sets `byoc: true` and documents `make install-byoc` with
-> spoke kubeconfigs in `values-secret`. Full redeploy today uses `make install` plus
-> imperative import/Vault workarounds in `redeploy.sh` instead — see
-> [`docs/TODO-byoc-redeploy-refactor.md`](docs/TODO-byoc-redeploy-refactor.md).
+> **BYOC:** The fork sets `byoc: true`. Your `~/values-secret.yaml` may omit spoke kubeconfigs or
+> contain stale paths from a previous deploy — `redeploy.sh` always refreshes them in
+> `.work/values-secret.yaml` (gitignored) before `install-byoc`. Your source file is never modified.
 
-> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `windows_vms`) — local copies placed next to the checkout are invisible to it. The `windows_vms` branch is rebased on `ocp-4.22`; Windows VM chart values live there alongside the 4.22 baseline.
+> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `ocp-4.22`) — local copies placed next to the checkout are invisible to it. Windows VM chart values and the 4.22 baseline both live on that branch.
 
 ### Upstream pinning
 
@@ -36,8 +39,8 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `2cefc177f797e77f227fd753aaf2bd939ca34f59` (on branch `windows_vms`) |
-| Hub Argo CD Applications | Remote fork on GitHub | Branch `windows_vms` (tip unless an Application pins `targetRevision`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `e35c55c3645a3d89414a0915a0f894f3ab75c66b` (on branch `ocp-4.22`) |
+| Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22` (tip unless an Application pins `targetRevision`) |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
 `redeploy.sh`. For Argo CD to match that commit, push it to the tracked branch or pin
@@ -52,7 +55,7 @@ The deployment script expects tools similar to the original flow:
 - `aws`
 - `podman` — must be **running** when the pattern deploy starts (`pattern.sh` uses a utility container). On macOS, start the VM before a long redeploy or rely on `redeploy.sh` to auto-start it: `podman machine start`
 - `git`
-- `python3`
+- `python3` with **PyYAML** (`python3 -m pip install pyyaml`) — merges spoke kubeconfig paths into `.work/values-secret.yaml` before `install-byoc`
 - `jq` — used by the golden-image Ansible playbook and several redeploy helpers
 - `ansible-playbook` — runs `scripts/ansible/odf_fix_dataimportcrons.yml` during spoke golden-image fix-up (optional; redeploy falls back to `oc` if this step fails)
 
@@ -73,8 +76,14 @@ That playbook needs:
 
 Install the collection with `ansible-galaxy collection install kubernetes.core`. Install the Python
 package for the **same interpreter Ansible uses for `localhost`** (not necessarily the interpreter
-in an activated virtualenv). If Ansible cannot import `kubernetes`, the playbook logs a warning and
-`redeploy.sh` continues with direct `oc` golden-image cleanup instead.
+in an activated virtualenv). On Fedora, `dnf install python3-kubernetes` may target a different
+Python than Ansible auto-discovers (e.g. package on 3.14 while Ansible picks 3.12).
+
+`redeploy.sh` auto-selects the first interpreter that can `import kubernetes` (default
+`/usr/bin/python3`, then 3.14/3.13/3.12) and sets `ANSIBLE_PYTHON_INTERPRETER` for the playbook.
+Override with `export ANSIBLE_PYTHON_INTERPRETER=/usr/bin/python3.14` if needed. If no suitable
+interpreter is found, the playbook is skipped and `redeploy.sh` continues with direct `oc`
+golden-image cleanup instead.
 
 `requirements.txt` covers UI tests (Playwright/pytest) only; it does **not** install these Ansible
 dependencies.

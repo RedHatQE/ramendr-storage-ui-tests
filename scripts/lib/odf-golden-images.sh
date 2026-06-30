@@ -37,6 +37,29 @@ _ogi_warn() {
   fi
 }
 
+# Ansible kubernetes.core modules need the Python kubernetes package on localhost.
+# Ansible often auto-discovers /usr/bin/python3.12 while distro/pip packages target
+# another interpreter (e.g. python3.14). Honor ANSIBLE_PYTHON_INTERPRETER when set.
+_ansible_python_for_kubernetes() {
+  local py
+  if [[ -n "${ANSIBLE_PYTHON_INTERPRETER:-}" ]]; then
+    if "${ANSIBLE_PYTHON_INTERPRETER}" -c "import kubernetes" 2>/dev/null; then
+      echo "${ANSIBLE_PYTHON_INTERPRETER}"
+      return 0
+    fi
+    _ogi_warn "ANSIBLE_PYTHON_INTERPRETER=${ANSIBLE_PYTHON_INTERPRETER} cannot import kubernetes."
+    return 1
+  fi
+  for py in /usr/bin/python3 /usr/bin/python3.14 /usr/bin/python3.13 /usr/bin/python3.12; do
+    [[ -x "$py" ]] || continue
+    if "$py" -c "import kubernetes" 2>/dev/null; then
+      echo "$py"
+      return 0
+    fi
+  done
+  return 1
+}
+
 _golden_image_name_protected() {
   local name="$1" entry
   for entry in ${ODF_GOLDEN_PROTECTED_DATASOURCES//,/ }; do
@@ -177,7 +200,14 @@ run_odf_fix_dataimportcrons_playbook() {
     _ogi_warn "[$cluster] jq not found — skipping ansible playbook step."
     return 0
   fi
+  local ansible_python
+  if ! ansible_python=$(_ansible_python_for_kubernetes); then
+    _ogi_warn "[$cluster] No Python interpreter with kubernetes module found — skipping ansible playbook (bash fallback will run)."
+    return 1
+  fi
+  _ogi_log "[$cluster] Using ANSIBLE_PYTHON_INTERPRETER=${ansible_python} for odf_fix_dataimportcrons."
   if KUBECONFIG="$kubeconfig" OCP_MINOR_VERSION="$minor_version" \
+    ANSIBLE_PYTHON_INTERPRETER="$ansible_python" \
     ansible-playbook "$playbook" -e "cluster_version=${minor_version}"; then
     return 0
   fi
