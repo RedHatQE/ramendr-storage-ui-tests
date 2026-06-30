@@ -53,8 +53,31 @@ The deployment script expects tools similar to the original flow:
 - `podman` — must be **running** when the pattern deploy starts (`pattern.sh` uses a utility container). On macOS, start the VM before a long redeploy or rely on `redeploy.sh` to auto-start it: `podman machine start`
 - `git`
 - `python3`
+- `jq` — used by the golden-image Ansible playbook and several redeploy helpers
+- `ansible-playbook` — runs `scripts/ansible/odf_fix_dataimportcrons.yml` during spoke golden-image fix-up (optional; redeploy falls back to `oc` if this step fails)
 
 You will also need AWS credentials configured for the AWS account used for cluster installs and Route53 operations (the script uses the AWS CLI).
+
+### Ansible golden-image playbook
+
+During redeploy, `redeploy.sh` may run `scripts/ansible/odf_fix_dataimportcrons.yml` **on the host
+machine where you launch redeploy** (`connection: local`, `hosts: localhost`). It uses `oc` with
+spoke `KUBECONFIG` to clean up CNV `dataimportcron` objects when the virtualization default storage
+class differs from the cluster default.
+
+That playbook needs:
+
+- Ansible collection **`kubernetes.core`** — provides the `k8s_info` and `k8s` modules used to list and
+  delete CDI objects
+- Python package **`kubernetes`** — required by those modules at runtime
+
+Install the collection with `ansible-galaxy collection install kubernetes.core`. Install the Python
+package for the **same interpreter Ansible uses for `localhost`** (not necessarily the interpreter
+in an activated virtualenv). If Ansible cannot import `kubernetes`, the playbook logs a warning and
+`redeploy.sh` continues with direct `oc` golden-image cleanup instead.
+
+`requirements.txt` covers UI tests (Playwright/pytest) only; it does **not** install these Ansible
+dependencies.
 
 ## install-config files (examples)
 
