@@ -213,7 +213,8 @@ PRs that fail the checks cannot be merged.
 Default mode is **HammerDB TPC-C on PostgreSQL** (`DR_VALIDATION_MODE=hammerdb`) on
 `rhel9-node-001` (one of two Linux edge VMs). The default fleet is **four VMs** in
 `gitops-vms`: 2 Linux + 1 Windows Server 2022 + 1 Windows Server 2025. Add
-`privatevm-credentials` (Quay robot for `quay.io/martjack/*` images) to
+`privatevm-credentials` (Quay robot for `quay.io/martjack/*` images) and
+`windows-admin` (local Administrator password for Windows SSH verification) to
 `~/values-secret.yaml` before redeploy. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
 builds populated TPC-C tables (customers with IDs, orders, stock, …), verifies recording,
 and saves an initial baseline snapshot to `.work/dr-validation-db/auto/latest`.

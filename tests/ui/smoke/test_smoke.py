@@ -219,7 +219,7 @@ class TestInfraSmoke:
         )
 
     def test_windows_vms_have_minimum_os_disk(self, primary_kubeconfig):
-        """Windows VM OS disks are at least 40 Gi (image may expand larger)."""
+        """Windows VM OS disks are at least 45 Gi (fork chart default)."""
         raw = run_oc(
             [
                 "get",
@@ -231,7 +231,7 @@ class TestInfraSmoke:
             primary_kubeconfig,
         )
         failures: list[str] = []
-        min_gib = 40
+        min_gib = 45
         windows_vms = [
             vm
             for vm in json.loads(raw)["items"]
@@ -288,7 +288,7 @@ class TestInfraSmoke:
           dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. rhel9-node-001-data)
 
         Windows layout (same DR eligibility pattern):
-          dataVolumeTemplates[0] — 40 Gi OS disk (e.g. windows2k22-server-001)
+          dataVolumeTemplates[0] — 45 Gi OS disk (e.g. windows2k22-server-001)
           dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. windows2k22-server-001-data)
 
         The cloud-init disk is ephemeral and is intentionally excluded from

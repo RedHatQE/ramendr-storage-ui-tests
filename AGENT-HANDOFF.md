@@ -5,8 +5,8 @@ This document summarizes decisions and context from prior work so another agent 
 ## What this repository is
 
 - **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to branch **`ocp-4.22`** at commit **`e35c55c3645a3d89414a0915a0f894f3ab75c66b`** (includes merged `windows_vms` work).
-- **Does not** long-term fork upstream. Local changes are **overlays** + **root `values-hub.yaml` replacement** + a small **patch** to upstream `pattern.sh`.
-- **Future:** Playwright + Python UI tests (not implemented yet). **Today:** deployment scripts, overrides, install-config examples.
+- **Does not** long-term fork upstream. Environment customizations (Windows edge VMs, BYOC, ODF pins, cost profiles) live in the **fork** on GitHub; this repo only patches upstream `pattern.sh` locally (non-TTY podman).
+- **Future:** Playwright + Python UI tests (partially implemented). **Today:** deployment scripts, install-config examples, DR validation.
 
 ## Upstream pattern mechanics (high level)
 
@@ -16,19 +16,22 @@ This document summarizes decisions and context from prior work so another agent 
 ## Key entrypoint: `scripts/redeploy.sh`
 
 1. Clones/fetches upstream into `**.work/upstream/ramendr-starter-kit`** (see `.gitignore`; not committed).
-2. Checks out `**UPSTREAM_REF`** (default `e35c55c3645a3d89414a0915a0f894f3ab75c66b` on branch `ocp-4.22`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `WORK_DIR`, `UPSTREAM_DIR`, `UPSTREAM_OVERRIDES_DIR`.
-3. Copies `**overrides/*.yaml`** → upstream `overrides/`.
-4. Copies `**upstream-overrides/values-hub.yaml**` → upstream **root** `values-hub.yaml` when that file exists (fork-style hub: ODF channels `stable-4.20`, regional-dr `extraValueFiles` includes `values-aws-cost-optimized.yaml`, etc.).
-5. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal).
-6. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
-7. Merges spoke kubeconfig paths into `**.work/values-secret.yaml**` (copy of `VALUES_SECRET`) and runs `**./pattern.sh make install-byoc**` from the upstream checkout.
+2. Checks out `**UPSTREAM_REF`** (default `e35c55c3645a3d89414a0915a0f894f3ab75c66b` on branch `ocp-4.22`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `WORK_DIR`, `UPSTREAM_DIR`.
+3. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal) and so Darwin arm64 runs the amd64 utility container under emulation.
+4. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
+5. Merges spoke kubeconfig paths into `**.work/values-secret.yaml**` (copy of `VALUES_SECRET`; source file never modified) and runs `**./pattern.sh make install-byoc**` from the upstream checkout.
+6. Waits for BYOC spoke import (ExternalSecrets + `ManagedCluster` Joined), spoke resilient GitOps / ODF, golden-image fix-up, hub convergence, **Windows VM stabilization** (`REQUIRE_WINDOWS_VMS=1` by default), then DR validation bootstrap.
 
 **Important bug fix:** any edit to upstream `pattern.sh` must run with `cd "$UPSTREAM_DIR"` so the correct file is patched.
 
-## BYOC and overrides
+## BYOC and fork customizations
 
-- `**overrides/values-cluster-names.yaml`**: `byoc: true`, cluster names, regions (`eu-central-1` / `eu-west-1` for spokes), `drpc.preferredCluster`, optional `**costManagement`** placeholders (`<OWNER_TAG>`, etc.) — replace before real runs.
-- `**overrides/values-aws-cost-optimized.yaml**`: currently mostly **comments** documenting that in BYOC, spoke machine types come from `**install-config.yaml.bak`**, not from Hive-driven `install_config` in that overlay. A full overlay with `clusterOverrides.install_config` can be useful for non-BYOC or for `costManagement`; merging that blindly can confuse operators who expect values to provision spokes.
+Customizations are **not** copied from this repo into the upstream checkout. They live in the fork (`elsapassaro/ramendr-starter-kit`, branch `ocp-4.22`) under `overrides/` and values files; **hub Argo CD** reconciles from that remote branch.
+
+- **`byoc: true`** — set in fork `overrides/values-cluster-names.yaml`; spokes are pre-provisioned with `openshift-install`.
+- **`values-secret.yaml`** — user file (default `~/values-secret.yaml`); redeploy copies to `.work/values-secret.yaml` and merges fresh spoke kubeconfig paths before `install-byoc`.
+- **Windows private images** — fork `externalDataSources` (e.g. `windows2k22`, `windows2k25`); requires `privatevm-credentials` (Quay robot) in `values-secret` for CDI registry import.
+- **Mixed `gitops-vms` fleet** — 2× RHEL + 1× Windows Server 2022 + 1× Windows Server 2025 (DR-protected namespace).
 
 ## Install-config examples
 
@@ -60,10 +63,10 @@ This document summarizes decisions and context from prior work so another agent 
 ## Files to read first
 
 
-| File                                 | Purpose                                                                 |
-| ------------------------------------ | ----------------------------------------------------------------------- |
-| `README.md`                          | User-facing overview, install-config copy commands, fork parity section |
-| `CLAUDE.md`                          | Security + deployment contract                                          |
-| `scripts/redeploy.sh`                | Full orchestration                                                      |
-| `upstream-overrides/values-hub.yaml` | Fork-style hub vs upstream v1.1                                         |
-| `overrides/`                         | BYOC + DR/console/ODF tuning                                            |
+| File                          | Purpose                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `README.md`                   | User-facing overview, install-config, fork pinning   |
+| `CLAUDE.md`                   | Security + deployment contract, mixed fleet          |
+| `scripts/redeploy.sh`         | Full orchestration                                   |
+| `scripts/stabilize-windows-vms.sh` | Windows VM wait, stabilize, OpenSSH ensure      |
+| `install-config-examples/`    | Example `install-config.yaml.bak` templates          |

@@ -51,6 +51,9 @@ SECONDARY_REGION="${SECONDARY_REGION:-eu-west-1}"
 # to avoid ODF Multicluster Orchestrator incompatibilities.
 HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.22.1}"
 
+# Windows edge VMs are part of the protected gitops-vms fleet; fail redeploy if stabilize/OpenSSH fails.
+: "${REQUIRE_WINDOWS_VMS:=1}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -661,7 +664,7 @@ stabilize_windows_edge_vms() {
   local script="$REPO_ROOT/scripts/stabilize-windows-vms.sh"
   if [[ ! -x "$script" ]]; then
     warn "Windows VM stabilization script not found: $script"
-    if [[ "${REQUIRE_WINDOWS_VMS:-0}" == "1" ]]; then
+    if [[ "${REQUIRE_WINDOWS_VMS}" == "1" ]]; then
       return 1
     fi
     return 0
@@ -670,9 +673,10 @@ stabilize_windows_edge_vms() {
   if ! HUB_INSTALL_DIR="$HUB_INSTALL_DIR" \
     PRIMARY_INSTALL_DIR="$PRIMARY_INSTALL_DIR" \
     SECONDARY_INSTALL_DIR="$SECONDARY_INSTALL_DIR" \
+    REQUIRE_WINDOWS_VMS="$REQUIRE_WINDOWS_VMS" \
     "$script"; then
     warn "Windows VM stabilization failed (HammerDB bootstrap may still proceed on Linux VMs)."
-    if [[ "${REQUIRE_WINDOWS_VMS:-0}" == "1" ]]; then
+    if [[ "${REQUIRE_WINDOWS_VMS}" == "1" ]]; then
       return 1
     fi
   fi
@@ -915,12 +919,18 @@ case "${1:-}" in
     echo " DR_VALIDATION_HAMMERDB_VM  Edge VM name for PostgreSQL workload (default rhel9-node-001)"
     echo " SKIP_DR_VALIDATION    Set to 1 to skip automatic DR validation bootstrap and snapshots"
     echo " SKIP_DR_VALIDATION_SNAPSHOTS  Set to 1 to skip only the 5-min snapshot daemon"
+    echo " REQUIRE_WINDOWS_VMS   Fail redeploy if Windows stabilize/OpenSSH fails (default 1; set 0 to warn only)"
+    echo " SKIP_WINDOWS_VM_STABILIZE  Set to 1 to skip stabilize-windows-vms.sh entirely"
     echo " DR_VALIDATION_BOOTSTRAP_RETRIES  Automatic bootstrap retries during redeploy (default 6)"
     echo " DR_VALIDATION_BOOTSTRAP_RETRY_SLEEP Seconds between bootstrap retries (default 120)"
     echo " SPOKE_RESILIENT_GITOPS_WAIT_ATTEMPTS  Wait for spoke vp-gitops parent app (default 60)"
     echo " SPOKE_RESILIENT_GITOPS_WAIT_SLEEP     Seconds between spoke GitOps polls (default 60)"
     echo " WINDOWS_VM_APPEAR_WAIT_TRIES          Wait for gitops-vms Windows VMs before stabilize (default 60)"
     echo " WINDOWS_VM_APPEAR_WAIT_SLEEP          Seconds between Windows VM appear polls (default 30)"
+    echo " WINDOWS_SSH_WAIT_TRIES                Wait for Windows SSH reachability, all VMs (default 120)"
+    echo " WINDOWS_SSH_WAIT_SLEEP                  Seconds between SSH verify polls (default 10)"
+    echo " WINDOWS_SSH_USER                      Windows SSH user (default Administrator)"
+    echo " WINDOWS_SSH_PASSWORD                  Override windows-admin password from VALUES_SECRET"
     echo " WINDOWS_VM_DV_WAIT_TRIES              Wait for Windows OS DataVolume clone/import (default 180)"
     echo " WINDOWS_VM_STABILIZE_WAIT_TRIES       Wait for Running/ready after restart (default 40)"
     echo " SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS    Wait for vp-gitops + AppProject/default per spoke (default 40)"

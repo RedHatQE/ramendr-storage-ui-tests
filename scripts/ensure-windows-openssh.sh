@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Ensure OpenSSH is reachable on Windows edge VMs (sshd running + inbound firewall on all profiles).
+# Verify OpenSSH on Windows edge VMs (pre-configured on martjack golden images).
 #
-# The Win2025 container image (quay.io/martjack/windows-server-2025-standard) ships sshd but
-# often lacks the "OpenSSH SSH Server (sshd)" firewall rule on Profile=Any after DR restore.
-# Win2022 image includes that rule; without it masquerade/Pod traffic is blocked when the
-# NIC is classified as Public.
+# Uses virtctl ssh (KubeVirt port-forward) + optional login via windows-admin secret.
+# Runs from the host that has kubeconfig + virtctl; no in-cluster probe pod required.
 set -euo pipefail
 
 VM_NAMESPACE="${VM_NAMESPACE:-gitops-vms}"
 WINDOWS_VM_PATTERN="${WINDOWS_VM_PATTERN:-windows}"
 PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
 SECONDARY_INSTALL_DIR="${SECONDARY_INSTALL_DIR:-$HOME/git/ocp-secondary-install}"
-AGENT_WAIT_TRIES="${WINDOWS_OPENSSH_AGENT_WAIT_TRIES:-60}"
-AGENT_WAIT_SLEEP="${WINDOWS_OPENSSH_AGENT_WAIT_SLEEP:-10}"
-GUEST_EXEC_STATUS_TRIES="${WINDOWS_OPENSSH_GUEST_EXEC_STATUS_TRIES:-180}"
-GUEST_EXEC_STATUS_SLEEP="${WINDOWS_OPENSSH_GUEST_EXEC_STATUS_SLEEP:-2}"
+WINDOWS_SSH_USER="${WINDOWS_SSH_USER:-Administrator}"
+VALUES_SECRET="${VALUES_SECRET:-$HOME/values-secret.yaml}"
+SSH_WAIT_TRIES="${WINDOWS_SSH_WAIT_TRIES:-${WINDOWS_OPENSSH_AGENT_WAIT_TRIES:-120}}"
+SSH_WAIT_SLEEP="${WINDOWS_SSH_WAIT_SLEEP:-${WINDOWS_OPENSSH_AGENT_WAIT_SLEEP:-10}}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -25,26 +23,58 @@ log() { echo -e "${GREEN}[windows-openssh]${NC} $*"; }
 warn() { echo -e "${YELLOW}[windows-openssh] WARNING:${NC} $*"; }
 err() { echo -e "${RED}[windows-openssh] ERROR:${NC} $*" >&2; }
 
-# Idempotent guest-side fix (PowerShell, UTF-16LE for -EncodedCommand).
-read -r -d '' OPENSSH_PS <<'PS' || true
-$ErrorActionPreference = 'Stop'
-if (-not (Get-WindowsCapability -Online | Where-Object { $_.Name -eq 'OpenSSH.Server~~~~0.0.1.0' -and $_.State -eq 'Installed' })) {
-  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+require_tools() {
+  if ! command -v virtctl >/dev/null 2>&1; then
+    err "virtctl not found in PATH (required for SSH verification)."
+    return 1
+  fi
+  if [[ "${1:-0}" -eq 1 ]] && ! command -v sshpass >/dev/null 2>&1; then
+    err "sshpass not found in PATH (required for password login check)."
+    return 1
+  fi
 }
-if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
-  & 'C:\Program Files\OpenSSH\install-sshd.ps1' | Out-Null
+
+load_windows_ssh_password() {
+  if [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  [[ -f "$VALUES_SECRET" ]] || return 1
+  WINDOWS_SSH_PASSWORD=$(python3 - "$VALUES_SECRET" <<'PY'
+import re, sys
+
+text = open(sys.argv[1]).read()
+
+# Flat form: windows-admin:\n  password: Redhat123!
+m = re.search(
+    r"windows-admin:\s*(?:#.*\n)*\s*password:\s*['\"]?([^'\"#\s]+)",
+    text,
+    re.MULTILINE,
+)
+if m:
+    print(m.group(1))
+    raise SystemExit(0)
+
+# Fork values-secret v2 list form:
+# - fields:
+#   - name: password
+#     value: Redhat123!
+#   name: windows-admin
+for item in re.finditer(
+    r"- fields:(.*?)(?=\n- fields:|\nversion:|\Z)", text, re.DOTALL
+):
+    chunk = item.group(1)
+    if not re.search(r"^\s*name:\s*windows-admin\s*$", chunk, re.MULTILINE):
+        continue
+    m = re.search(
+        r"name:\s*password\s*\n\s*value:\s*['\"]?([^'\"#\n]+)", chunk
+    )
+    if m:
+        print(m.group(1))
+        raise SystemExit(0)
+PY
+)
+  [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]]
 }
-Set-Service sshd -StartupType Automatic
-if ((Get-Service sshd).Status -ne 'Running') { Start-Service sshd }
-if (-not (Get-NetFirewallRule -DisplayName 'OpenSSH SSH Server (sshd)' -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -Name OpenSSH-Server-In-TCP -DisplayName 'OpenSSH SSH Server (sshd)' `
-    -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
-}
-Set-NetFirewallRule -DisplayName 'OpenSSH SSH Server (sshd)' -Profile Any -Enabled True
-$rule = Get-NetFirewallRule -DisplayName 'OpenSSH SSH Server (sshd)' | Select-Object Enabled, Profile
-$svc = Get-Service sshd | Select-Object Status, StartType
-@{ service = $svc; firewall = $rule } | ConvertTo-Json -Compress
-PS
 
 list_windows_vms() {
   KUBECONFIG="$1" oc get vm -n "$VM_NAMESPACE" --no-headers \
@@ -52,98 +82,44 @@ list_windows_vms() {
     | awk -v pat="$WINDOWS_VM_PATTERN" '$0 ~ pat { print $1 }' | sort
 }
 
-virt_launcher_pod() {
+virtctl_ssh_common_opts() {
+  printf '%s\n' \
+    --local-ssh-opts "-o StrictHostKeyChecking=no" \
+    --local-ssh-opts "-o UserKnownHostsFile=/dev/null" \
+    --local-ssh-opts "-o ConnectTimeout=15"
+}
+
+probe_ssh_login() {
   local kubeconfig="$1" vm="$2"
-  KUBECONFIG="$kubeconfig" oc get pods -n "$VM_NAMESPACE" \
-    -l "kubevirt.io/domain=${vm}" --field-selector=status.phase=Running \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+  mapfile -t opts < <(virtctl_ssh_common_opts)
+  KUBECONFIG="$kubeconfig" SSHPASS="$WINDOWS_SSH_PASSWORD" sshpass -e \
+    virtctl ssh "${WINDOWS_SSH_USER}@vm/${vm}" -n "$VM_NAMESPACE" \
+    -c hostname "${opts[@]}" \
+    --local-ssh-opts "-o PreferredAuthentications=password" \
+    --local-ssh-opts "-o PubkeyAuthentication=no" \
+    >/dev/null 2>&1
 }
 
-libvirt_domain() {
-  local kubeconfig="$1" pod="$2"
-  KUBECONFIG="$kubeconfig" oc exec -n "$VM_NAMESPACE" "$pod" -c compute -- \
-    virsh list --name 2>/dev/null | head -1
+probe_ssh_tcp() {
+  local kubeconfig="$1" vm="$2" out=""
+  mapfile -t opts < <(virtctl_ssh_common_opts)
+  out=$(KUBECONFIG="$kubeconfig" virtctl ssh "${WINDOWS_SSH_USER}@vm/${vm}" -n "$VM_NAMESPACE" \
+    -c hostname "${opts[@]}" \
+    --local-ssh-opts "-o BatchMode=yes" 2>&1) || true
+  # BatchMode always fails auth; reaching sshd returns "Permission denied".
+  [[ "$out" == *"Permission denied"* ]]
 }
 
-guest_powershell() {
-  local kubeconfig="$1" pod="$2" domain="$3" ps="$4"
-  local arg_json b64 out pid status_json
-  b64=$(printf '%s' "$ps" | base64 -w0)
-  arg_json=$(python3 - "$b64" <<'PY'
-import base64, json, sys
-ps = base64.b64decode(sys.argv[1]).decode()
-print(json.dumps([
-    "-NoProfile",
-    "-EncodedCommand",
-    base64.b64encode(ps.encode("utf-16-le")).decode(),
-]))
-PY
-)
-  out=$(KUBECONFIG="$kubeconfig" oc exec -n "$VM_NAMESPACE" "$pod" -c compute -- \
-    virsh qemu-agent-command "$domain" \
-    "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"powershell.exe\",\"arg\":${arg_json},\"capture-output\":true}}" \
-    2>/dev/null) || return 1
-  pid=$(printf '%s' "$out" | python3 -c "import sys,json; print(json.load(sys.stdin)['return']['pid'])")
-  for _ in $(seq 1 "$GUEST_EXEC_STATUS_TRIES"); do
-    sleep "$GUEST_EXEC_STATUS_SLEEP"
-    status_json=$(KUBECONFIG="$kubeconfig" oc exec -n "$VM_NAMESPACE" "$pod" -c compute -- \
-      virsh qemu-agent-command "$domain" \
-      "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":${pid}}}" 2>/dev/null) || continue
-    printf '%s' "$status_json" | python3 -c "
-import base64, json, sys
-data = json.load(sys.stdin)
-ret = data.get('return', {})
-if not ret.get('exited'):
-    sys.exit(2)
-out = base64.b64decode(ret.get('out-data') or b'').decode(errors='replace').strip()
-err = base64.b64decode(ret.get('err-data') or b'').decode(errors='replace').strip()
-if out:
-    print(out)
-if err and 'CLIXML' not in err:
-    print(err, file=sys.stderr)
-sys.exit(0 if ret.get('exitcode') == 0 else 1)
-" && return 0
-  done
-  warn "guest PowerShell command did not finish within $((GUEST_EXEC_STATUS_TRIES * GUEST_EXEC_STATUS_SLEEP))s"
-  return 1
-}
-
-wait_for_guest_agent() {
-  local kubeconfig="$1" vm="$2"
-  local tries=0 agent
-  while [[ $tries -lt $AGENT_WAIT_TRIES ]]; do
-    agent=$(KUBECONFIG="$kubeconfig" oc get vmi "$vm" -n "$VM_NAMESPACE" \
-      -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' 2>/dev/null || true)
-    if [[ "$agent" == "True" ]]; then
-      return 0
-    fi
-    log "  ${vm}: waiting for qemu guest agent (attempt $((tries + 1))/${AGENT_WAIT_TRIES})..."
-    sleep "$AGENT_WAIT_SLEEP"
-    tries=$((tries + 1))
-  done
-  warn "  ${vm}: qemu guest agent not connected after $((AGENT_WAIT_TRIES * AGENT_WAIT_SLEEP))s — skipping OpenSSH ensure"
-  return 1
-}
-
-ensure_vm_openssh() {
-  local kubeconfig="$1" vm="$2"
-  local pod domain
-  if ! wait_for_guest_agent "$kubeconfig" "$vm"; then
-    return 1
+probe_ssh() {
+  local kubeconfig="$1" vm="$2" use_auth="$3"
+  if [[ "$use_auth" -eq 1 ]]; then
+    probe_ssh_login "$kubeconfig" "$vm"
+  else
+    probe_ssh_tcp "$kubeconfig" "$vm"
   fi
-  pod="$(virt_launcher_pod "$kubeconfig" "$vm")"
-  [[ -n "$pod" ]] || { warn "  ${vm}: no running virt-launcher pod"; return 1; }
-  domain="$(libvirt_domain "$kubeconfig" "$pod")"
-  [[ -n "$domain" ]] || { warn "  ${vm}: libvirt domain not found"; return 1; }
-  log "  ${vm}: ensuring sshd + firewall (domain=${domain})..."
-  if ! guest_powershell "$kubeconfig" "$pod" "$domain" "$OPENSSH_PS"; then
-    err "  ${vm}: guest OpenSSH ensure failed"
-    return 1
-  fi
-  return 0
 }
 
-ensure_on_spoke() {
+verify_on_spoke() {
   local kubeconfig="$1" cluster="$2"
   [[ -f "$kubeconfig" ]] || return 0
   mapfile -t vms < <(list_windows_vms "$kubeconfig")
@@ -151,11 +127,47 @@ ensure_on_spoke() {
     log "No Windows VMs on ${cluster}."
     return 0
   fi
-  log "Ensuring OpenSSH on ${#vms[@]} Windows VM(s) on ${cluster}..."
-  local failed=0 vm
-  for vm in "${vms[@]}"; do
-    ensure_vm_openssh "$kubeconfig" "$vm" || failed=1
+
+  local use_auth=0 failed=0
+  if load_windows_ssh_password; then
+    use_auth=1
+    log "Verifying SSH on ${#vms[@]} Windows VM(s) on ${cluster} (user=${WINDOWS_SSH_USER}, virtctl login check)..."
+  else
+    warn "windows-admin password not found in VALUES_SECRET — TCP-only check via virtctl ssh."
+    log "Verifying SSH on ${#vms[@]} Windows VM(s) on ${cluster} (virtctl port 22 only)..."
+  fi
+  require_tools "$use_auth" || return 1
+
+  local -a pending=("${vms[@]}")
+  local tries=0 max_wait=$((SSH_WAIT_TRIES * SSH_WAIT_SLEEP))
+  log "Waiting up to ${max_wait}s for OpenSSH on: ${vms[*]}"
+  while [[ ${#pending[@]} -gt 0 && tries -lt SSH_WAIT_TRIES ]]; do
+    local -a still=()
+    local vm
+    for vm in "${pending[@]}"; do
+      if probe_ssh "$kubeconfig" "$vm" "$use_auth"; then
+        if [[ "$use_auth" -eq 1 ]]; then
+          log "  ${vm}: SSH login OK (${WINDOWS_SSH_USER}@vm/${vm})"
+        else
+          log "  ${vm}: SSH port reachable (virtctl)"
+        fi
+        continue
+      fi
+      still+=("$vm")
+    done
+    pending=("${still[@]}")
+    [[ ${#pending[@]} -eq 0 ]] && break
+    log "  still waiting (${#pending[@]} VM(s)): ${pending[*]} — attempt $((tries + 1))/${SSH_WAIT_TRIES}..."
+    sleep "$SSH_WAIT_SLEEP"
+    tries=$((tries + 1))
   done
+
+  if [[ ${#pending[@]} -gt 0 ]]; then
+    for vm in "${pending[@]}"; do
+      warn "  ${vm}: OpenSSH not reachable after ${max_wait}s"
+    done
+    failed=1
+  fi
   return "$failed"
 }
 
@@ -165,13 +177,13 @@ main() {
     return 0
   fi
   local failed=0
-  ensure_on_spoke "${PRIMARY_INSTALL_DIR}/auth/kubeconfig" ocp-primary || failed=1
-  ensure_on_spoke "${SECONDARY_INSTALL_DIR}/auth/kubeconfig" ocp-secondary || failed=1
+  verify_on_spoke "${PRIMARY_INSTALL_DIR}/auth/kubeconfig" ocp-primary || failed=1
+  verify_on_spoke "${SECONDARY_INSTALL_DIR}/auth/kubeconfig" ocp-secondary || failed=1
   if [[ "$failed" -ne 0 ]]; then
-    err "OpenSSH ensure failed on one or more Windows VMs."
+    err "Windows SSH verification failed on one or more VMs."
     return 1
   fi
-  log "Windows OpenSSH ensure complete."
+  log "Windows SSH verification complete."
 }
 
 main "$@"
