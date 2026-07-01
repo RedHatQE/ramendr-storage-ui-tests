@@ -14,6 +14,11 @@ WINDOWS_SSH_USER="${WINDOWS_SSH_USER:-Administrator}"
 VALUES_SECRET="${VALUES_SECRET:-$HOME/values-secret.yaml}"
 SSH_WAIT_TRIES="${WINDOWS_SSH_WAIT_TRIES:-${WINDOWS_OPENSSH_AGENT_WAIT_TRIES:-120}}"
 SSH_WAIT_SLEEP="${WINDOWS_SSH_WAIT_SLEEP:-${WINDOWS_OPENSSH_AGENT_WAIT_SLEEP:-10}}"
+# When virtctl SSH fails but guest sshd is running, fix Windows firewall via qemu-guest-agent.
+WINDOWS_SSH_GUEST_AGENT_FIX="${WINDOWS_SSH_GUEST_AGENT_FIX:-1}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GUEST_EXEC_PY="${SCRIPT_DIR}/lib/windows-guest-exec.py"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -45,7 +50,7 @@ import re, sys
 
 text = open(sys.argv[1]).read()
 
-# Flat form: windows-admin:\n  password: Redhat123!
+# Flat form: windows-admin:\n  password: <redacted-password>
 m = re.search(
     r"windows-admin:\s*(?:#.*\n)*\s*password:\s*['\"]?([^'\"#\s]+)",
     text,
@@ -59,7 +64,7 @@ if m:
 # - name: windows-admin
 #   fields:
 #   - name: password
-#     value: Redhat123!
+#     value: <redacted-password>
 for item in re.finditer(
     r"^- (?:fields:|name:)[^\n]*(?:\n(?!^- ).*?)*?(?=^- |\nversion:|\Z)",
     text,
@@ -122,6 +127,27 @@ probe_ssh() {
   fi
 }
 
+try_guest_agent_ssh_firewall_fix() {
+  local kubeconfig="$1" vm="$2" rc=0 out=""
+  [[ "${WINDOWS_SSH_GUEST_AGENT_FIX:-1}" == "1" ]] || return 2
+  [[ -f "$GUEST_EXEC_PY" ]] || return 2
+  set +e
+  out=$(python3 "$GUEST_EXEC_PY" remediate-firewall \
+      --kubeconfig "$kubeconfig" --namespace "$VM_NAMESPACE" --vm "$vm" 2>&1)
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    log "  ${vm}: guest-agent OpenSSH firewall remediation applied."
+    [[ -n "$out" ]] && while IFS= read -r line; do log "    ${line}"; done <<< "$out"
+    return 0
+  fi
+  if [[ "$rc" -eq 2 ]]; then
+    return 2
+  fi
+  warn "  ${vm}: guest-agent remediation failed (${out:-no detail})."
+  return 1
+}
+
 verify_on_spoke() {
   local kubeconfig="$1" cluster="$2"
   if [[ ! -f "$kubeconfig" ]]; then
@@ -149,6 +175,7 @@ verify_on_spoke() {
   require_tools "$use_auth" || return 1
 
   local -a pending=("${vms[@]}")
+  local -a remediated=()
   local tries=0 max_wait=$((SSH_WAIT_TRIES * SSH_WAIT_SLEEP))
   log "Waiting up to ${max_wait}s for OpenSSH on: ${vms[*]}"
   while [[ ${#pending[@]} -gt 0 && tries -lt SSH_WAIT_TRIES ]]; do
@@ -162,6 +189,23 @@ verify_on_spoke() {
           log "  ${vm}: SSH port reachable (virtctl)"
         fi
         continue
+      fi
+      local fixed=0 r fix_rc=0
+      for r in "${remediated[@]:-}"; do [[ "$r" == "$vm" ]] && fixed=1 && break; done
+      if [[ "$fixed" -eq 0 ]]; then
+        try_guest_agent_ssh_firewall_fix "$kubeconfig" "$vm"
+        fix_rc=$?
+        if [[ "$fix_rc" -eq 0 || "$fix_rc" -eq 1 ]]; then
+          remediated+=("$vm")
+        fi
+        if [[ "$fix_rc" -eq 0 ]] && probe_ssh "$kubeconfig" "$vm" "$use_auth"; then
+          if [[ "$use_auth" -eq 1 ]]; then
+            log "  ${vm}: SSH login OK after firewall remediation"
+          else
+            log "  ${vm}: SSH port reachable after firewall remediation"
+          fi
+          continue
+        fi
       fi
       still+=("$vm")
     done

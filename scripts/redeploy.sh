@@ -931,6 +931,7 @@ case "${1:-}" in
     echo " WINDOWS_SSH_WAIT_SLEEP                  Seconds between SSH verify polls (default 10)"
     echo " WINDOWS_SSH_USER                      Windows SSH user (default Administrator)"
     echo " WINDOWS_SSH_PASSWORD                  Override windows-admin password from VALUES_SECRET"
+    echo " WINDOWS_SSH_GUEST_AGENT_FIX           Fix Windows OpenSSH firewall via guest agent (default 1)"
     echo " WINDOWS_VM_DV_WAIT_TRIES              Wait for Windows OS DataVolume clone/import (default 180)"
     echo " WINDOWS_VM_STABILIZE_WAIT_TRIES       Wait for Running/ready after restart (default 40)"
     echo " SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS    Wait for vp-gitops + AppProject/default per spoke (default 40)"
