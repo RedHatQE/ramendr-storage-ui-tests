@@ -215,8 +215,9 @@ main() {
   fi
 
   log "Checking ${#windows_vms[@]} Windows VM(s) on ${primary} (keeping evictionStrategy: LiveMigrate)..."
-  local failed=0 vm
+  local failed=0 vm os_dv_just_ready
   for vm in "${windows_vms[@]}"; do
+    os_dv_just_ready=0
     if vm_awaiting_os_disk "$spoke_kc" "$vm"; then
       log "  ${vm}: OS disk still provisioning — waiting for DataVolume (no restart)..."
       if ! wait_vm_os_dv "$spoke_kc" "$vm"; then
@@ -224,6 +225,19 @@ main() {
         failed=1
         continue
       fi
+      os_dv_just_ready=1
+    fi
+
+    # A VM can stay Running/ready in KubeVirt while its OS disk is re-cloned; guest
+    # services (OpenSSH, qemu-guest-agent) only come up after a reboot onto the new disk.
+    if [[ "$os_dv_just_ready" -eq 1 ]]; then
+      log "Restarting ${vm} after OS disk clone (reboot required for guest services)..."
+      restart_vm "$spoke_kc" "$vm"
+      if ! wait_vm_running "$spoke_kc" "$vm"; then
+        err "${vm} did not reach Running/ready after post-clone restart."
+        failed=1
+      fi
+      continue
     fi
 
     if vm_is_healthy "$spoke_kc" "$vm"; then
