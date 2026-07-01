@@ -50,6 +50,10 @@ prepare_byoc_values_secret() {
 
   mkdir -p "$(dirname "$dest_secret")"
   cp "$source_secret" "$dest_secret"
+  chmod 600 "$dest_secret" || {
+    _byoc_ks_err "Failed to set restrictive permissions on $dest_secret"
+    return 1
+  }
 
   _byoc_ks_log "Merging spoke kubeconfig paths into $dest_secret (source: $source_secret)..."
 
@@ -96,7 +100,6 @@ with open(out_path, "w", encoding="utf-8") as fh:
     yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
 PY
 
-  chmod 600 "$dest_secret" 2>/dev/null || true
   BYOC_VALUES_SECRET="$dest_secret"
   export BYOC_VALUES_SECRET
   _byoc_ks_log "BYOC values-secret ready at $BYOC_VALUES_SECRET"

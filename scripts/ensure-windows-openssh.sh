@@ -6,6 +6,7 @@
 set -euo pipefail
 
 VM_NAMESPACE="${VM_NAMESPACE:-gitops-vms}"
+REQUIRE_WINDOWS_VMS="${REQUIRE_WINDOWS_VMS:-1}"
 WINDOWS_VM_PATTERN="${WINDOWS_VM_PATTERN:-windows}"
 PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
 SECONDARY_INSTALL_DIR="${SECONDARY_INSTALL_DIR:-$HOME/git/ocp-secondary-install}"
@@ -54,19 +55,21 @@ if m:
     print(m.group(1))
     raise SystemExit(0)
 
-# Fork values-secret v2 list form:
-# - fields:
+# Fork values-secret v2 list form (name/fields order may vary):
+# - name: windows-admin
+#   fields:
 #   - name: password
 #     value: Redhat123!
-#   name: windows-admin
 for item in re.finditer(
-    r"- fields:(.*?)(?=\n- fields:|\nversion:|\Z)", text, re.DOTALL
+    r"^- (?:fields:|name:)[^\n]*(?:\n(?!^- ).*?)*?(?=^- |\nversion:|\Z)",
+    text,
+    re.DOTALL | re.MULTILINE,
 ):
-    chunk = item.group(1)
-    if not re.search(r"^\s*name:\s*windows-admin\s*$", chunk, re.MULTILINE):
+    chunk = item.group(0)
+    if not re.search(r"name:\s*windows-admin\s*$", chunk, re.MULTILINE):
         continue
     m = re.search(
-        r"name:\s*password\s*\n\s*value:\s*['\"]?([^'\"#\n]+)", chunk
+        r"- name:\s*password\s*\n\s*value:\s*['\"]?([^'\"#\n]+)", chunk
     )
     if m:
         print(m.group(1))
@@ -121,7 +124,14 @@ probe_ssh() {
 
 verify_on_spoke() {
   local kubeconfig="$1" cluster="$2"
-  [[ -f "$kubeconfig" ]] || return 0
+  if [[ ! -f "$kubeconfig" ]]; then
+    if [[ "$REQUIRE_WINDOWS_VMS" == "1" ]]; then
+      err "Kubeconfig not found for ${cluster}: ${kubeconfig}"
+      return 1
+    fi
+    warn "Kubeconfig not found for ${cluster}: ${kubeconfig}; skipping Windows SSH verification."
+    return 0
+  fi
   mapfile -t vms < <(list_windows_vms "$kubeconfig")
   if [[ ${#vms[@]} -eq 0 ]]; then
     log "No Windows VMs on ${cluster}."

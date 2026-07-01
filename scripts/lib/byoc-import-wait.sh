@@ -84,7 +84,10 @@ wait_for_byoc_spoke_import() {
   local cluster failed=0
   _byoc_wait_log "Waiting for BYOC spoke import via ExternalSecrets (clusters: ${SPOKE_CLUSTERS})..."
   for cluster in $SPOKE_CLUSTERS; do
-    wait_for_spoke_namespace "$cluster" || failed=1
+    if ! wait_for_spoke_namespace "$cluster"; then
+      failed=1
+      continue
+    fi
     wait_for_eso_secret "$cluster" "auto-import-secret" || failed=1
     wait_for_eso_secret "$cluster" "admin-kubeconfig" || failed=1
     wait_for_managedcluster_joined "$cluster" || failed=1

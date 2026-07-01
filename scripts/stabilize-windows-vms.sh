@@ -256,7 +256,7 @@ main() {
   local ensure_script="${REPO_ROOT}/scripts/ensure-windows-openssh.sh"
   if [[ -x "$ensure_script" ]]; then
     log "Ensuring Windows SSH reachability (images ship OpenSSH pre-configured)..."
-    if ! "$ensure_script"; then
+    if ! REQUIRE_WINDOWS_VMS="${REQUIRE_WINDOWS_VMS:-1}" "$ensure_script"; then
       err "OpenSSH ensure failed; sanity SSH probe may fail until fixed."
       return 1
     fi
