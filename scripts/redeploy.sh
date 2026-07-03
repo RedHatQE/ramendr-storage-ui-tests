@@ -24,10 +24,10 @@ source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-e35c55c3645a3d89414a0915a0f894f3ab75c66b}"  # ocp-4.22 (includes merged windows_vms)
+UPSTREAM_REF="${UPSTREAM_REF:-faff838dad84e3ef2909ef9cbc12f81b3a1099e5}"  # add_pvc_disk (Linux DV + PVC comparison)
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-add_pvc_disk}"
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
