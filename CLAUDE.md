@@ -21,12 +21,12 @@ The entrypoint is `scripts/redeploy.sh`.
 
 - **Local checkout** (`pattern.sh`, utility container): cloned into
   `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`
-  (default `e35c55c3645a3d89414a0915a0f894f3ab75c66b` on branch `ocp-4.22`).
+  (default `7d24917bae80392615ed4877773260a7221d8d1a` on branch `ocp-4.22`).
   Override with `UPSTREAM_REPO` / `UPSTREAM_REF`.
 - **Hub Argo CD** (ongoing GitOps sync): reads values from the fork on GitHub at
   branch `ocp-4.22` (branch tip unless Applications pin a specific revision).
 
-Customizations (Windows edge VMs, additionalDisks, chartVersion, byoc cluster names, ODF channel pins,
+Customizations (Windows edge VMs, additionalPvcDisks, byoc cluster names, ODF channel pins,
 cost-optimized values) live in the fork's `ocp-4.22` branch under `overrides/` and
 values files. Local edits next to the checkout do not affect Argo CD.
 
@@ -37,7 +37,7 @@ values files. Local edits next to the checkout do not affect Argo CD.
 
 **Mixed edge VM fleet (`gitops-vms`):**
 
-- 2× RHEL (`rhel9-node-*`) — HammerDB / DR validation target on Linux
+- 2× RHEL — `rhel9-node-*` (DataVolume data disk) + `rhel9-node-pvc-*` (PVC data disk); HammerDB on `rhel9-node-001`
 - 1× Windows Server 2022 (`windows2k22-server-*`) + 1× Windows Server 2025 (`windows2k25-server-*`)
 - Windows OS disks clone from fork `externalDataSources`; registry import requires
   **`privatevm-credentials`** (Quay robot account) in `values-secret.yaml`

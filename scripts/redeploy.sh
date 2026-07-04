@@ -24,10 +24,10 @@ source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-faff838dad84e3ef2909ef9cbc12f81b3a1099e5}"  # add_pvc_disk (Linux DV + PVC comparison)
+UPSTREAM_REF="${UPSTREAM_REF:-7d24917bae80392615ed4877773260a7221d8d1a}"  # ocp-4.22 (merged add_pvc_disk)
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-add_pvc_disk}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
@@ -596,12 +596,6 @@ deploy_pattern() {
   ensure_resilient_spoke_gitops || warn "[placement] resilient-placement did not converge; spoke ODF may be delayed."
   prepare_spoke_argo_appprojects_on_all_spokes || true
   recover_all_spoke_resilient_apps || true
-
-  log "Force-refreshing kubeconfig ExternalSecrets..."
-  for cluster in ocp-primary ocp-secondary; do
-    oc annotate externalsecret -n "$cluster" --all \
-      force-sync="$(date +%s)" --overwrite 2>/dev/null || true
-  done
 }
 
 

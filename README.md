@@ -5,7 +5,7 @@ It deploys from a maintained fork of the upstream starter kit —
 [elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22`) —
 which carries all environment-specific customizations (Windows edge VMs, additional VM disks, BYOC cluster names,
 ODF channel pins, cost-optimized instance profiles). **`redeploy.sh` pins a fixed commit SHA**
-for the local pattern install; **hub Argo CD** reconciles from the fork's `ocp-4.22` branch on GitHub
+for the local pattern install; **hub Argo CD** reconciles from the fork's remote branch on GitHub
 (see [Upstream pinning](#upstream-pinning) below).
 
 It contains:
@@ -18,7 +18,7 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `e35c55c3645a3d89414a0915a0f894f3ab75c66b` from the `ocp-4.22` branch into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `7d24917bae80392615ed4877773260a7221d8d1a` from the `ocp-4.22` branch into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
 4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
@@ -31,7 +31,7 @@ It contains:
 > contain stale paths from a previous deploy — `redeploy.sh` always refreshes them in
 > `.work/values-secret.yaml` (gitignored) before `install-byoc`. Your source file is never modified.
 
-> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `ocp-4.22`) — local copies placed next to the checkout are invisible to it. Windows VM chart values and the 4.22 baseline both live on that branch.
+> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository — local copies placed next to the checkout are invisible to it. Both `redeploy.sh` and hub Applications should track fork branch `ocp-4.22` so GitOps matches the local pin.
 
 ### Upstream pinning
 
@@ -39,7 +39,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `e35c55c3645a3d89414a0915a0f894f3ab75c66b` (on branch `ocp-4.22`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `7d24917bae80392615ed4877773260a7221d8d1a` (on branch `ocp-4.22`) |
 | Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22` (tip unless an Application pins `targetRevision`) |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running

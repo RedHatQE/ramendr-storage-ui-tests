@@ -4,7 +4,7 @@ This document summarizes decisions and context from prior work so another agent 
 
 ## What this repository is
 
-- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to branch **`ocp-4.22`** at commit **`e35c55c3645a3d89414a0915a0f894f3ab75c66b`** (includes merged `windows_vms` work).
+- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to branch **`ocp-4.22`** at commit **`7d24917bae80392615ed4877773260a7221d8d1a`** (includes merged `add_pvc_disk` work: PVC data disks, Windows VMs, BYOC).
 - **Does not** long-term fork upstream. Environment customizations (Windows edge VMs, BYOC, ODF pins, cost profiles) live in the **fork** on GitHub; this repo only patches upstream `pattern.sh` locally (non-TTY podman).
 - **Future:** Playwright + Python UI tests (partially implemented). **Today:** deployment scripts, install-config examples, DR validation.
 
@@ -16,7 +16,7 @@ This document summarizes decisions and context from prior work so another agent 
 ## Key entrypoint: `scripts/redeploy.sh`
 
 1. Clones/fetches upstream into `**.work/upstream/ramendr-starter-kit`** (see `.gitignore`; not committed).
-2. Checks out `**UPSTREAM_REF`** (default `e35c55c3645a3d89414a0915a0f894f3ab75c66b` on branch `ocp-4.22`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `WORK_DIR`, `UPSTREAM_DIR`.
+2. Checks out `**UPSTREAM_REF`** (default `7d24917bae80392615ed4877773260a7221d8d1a` on branch `ocp-4.22`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `WORK_DIR`, `UPSTREAM_DIR`.
 3. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal) and so Darwin arm64 runs the amd64 utility container under emulation.
 4. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
 5. Merges spoke kubeconfig paths into `**.work/values-secret.yaml**` (copy of `VALUES_SECRET`; source file never modified) and runs `**./pattern.sh make install-byoc**` from the upstream checkout.

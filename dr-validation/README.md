@@ -43,7 +43,7 @@ Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
 
 DR validation Jobs (`install-hammerdb-incluster.sh`, `collect-db-snapshot-incluster.sh`,
 etc.) use `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` from `scripts/dr-validation/lib.sh`.
-The default is an **amd64 manifest digest** (`quay.io/validatedpatterns/utility-container@sha256:…`).
+The default is the semver tag **`quay.io/validatedpatterns/utility-container:v1.0.4`** (amd64).
 
 This test harness targets **amd64** hub and spoke workers (AWS `openshift-install` in
 `eu-north-1` / `eu-central-1` / `eu-west-1`). Do not schedule these Jobs on arm64 nodes
@@ -118,7 +118,7 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `DR_VALIDATION_EXPECTED_VMS` | `4` | Full fleet in gitops-vms for post-DR automation |
 | `DR_VALIDATION_BOOTSTRAP_VM_COUNT` | `2` | Running Linux VMs required before HammerDB bootstrap |
 | `DR_VALIDATION_BOOTSTRAP_VM_PATTERN` | `rhel` | Regular expression matched against bootstrap VM / SSH endpoint names during bootstrap wait |
-| `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` | amd64 digest in `lib.sh` | Utility container for in-cluster SSH Jobs; **amd64 only** on default AWS workers |
+| `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` | `v1.0.4` in `lib.sh` | Utility container for in-cluster SSH Jobs; **amd64 only** on default AWS workers |
 | `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key for direct/laptop SSH (`install-writer.sh`, non-in-cluster collect) |
 | `DR_VALIDATION_SSH_PASSWORD` | (from Vault) | Password for in-cluster install/collect Jobs (private keys are not copied to spokes) |
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |
