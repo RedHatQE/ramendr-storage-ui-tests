@@ -20,7 +20,7 @@ echo "Log on each VM: ${DR_VALIDATION_LOG_PATH}"
 echo "Format: seq,utc-timestamp,hostname,pid"
 if [[ "${DR_VALIDATION_INCLUSTER_COLLECT:-1}" == "1" ]]; then
   echo "Checking writers via in-cluster collect (NodePort SSH is cluster-internal only)..."
-  expected="${DR_VALIDATION_EXPECTED_VMS:-4}"
+  expected="${DR_VALIDATION_EXPECTED_VMS}"
   max_age="${DR_VALIDATION_STATUS_MAX_AGE_SEC:-300}"
   mkdir -p "${REPO_ROOT}/.work"
   dest="$(mktemp -d "${REPO_ROOT}/.work/dr-validation-logs/status-check.XXXXXX")"

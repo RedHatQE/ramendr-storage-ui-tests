@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from config.settings import BASE_URL, HUB_PASSWORD, HUB_USERNAME
+from config.settings import BASE_URL, EXPECTED_EDGE_VM_COUNT, HUB_PASSWORD, HUB_USERNAME
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
@@ -35,9 +35,9 @@ _KNOWN_OUTOFSYNC_APPS = {"regional-dr"}
 
 HUB_NAMESPACE = "ramendr-starter-kit-hub"
 
-# Minimum number of VMs expected in gitops-vms on ocp-primary after a full
-# deployment. Override with RAMENDR_MIN_VM_COUNT.
-_MIN_VM_COUNT = int(os.getenv("RAMENDR_MIN_VM_COUNT", "4"))
+# Minimum VMs in gitops-vms after a full deployment (2 Linux + 1 Windows 2022 + 1 Windows 2025).
+# Override with RAMENDR_MIN_VM_COUNT or RAMENDR_EXPECTED_VMS.
+_MIN_VM_COUNT = int(os.getenv("RAMENDR_MIN_VM_COUNT", str(EXPECTED_EDGE_VM_COUNT)))
 
 
 @pytest.mark.smoke
@@ -185,14 +185,111 @@ class TestInfraSmoke:
             + "\n".join(f"  - {f}" for f in failures)
         )
 
+    def test_mixed_vm_fleet_composition(self, primary_kubeconfig):
+        """gitops-vms has 2 Linux + 1 Windows 2022 + 1 Windows 2025 edge VMs."""
+        raw = run_oc(
+            [
+                "get",
+                "virtualmachines",
+                "-n",
+                "gitops-vms",
+                "--output=json",
+            ],
+            primary_kubeconfig,
+        )
+        names = [vm["metadata"]["name"] for vm in json.loads(raw)["items"]]
+
+        linux = sorted(n for n in names if n.startswith("rhel9-node-"))
+        win2022 = sorted(n for n in names if n.startswith("windows2k22-server-"))
+        win2025 = sorted(n for n in names if n.startswith("windows2k25-server-"))
+
+        assert len(linux) >= 2, (
+            f"Expected at least 2 Linux VMs (rhel9-node-*), found {len(linux)}: {linux}"
+        )
+        assert len(win2022) >= 1, (
+            f"Expected at least 1 Windows 2022 VM (windows2k22-server-*), "
+            f"found {len(win2022)}: {win2022}"
+        )
+        assert len(win2025) >= 1, (
+            f"Expected at least 1 Windows 2025 VM (windows2k25-server-*), "
+            f"found {len(win2025)}: {win2025}"
+        )
+        assert len(names) >= _MIN_VM_COUNT, (
+            f"Expected at least {_MIN_VM_COUNT} VMs total, found {len(names)}: {sorted(names)}"
+        )
+
+    def test_windows_vms_have_minimum_os_disk(self, primary_kubeconfig):
+        """Windows VM OS disks are at least 45 Gi (fork chart default)."""
+        raw = run_oc(
+            [
+                "get",
+                "virtualmachines",
+                "-n",
+                "gitops-vms",
+                "--output=json",
+            ],
+            primary_kubeconfig,
+        )
+        failures: list[str] = []
+        min_gib = 45
+        windows_vms = [
+            vm
+            for vm in json.loads(raw)["items"]
+            if vm["metadata"]["name"].startswith("windows2k22-server-")
+            or vm["metadata"]["name"].startswith("windows2k25-server-")
+        ]
+        assert windows_vms, "No Windows VMs found in gitops-vms on ocp-primary"
+
+        for vm in windows_vms:
+            name = vm["metadata"]["name"]
+
+            dvts = vm.get("spec", {}).get("dataVolumeTemplates", [])
+            os_dvt = next(
+                (
+                    d
+                    for d in dvts
+                    if not d.get("metadata", {}).get("name", "").endswith("-data")
+                ),
+                None,
+            )
+            if os_dvt is None:
+                failures.append(f"{name}: no OS DataVolumeTemplate found")
+                continue
+
+            pvc_spec = os_dvt.get("spec", {}).get("pvc") or os_dvt.get("spec", {}).get(
+                "storage", {}
+            )
+            size = (
+                (pvc_spec or {})
+                .get("resources", {})
+                .get("requests", {})
+                .get("storage", "")
+            )
+            if not size.endswith("Gi"):
+                failures.append(f"{name}: OS disk size {size!r} is not in Gi units")
+                continue
+            gib = float(size[:-2])
+            if gib < min_gib:
+                failures.append(
+                    f"{name}: OS disk {size!r} is below minimum {min_gib}Gi"
+                )
+
+        assert not failures, "Windows VM OS disk size issues:\n" + "\n".join(
+            f"  - {f}" for f in failures
+        )
+
     def test_vms_have_two_data_disks(
         self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
     ):
         """Every VM in gitops-vms has exactly 2 DataVolume-backed disks.
 
-        The expected layout after the feature/add-second-disk change:
+        Linux layout:
           dataVolumeTemplates[0] — 30 Gi OS root disk  (e.g. rhel9-node-001)
           dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. rhel9-node-001-data)
+
+        Windows layout (same DR eligibility pattern):
+          dataVolumeTemplates[0] — 45 Gi OS disk (e.g. windows2k22-server-001)
+          dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. windows2k22-server-001-data)
 
         The cloud-init disk is ephemeral and is intentionally excluded from
         this count because it is not backed by a DataVolume.
@@ -366,8 +463,8 @@ class TestInfraSmoke:
     def test_vm_external_secrets_present(self, primary_kubeconfig):
         """At least one ExternalSecret exists in gitops-vms on ocp-primary.
 
-        This confirms disableExternalSecrets=false is in effect and that VMs
-        have cloud-init / SSH keys sourced from Vault.
+        Confirms disableExternalSecrets=false: Linux VMs get cloud-init / SSH keys
+        from Vault; Windows VMs get registry pull credentials for CDI image import.
         """
         raw = run_oc(
             [

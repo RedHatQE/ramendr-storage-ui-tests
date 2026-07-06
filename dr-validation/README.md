@@ -39,6 +39,17 @@ Future backends (e.g. SQL Server on Windows VMs) plug in under
 
 Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
 
+### In-cluster utility container (amd64)
+
+DR validation Jobs (`install-hammerdb-incluster.sh`, `collect-db-snapshot-incluster.sh`,
+etc.) use `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` from `scripts/dr-validation/lib.sh`.
+The default is an **amd64 manifest digest** (`quay.io/validatedpatterns/utility-container@sha256:…`).
+
+This test harness targets **amd64** hub and spoke workers (AWS `openshift-install` in
+`eu-north-1` / `eu-central-1` / `eu-west-1`). Do not schedule these Jobs on arm64 nodes
+unless you override the image to a multi-arch tag or add explicit `nodeSelector` for
+`kubernetes.io/arch: amd64`.
+
 ---
 
 ## Legacy timestamp mode (`DR_VALIDATION_MODE=timestamp`)
@@ -65,7 +76,9 @@ replicated with the protected KubeVirt workload.
 
 ## Workflow
 
-1. **Deploy environment** — `./scripts/redeploy.sh` (four `edgenode` RHEL VMs in `gitops-vms`).
+1. **Deploy environment** — `./scripts/redeploy.sh` (four edge VMs in `gitops-vms`: 2 Linux + 1 Windows Server 2022 + 1 Windows Server 2025).
+   Add `privatevm-credentials` (Quay robot) and `windows-admin` (`password` for local
+   `Administrator` SSH on pre-configured Windows images) to `~/values-secret.yaml`.
    When redeploy finishes, it **automatically** waits for VMs, installs timestamp writers on
    each edge VM, verifies recording, and saves the first baseline snapshot
    (unless `SKIP_DR_VALIDATION=1`).
@@ -101,7 +114,11 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SSH_USER` | `cloud-user` | VM SSH user |
+| `SSH_USER` | `cloud-user` | Linux VM SSH user (HammerDB / writer install); Windows guests use OpenSSH on port 22 |
+| `DR_VALIDATION_EXPECTED_VMS` | `4` | Full fleet in gitops-vms for post-DR automation |
+| `DR_VALIDATION_BOOTSTRAP_VM_COUNT` | `2` | Running Linux VMs required before HammerDB bootstrap |
+| `DR_VALIDATION_BOOTSTRAP_VM_PATTERN` | `rhel` | Regular expression matched against bootstrap VM / SSH endpoint names during bootstrap wait |
+| `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` | amd64 digest in `lib.sh` | Utility container for in-cluster SSH Jobs; **amd64 only** on default AWS workers |
 | `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key for direct/laptop SSH (`install-writer.sh`, non-in-cluster collect) |
 | `DR_VALIDATION_SSH_PASSWORD` | (from Vault) | Password for in-cluster install/collect Jobs (private keys are not copied to spokes) |
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |

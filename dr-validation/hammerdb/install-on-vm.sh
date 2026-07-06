@@ -87,7 +87,11 @@ install_postgresql_from_packages() {
   fi
   PG_CTL="${PG_BIN_DIR}/pg_ctl"
   PSQL="${PG_BIN_DIR}/psql"
-  PG_LIB_DIR=""
+  if [[ -d "${PG_BIN_DIR}/../lib" ]]; then
+    PG_LIB_DIR="$(cd "${PG_BIN_DIR}/../lib" && pwd)"
+  else
+    PG_LIB_DIR=""
+  fi
 }
 
 install_postgresql_from_percona() {

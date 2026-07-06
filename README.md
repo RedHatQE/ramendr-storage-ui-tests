@@ -3,7 +3,7 @@
 This repository is a **test harness** for the RamenDR validated pattern.
 It deploys from a maintained fork of the upstream starter kit —
 [elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22`) —
-which carries all environment-specific customizations (additional VM disks, BYOC cluster names,
+which carries all environment-specific customizations (Windows edge VMs, additional VM disks, BYOC cluster names,
 ODF channel pins, cost-optimized instance profiles). **`redeploy.sh` pins a fixed commit SHA**
 for the local pattern install; **hub Argo CD** reconciles from the fork's `ocp-4.22` branch on GitHub
 (see [Upstream pinning](#upstream-pinning) below).
@@ -18,12 +18,20 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` from the `ocp-4.22` branch into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `e35c55c3645a3d89414a0915a0f894f3ab75c66b` from the `ocp-4.22` branch into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
-4. Run the upstream pattern installation (ArgoCD/GitOps driven) via upstream `pattern.sh`.
+4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
+   paths (`ocp-primary_cluster_kubeconfig`, `ocp-secondary_cluster_kubeconfig`), and run
+   upstream `pattern.sh make install-byoc` (loads secrets to Vault, validates BYOC, deploys pattern).
+5. Wait for ExternalSecrets to create `auto-import-secret` and `admin-kubeconfig` on the hub; ACM
+   imports the spokes.
 
-> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `ocp-4.22`) — local copies placed next to the checkout are invisible to it. Committing customizations into the fork's branch is the only way to have Argo CD reconcile them automatically.
+> **BYOC:** The fork sets `byoc: true`. Your `~/values-secret.yaml` may omit spoke kubeconfigs or
+> contain stale paths from a previous deploy — `redeploy.sh` always refreshes them in
+> `.work/values-secret.yaml` (gitignored) before `install-byoc`. Your source file is never modified.
+
+> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository (branch `ocp-4.22`) — local copies placed next to the checkout are invisible to it. Windows VM chart values and the 4.22 baseline both live on that branch.
 
 ### Upstream pinning
 
@@ -31,7 +39,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `04b9d2f29d2d3844294ec957bd679bd2ba7452ac` (on branch `ocp-4.22`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `e35c55c3645a3d89414a0915a0f894f3ab75c66b` (on branch `ocp-4.22`) |
 | Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22` (tip unless an Application pins `targetRevision`) |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
@@ -47,9 +55,38 @@ The deployment script expects tools similar to the original flow:
 - `aws`
 - `podman` — must be **running** when the pattern deploy starts (`pattern.sh` uses a utility container). On macOS, start the VM before a long redeploy or rely on `redeploy.sh` to auto-start it: `podman machine start`
 - `git`
-- `python3`
+- `python3` with **PyYAML** (`python3 -m pip install pyyaml`) — merges spoke kubeconfig paths into `.work/values-secret.yaml` before `install-byoc`
+- `jq` — used by the golden-image Ansible playbook and several redeploy helpers
+- `ansible-playbook` — runs `scripts/ansible/odf_fix_dataimportcrons.yml` during spoke golden-image fix-up (optional; redeploy falls back to `oc` if this step fails)
 
 You will also need AWS credentials configured for the AWS account used for cluster installs and Route53 operations (the script uses the AWS CLI).
+
+### Ansible golden-image playbook
+
+During redeploy, `redeploy.sh` may run `scripts/ansible/odf_fix_dataimportcrons.yml` **on the host
+machine where you launch redeploy** (`connection: local`, `hosts: localhost`). It uses `oc` with
+spoke `KUBECONFIG` to clean up CNV `dataimportcron` objects when the virtualization default storage
+class differs from the cluster default.
+
+That playbook needs:
+
+- Ansible collection **`kubernetes.core`** — provides the `k8s_info` and `k8s` modules used to list and
+  delete CDI objects
+- Python package **`kubernetes`** — required by those modules at runtime
+
+Install the collection with `ansible-galaxy collection install kubernetes.core`. Install the Python
+package for the **same interpreter Ansible uses for `localhost`** (not necessarily the interpreter
+in an activated virtualenv). On Fedora, `dnf install python3-kubernetes` may target a different
+Python than Ansible auto-discovers (e.g. package on 3.14 while Ansible picks 3.12).
+
+`redeploy.sh` auto-selects the first interpreter that can `import kubernetes` (default
+`/usr/bin/python3`, then 3.14/3.13/3.12) and sets `ANSIBLE_PYTHON_INTERPRETER` for the playbook.
+Override with `export ANSIBLE_PYTHON_INTERPRETER=/usr/bin/python3.14` if needed. If no suitable
+interpreter is found, the playbook is skipped and `redeploy.sh` continues with direct `oc`
+golden-image cleanup instead.
+
+`requirements.txt` covers UI tests (Playwright/pytest) only; it does **not** install these Ansible
+dependencies.
 
 ## install-config files (examples)
 
@@ -174,7 +211,11 @@ PRs that fail the checks cannot be merged.
 ## RamenDR data validation
 
 Default mode is **HammerDB TPC-C on PostgreSQL** (`DR_VALIDATION_MODE=hammerdb`) on
-`rhel9-node-001`. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
+`rhel9-node-001` (one of two Linux edge VMs). The default fleet is **four VMs** in
+`gitops-vms`: 2 Linux + 1 Windows Server 2022 + 1 Windows Server 2025. Add
+`privatevm-credentials` (Quay robot for `quay.io/martjack/*` images) and
+`windows-admin` (local Administrator password for Windows SSH verification) to
+`~/values-secret.yaml` before redeploy. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
 builds populated TPC-C tables (customers with IDs, orders, stock, …), verifies recording,
 and saves an initial baseline snapshot to `.work/dr-validation-db/auto/latest`.
 

@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Wait for edge VMs + routes, install DR validation workload, verify recording.
 # Invoked automatically from scripts/redeploy.sh unless SKIP_DR_VALIDATION=1.
+# HammerDB bootstrap waits for Linux VMs only (see bootstrap-hammerdb.sh).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
