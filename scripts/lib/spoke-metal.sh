@@ -11,7 +11,9 @@ create_spoke_metal_machinesets() {
     [[ -f "$kubeconfig" ]] || { warn " No kubeconfig for $cluster - skipping metal MachineSet."; continue; }
 
     local infra_id
-    infra_id=$(python3 -c "import json; print(json.load(open('$dir/metadata.json'))['infraID'])")
+    [[ -f "$dir/metadata.json" ]] || { warn " No metadata.json for $cluster - skipping metal MachineSet."; continue; }
+    infra_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['infraID'])" "$dir/metadata.json" 2>/dev/null) \
+      || { warn " Could not read infraID for $cluster - skipping."; continue; }
 
     mapfile -t template_names < <(
       KUBECONFIG="$kubeconfig" oc get machineset -n openshift-machine-api -o json 2>/dev/null | \

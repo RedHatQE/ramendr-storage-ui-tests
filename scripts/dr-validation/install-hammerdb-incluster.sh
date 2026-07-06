@@ -147,8 +147,8 @@ spec:
               local remote="mkdir -p /tmp/ramendr-dr-validation-install && tar -xzf /tmp/payload.tgz -C /tmp/ramendr-dr-validation-install && REPO_ROOT=/tmp/ramendr-dr-validation-install bash /tmp/ramendr-dr-validation-install/hammerdb/install-on-vm.sh"
               if [[ -f /tmp/ssh-privatekey ]]; then
                 scp -i /tmp/ssh-privatekey \$scp_opts /payload/payload.tgz "\${SSH_USER}@\${host}:/tmp/payload.tgz" && \
-                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote"
-                return \$?
+                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${SSH_USER}@\${host}" "\$remote" && \
+                return 0
               fi
               if [[ -n "\$PASS" ]]; then
                 sshpass -p "\$PASS" scp \$scp_opts /payload/payload.tgz "\${SSH_USER}@\${host}:/tmp/payload.tgz" && \

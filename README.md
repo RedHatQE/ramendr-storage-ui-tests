@@ -30,7 +30,7 @@ It contains:
 > **BYOC:** The fork sets `byoc: true`. Your `~/values-secret.yaml` may omit spoke kubeconfigs or
 > contain stale paths from a previous deploy — `redeploy.sh` always refreshes them in
 > `.work/values-secret.yaml` (gitignored) before `install-byoc`. Your source file is never modified.
-
+>
 > **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository — local copies placed next to the checkout are invisible to it. Both `redeploy.sh` and hub Applications should track fork branch `ocp-4.22` so GitOps matches the local pin.
 
 ### Upstream pinning
@@ -65,7 +65,7 @@ You will also need AWS credentials configured for the AWS account used for clust
 
 During redeploy, `redeploy.sh` may run `scripts/ansible/odf_fix_dataimportcrons.yml` **on the host
 machine where you launch redeploy** (`connection: local`, `hosts: localhost`). It uses `oc` with
-spoke `KUBECONFIG` to clean up CNV `dataimportcron` objects when the virtualization default storage
+spoke `KUBECONFIG` to clean up CDI `DataImportCron` objects when the virtualization default storage
 class differs from the cluster default.
 
 That playbook needs:

@@ -201,10 +201,7 @@ wait_for_edge_vms() {
   local max_tries="${DR_VALIDATION_WAIT_MAX_TRIES:-60}"
   local sleep_sec="${DR_VALIDATION_WAIT_SLEEP:-30}"
 
-  local hub_install_dir="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
-  if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${hub_install_dir}/auth/kubeconfig" ]]; then
-    export KUBECONFIG="${hub_install_dir}/auth/kubeconfig"
-  fi
+  ensure_hub_kubeconfig
 
   log "Waiting for ${expected} edge VM(s) and SSH routes in ${VM_NAMESPACE}..."
   local tries=0
