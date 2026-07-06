@@ -49,9 +49,8 @@ prepare_byoc_values_secret() {
   }
 
   mkdir -p "$(dirname "$dest_secret")"
-  cp "$source_secret" "$dest_secret"
-  chmod 600 "$dest_secret" || {
-    _byoc_ks_err "Failed to set restrictive permissions on $dest_secret"
+  install -m 600 "$source_secret" "$dest_secret" || {
+    _byoc_ks_err "Failed to copy values-secret to $dest_secret"
     return 1
   }
 

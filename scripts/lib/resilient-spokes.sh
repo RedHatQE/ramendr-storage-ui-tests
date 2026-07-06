@@ -231,7 +231,8 @@ EOF
 prepare_spoke_argo_appprojects_on_all_spokes() {
   local max_attempts="${SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS}"
   local sleep_s="${SPOKE_APPPROJECT_PREP_WAIT_SLEEP}"
-  local tries=0 ready_count cluster kc
+  local tries=0 ready_count cluster kc expected
+  expected=$(wc -w <<< "$SPOKE_CLUSTERS")
 
   _rs_log "[spoke-gitops] Preparing AppProject/default on all spokes (before resilient parent sync)..."
   while [[ $tries -lt $max_attempts ]]; do
@@ -249,7 +250,7 @@ prepare_spoke_argo_appprojects_on_all_spokes() {
       ready_count=$((ready_count + 1))
     done
 
-    if [[ "$ready_count" -ge 2 ]]; then
+    if [[ "$ready_count" -ge "$expected" ]]; then
       _rs_log "[spoke-gitops] AppProject/default ready on all spokes."
       return 0
     fi
@@ -421,7 +422,8 @@ _spoke_resilient_gitops_status_line() {
 wait_for_spoke_resilient_gitops() {
   local max_attempts="${SPOKE_RESILIENT_GITOPS_WAIT_ATTEMPTS:-60}"
   local sleep_s="${SPOKE_RESILIENT_GITOPS_WAIT_SLEEP:-60}"
-  local tries=0 ready_count=0 cluster kc
+  local tries=0 ready_count=0 cluster kc expected
+  expected=$(wc -w <<< "$SPOKE_CLUSTERS")
 
   prepare_spoke_argo_appprojects_on_all_spokes || true
 
@@ -443,13 +445,13 @@ wait_for_spoke_resilient_gitops() {
       fi
     done
 
-    if [[ "$ready_count" -ge 2 ]]; then
+    if [[ "$ready_count" -ge "$expected" ]]; then
       _rs_log "[spoke-gitops] Spoke resilient GitOps converged on all spokes."
       return 0
     fi
 
     tries=$((tries + 1))
-    _rs_log "[spoke-gitops] Still waiting (${tries}/${max_attempts}); ready=${ready_count}/2 — $(_spoke_resilient_gitops_status_line ocp-primary); $(_spoke_resilient_gitops_status_line ocp-secondary)"
+    _rs_log "[spoke-gitops] Still waiting (${tries}/${max_attempts}); ready=${ready_count}/${expected} — $(_spoke_resilient_gitops_status_line ocp-primary); $(_spoke_resilient_gitops_status_line ocp-secondary)"
     sleep "$sleep_s"
   done
 

@@ -40,6 +40,20 @@ HUB_NAMESPACE = "ramendr-starter-kit-hub"
 _MIN_VM_COUNT = int(os.getenv("RAMENDR_MIN_VM_COUNT", str(EXPECTED_EDGE_VM_COUNT)))
 
 
+def _vm_references_pvc(vm: dict, pvc_name: str) -> bool:
+    volumes = vm.get("spec", {}).get("template", {}).get("spec", {}).get("volumes", [])
+    for vol in volumes:
+        claim = vol.get("persistentVolumeClaim", {})
+        if claim.get("claimName") == pvc_name:
+            return True
+    return False
+
+
+def _dvt_storage_size(dvt: dict) -> str:
+    pvc_spec = dvt.get("spec", {}).get("pvc") or dvt.get("spec", {}).get("storage", {})
+    return (pvc_spec or {}).get("resources", {}).get("requests", {}).get("storage", "")
+
+
 @pytest.mark.smoke
 @pytest.mark.requires_stage
 class TestInfraSmoke:
@@ -186,7 +200,12 @@ class TestInfraSmoke:
         )
 
     def test_mixed_vm_fleet_composition(self, primary_kubeconfig):
-        """gitops-vms has 2 Linux + 1 Windows 2022 + 1 Windows 2025 edge VMs."""
+        """gitops-vms has 2 Linux + 1 Windows 2022 + 1 Windows 2025 edge VMs.
+
+        Linux pair compares both data-disk models from the fork:
+          rhel9-node-*       — additionalDisks (DataVolume-backed data disk)
+          rhel9-node-pvc-* — additionalPvcDisks (standalone PVC data disk)
+        """
         raw = run_oc(
             [
                 "get",
@@ -199,12 +218,22 @@ class TestInfraSmoke:
         )
         names = [vm["metadata"]["name"] for vm in json.loads(raw)["items"]]
 
-        linux = sorted(n for n in names if n.startswith("rhel9-node-"))
+        linux_dv = sorted(
+            n
+            for n in names
+            if n.startswith("rhel9-node-") and not n.startswith("rhel9-node-pvc-")
+        )
+        linux_pvc = sorted(n for n in names if n.startswith("rhel9-node-pvc-"))
         win2022 = sorted(n for n in names if n.startswith("windows2k22-server-"))
         win2025 = sorted(n for n in names if n.startswith("windows2k25-server-"))
 
-        assert len(linux) >= 2, (
-            f"Expected at least 2 Linux VMs (rhel9-node-*), found {len(linux)}: {linux}"
+        assert len(linux_dv) >= 1, (
+            f"Expected at least 1 Linux VM with DataVolume data disk (rhel9-node-*), "
+            f"found {len(linux_dv)}: {linux_dv}"
+        )
+        assert len(linux_pvc) >= 1, (
+            f"Expected at least 1 Linux VM with PVC data disk (rhel9-node-pvc-*), "
+            f"found {len(linux_pvc)}: {linux_pvc}"
         )
         assert len(win2022) >= 1, (
             f"Expected at least 1 Windows 2022 VM (windows2k22-server-*), "
@@ -281,29 +310,27 @@ class TestInfraSmoke:
     def test_vms_have_two_data_disks(
         self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
     ):
-        """Every VM in gitops-vms has exactly 2 DataVolume-backed disks.
+        """Every VM in gitops-vms has an OS disk plus a DR-eligible 10 Gi data disk.
 
-        Linux layout:
-          dataVolumeTemplates[0] — 30 Gi OS root disk  (e.g. rhel9-node-001)
-          dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. rhel9-node-001-data)
+        OS disk — always a DataVolumeTemplate.
 
-        Windows layout (same DR eligibility pattern):
-          dataVolumeTemplates[0] — 45 Gi OS disk (e.g. windows2k22-server-001)
-          dataVolumeTemplates[1] — 10 Gi blank data disk (e.g. windows2k22-server-001-data)
+        Data disk — one of two fork layouts (four-VM fleet exercises both on Linux):
+          additionalDisks (rhel9-node-*, windows2k22-server-*):
+            - 2 DataVolumeTemplates: OS + {vm}-data
+          additionalPvcDisks (rhel9-node-pvc-*, windows2k25-server-*):
+            - 1 OS DataVolumeTemplate
+            - standalone PVC {vm}-data referenced in the VM pod template
 
-        The cloud-init disk is ephemeral and is intentionally excluded from
-        this count because it is not backed by a DataVolume.
+        The cloud-init disk is ephemeral and is excluded from this check.
 
-        The second disk must have the properties required for RamenDR
-        replication eligibility:
-          - name ending in '-data'
+        Data disks must satisfy RamenDR replication eligibility:
+          - name {vm}-data
           - storage: 10Gi
           - volumeMode: Block
           - accessModes: [ReadWriteMany]
           - storageClassName: ocs-storagecluster-ceph-rbd-virtualization
 
-        The test is cluster-aware: it follows the DRPC placement to check VMs
-        on whichever spoke currently hosts them (primary after Deployed/Relocated,
+        Cluster-aware: follows DRPC placement (primary after Deployed/Relocated,
         secondary after FailedOver).
         """
         _EXPECTED_DATA_STORAGE = "10Gi"
@@ -354,55 +381,81 @@ class TestInfraSmoke:
 
         failures: list[str] = []
         data_pvc_names: set[str] = set()
+        datavolume_data_disk_vms: set[str] = set()
+        pvc_data_disk_vms: set[str] = set()
 
         for vm in vms:
             name = vm["metadata"]["name"]
             dvts = vm.get("spec", {}).get("dataVolumeTemplates", [])
+            data_pvc_name = f"{name}-data"
 
-            if len(dvts) != 2:
-                dv_names = [d.get("metadata", {}).get("name", "?") for d in dvts]
+            os_dvts = [
+                d
+                for d in dvts
+                if not d.get("metadata", {}).get("name", "").endswith("-data")
+            ]
+            data_dvts = [
+                d
+                for d in dvts
+                if d.get("metadata", {}).get("name", "").endswith("-data")
+            ]
+
+            if len(os_dvts) != 1:
                 failures.append(
-                    f"{name}: expected 2 DataVolumeTemplates, got {len(dvts)} {dv_names}"
+                    f"{name}: expected 1 OS DataVolumeTemplate, got {len(os_dvts)} "
+                    f"{[d.get('metadata', {}).get('name', '?') for d in os_dvts]}"
                 )
                 continue
 
-            # Identify the data disk by its '-data' name suffix.
-            data_dvt = next(
-                (
-                    d
-                    for d in dvts
-                    if d.get("metadata", {}).get("name", "").endswith("-data")
-                ),
-                None,
-            )
-            if data_dvt is None:
-                dv_names = [d.get("metadata", {}).get("name", "?") for d in dvts]
+            if len(data_dvts) > 1:
                 failures.append(
-                    f"{name}: no DataVolumeTemplate with '-data' suffix found in {dv_names}"
+                    f"{name}: expected at most 1 data DataVolumeTemplate, "
+                    f"got {len(data_dvts)}"
                 )
                 continue
 
-            data_pvc_name = data_dvt["metadata"]["name"]
-            data_pvc_names.add(data_pvc_name)
-
-            # Check declared storage size in the DVT spec (supports both pvc and storage API).
-            pvc_spec = data_dvt.get("spec", {}).get("pvc") or data_dvt.get(
-                "spec", {}
-            ).get("storage", {})
-            size = (
-                (pvc_spec or {})
-                .get("resources", {})
-                .get("requests", {})
-                .get("storage", "")
-            )
-            if size != _EXPECTED_DATA_STORAGE:
+            if len(data_dvts) == 1:
+                data_dvt = data_dvts[0]
+                if data_dvt["metadata"]["name"] != data_pvc_name:
+                    failures.append(
+                        f"{name}: data DataVolumeTemplate name "
+                        f"{data_dvt['metadata']['name']!r}, expected {data_pvc_name!r}"
+                    )
+                else:
+                    size = _dvt_storage_size(data_dvt)
+                    if size != _EXPECTED_DATA_STORAGE:
+                        failures.append(
+                            f"{name} data disk: declared storage={size!r}, "
+                            f"expected {_EXPECTED_DATA_STORAGE!r}"
+                        )
+                data_pvc_names.add(data_pvc_name)
+                datavolume_data_disk_vms.add(name)
+            elif len(dvts) == 1:
+                data_pvc_names.add(data_pvc_name)
+                pvc_data_disk_vms.add(name)
+                if not _vm_references_pvc(vm, data_pvc_name):
+                    failures.append(
+                        f"{name}: VM spec does not reference data PVC "
+                        f"{data_pvc_name!r} (additionalPvcDisks layout)"
+                    )
+            else:
+                dv_names = [d.get("metadata", {}).get("name", "?") for d in dvts]
                 failures.append(
-                    f"{name} data disk: declared storage={size!r}, expected {_EXPECTED_DATA_STORAGE!r}"
+                    f"{name}: unrecognized disk layout — DataVolumeTemplates={dv_names}"
                 )
 
         assert not failures, (
             "VirtualMachine(s) data disk structure issues:\n"
             + "\n".join(f"  - {f}" for f in failures)
+        )
+
+        assert datavolume_data_disk_vms, (
+            "Expected at least one VM with additionalDisks "
+            "(DataVolume-backed data disk); none found"
+        )
+        assert pvc_data_disk_vms, (
+            "Expected at least one VM with additionalPvcDisks "
+            "(standalone PVC data disk); none found"
         )
 
         # Verify PVC properties for all data disks.

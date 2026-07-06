@@ -320,7 +320,7 @@ golden_images_need_cleanup() {
   done < <(KUBECONFIG="$kubeconfig" oc get pvc -n "$OS_IMAGES_NS" \
     -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName --no-headers 2>/dev/null || true)
 
-  return 0
+  return 1
 }
 
 spoke_gitops_vms_exist() {
