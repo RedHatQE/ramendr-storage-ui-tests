@@ -1,5 +1,15 @@
 """Database backends for HammerDB-based DR validation."""
 
-from ramendr_dr_validation.backends.postgres import PostgresBackend
+__all__ = ["PostgresBackend", "MssqlBackend"]
 
-__all__ = ["PostgresBackend"]
+
+def __getattr__(name: str):
+    if name == "PostgresBackend":
+        from ramendr_dr_validation.backends.postgres import PostgresBackend
+
+        return PostgresBackend
+    if name == "MssqlBackend":
+        from ramendr_dr_validation.backends.mssql import MssqlBackend
+
+        return MssqlBackend
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

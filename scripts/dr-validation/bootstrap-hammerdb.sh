@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Wait for Linux edge VMs, install HammerDB PostgreSQL, verify, and seed the first baseline snapshot.
+# Wait for all HammerDB edge VMs, install workload on each, verify, and seed baseline snapshot.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -11,7 +11,7 @@ wait_for_bootstrap_vms_healthy
 wait_for_bootstrap_ssh_endpoints
 "$SCRIPT_DIR/install-hammerdb-incluster.sh"
 
-log "Verifying HammerDB PostgreSQL workload is recording..."
+log "Verifying HammerDB workload is recording on all target edge VMs..."
 if ! "$SCRIPT_DIR/status-hammerdb.sh"; then
   err "HammerDB status check failed immediately after install."
   exit 1
@@ -28,4 +28,4 @@ if [[ ! -L "${DR_VALIDATION_DB_SNAPSHOT_ROOT}/latest" ]]; then
   update_latest_db_snapshot_link "$initial_dir"
 fi
 
-log "HammerDB bootstrap complete (PostgreSQL TPC-C populated + audit recording)."
+log "HammerDB bootstrap complete (TPC-C + audit on $(hammerdb_target_vm_count) edge VM(s))."

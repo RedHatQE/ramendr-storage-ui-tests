@@ -1,31 +1,34 @@
 # RamenDR data validation
 
-Default mode (`DR_VALIDATION_MODE=hammerdb`) runs **HammerDB TPC-C** against
-**PostgreSQL** on one DR-protected edge VM (`DR_VALIDATION_HAMMERDB_VM`, default
-`rhel9-node-001`). Data files live under `/var/lib/ramendr-dr-validation/` on the
-replicated VM disk. A continuous audit table (`dr_validation_audit`) plus TPC-C
-row-count checks replace the legacy timestamp log for post-DR validation.
+Default mode (`DR_VALIDATION_MODE=hammerdb`) runs **HammerDB TPC-C** on **every edge VM**
+in `gitops-vms` (2× Linux PostgreSQL + 2× Windows SQL Server by default). Set
+`DR_VALIDATION_HAMMERDB_ALL_VMS=0` and `DR_VALIDATION_HAMMERDB_VM` to restore the legacy
+single-VM install (`rhel9-node-001`). Use `DR_VALIDATION_HAMMERDB_VMS` for an explicit
+comma-separated name list.
 
 Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
 (described below).
 
 ## HammerDB workflow (default)
 
-1. **Deploy environment** — `./scripts/redeploy.sh` automatically installs PostgreSQL +
-   HammerDB on `rhel9-node-001`, verifies TPC-C tables are populated, and saves an initial
-   baseline snapshot to `.work/dr-validation-db/auto/latest` (unless `SKIP_DR_VALIDATION=1`).
+1. **Deploy environment** — `./scripts/redeploy.sh` automatically installs HammerDB on
+   all edge VMs (unless `SKIP_DR_VALIDATION=1`), verifies TPC-C tables are populated on
+   each target, and saves an initial baseline snapshot to `.work/dr-validation-db/auto/latest`.
 2. **Before DR** — capture a fresh baseline immediately before Initiate (sanity test does
    this automatically; for manual runs use `./scripts/dr-validation/save-db-baseline-snapshot.sh`).
 3. **Run DR** — failover / relocate on DRPC `gitops-vm-protection`.
 4. **After DR** — sanity test or `./scripts/dr-validation/post-dr-automation.sh` validates
-   PostgreSQL table data automatically.
+   TPC-C table data on all supported platforms (PostgreSQL on Linux, SQL Server on Windows)
+   automatically.
 
-A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline,
+A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline
+on any supported platform (PostgreSQL or SQL Server),
 and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 
 | Path | Purpose |
 |------|---------|
-| `hammerdb/install-on-vm.sh` | PostgreSQL + HammerDB install on edge VM |
+| `hammerdb/install-on-vm.sh` | PostgreSQL + HammerDB install on Linux edge VM |
+| `hammerdb/install-on-vm-windows.ps1` | SQL Server + HammerDB install on Windows edge VM |
 | `ramendr_dr_validation/db_audit.py` | Continuous audit inserts (systemd) |
 | `ramendr_dr_validation/db_snapshot.py` | Export DB snapshot JSON |
 | `ramendr_dr_validation/db_validator.py` | Gap/RPO/TPC-C validation |
@@ -34,8 +37,14 @@ and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 | `scripts/dr-validation/save-db-baseline-snapshot.sh` | Capture pre-DR DB baseline (updates `auto/latest`) |
 | `scripts/dr-validation/check-after-dr-hammerdb.sh` | Post-DR HammerDB validation |
 
-Future backends (e.g. SQL Server on Windows VMs) plug in under
-`ramendr_dr_validation/backends/`.
+Windows VMs receive **SQL Server 2022 Express** (via staged `SQL2022-SSEI-Expr.exe` from
+`download.microsoft.com`) and **HammerDB** `HammerDB-5.0-Prod-Win.tar.gz`. The in-cluster
+install Job stages installers on the utility container and copies them over SSH — no winget,
+choco, or golden-image changes required. Windows `Administrator` password is read from Vault
+`secret/global/windows-admin` or `windows-admin` in `VALUES_SECRET` (v2.0 `secrets` list form).
+`mssql-hammerdb` in `VALUES_SECRET` (`sa_password`, `user`, `password`) for Windows SQL
+install credentials, or set `DR_VALIDATION_MSSQL_*` in the environment. See
+[`examples/values-secret-v2-windows.fragment.yaml`](examples/values-secret-v2-windows.fragment.yaml).
 
 Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
 

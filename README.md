@@ -125,6 +125,13 @@ Do not commit secrets to this repository.
       path: ~/.ssh/id_ed25519.pub
 ```
 
+- For **Windows edge VMs** (private `quay.io/martjack/*` images), add `privatevm-credentials`
+  (Quay robot `accessKeyId` / `secretKey`) and `windows-admin` (`password` for local
+  `Administrator` SSH). See
+  [`dr-validation/examples/values-secret-v2-windows.fragment.yaml`](dr-validation/examples/values-secret-v2-windows.fragment.yaml).
+  For HammerDB on Windows SQL Server, also add `mssql-hammerdb` (`sa_password`, `user`,
+  `password`) or export `DR_VALIDATION_MSSQL_*` before redeploy.
+
 ## Customizing the deployment
 
 All environment-specific values (additional VM disks, BYOC cluster names, ODF channel pins,

@@ -15,7 +15,19 @@ SSH_USER="${SSH_USER:-cloud-user}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-$HOME/.ssh/id_rsa}"
 DR_VALIDATION_LOG_PATH="${DR_VALIDATION_LOG_PATH:-/var/lib/ramendr-dr-validation/timestamps.log}"
 DR_VALIDATION_MODE="${DR_VALIDATION_MODE:-hammerdb}"
+# Legacy single-VM filter (used only when DR_VALIDATION_HAMMERDB_ALL_VMS=0).
 DR_VALIDATION_HAMMERDB_VM="${DR_VALIDATION_HAMMERDB_VM:-rhel9-node-001}"
+# Install HammerDB on every edge VM in gitops-vms (2 Linux + 2 Windows by default).
+DR_VALIDATION_HAMMERDB_ALL_VMS="${DR_VALIDATION_HAMMERDB_ALL_VMS:-1}"
+# Optional comma-separated VM name filter (overrides ALL_VMS and legacy HAMMERDB_VM).
+DR_VALIDATION_HAMMERDB_VMS="${DR_VALIDATION_HAMMERDB_VMS:-}"
+# Direct Microsoft download (go.microsoft.com/fwlink linkid=2216018 is broken — returns HTML).
+DR_VALIDATION_SQL_SSEI_URL="${DR_VALIDATION_SQL_SSEI_URL:-https://download.microsoft.com/download/5/1/4/5145fe04-4d30-4b85-b0d1-39533663a2f1/SQL2022-SSEI-Expr.exe}"
+DR_VALIDATION_PYTHON_WINDOWS_VERSION="${DR_VALIDATION_PYTHON_WINDOWS_VERSION:-3.12.7}"
+DR_VALIDATION_PYTHON_WINDOWS_URL="${DR_VALIDATION_PYTHON_WINDOWS_URL:-https://www.python.org/ftp/python/${DR_VALIDATION_PYTHON_WINDOWS_VERSION}/python-${DR_VALIDATION_PYTHON_WINDOWS_VERSION}-amd64.exe}"
+DR_VALIDATION_ODBC_DRIVER_MSI_URL="${DR_VALIDATION_ODBC_DRIVER_MSI_URL:-https://go.microsoft.com/fwlink/?linkid=2361646}"
+WINDOWS_SSH_USER="${WINDOWS_SSH_USER:-Administrator}"
+VALUES_SECRET="${VALUES_SECRET:-$HOME/values-secret.yaml}"
 # Full fleet size in gitops-vms (2 Linux + 2 Windows); post-DR checks still use this.
 DR_VALIDATION_EXPECTED_VMS="${DR_VALIDATION_EXPECTED_VMS:-4}"
 # Bootstrap waits only for Linux edge VMs (Windows DR bootstrap is separate).
@@ -253,10 +265,19 @@ _count_ssh_hosts_on_spoke() {
   echo "$count"
 }
 
-# Wait for Linux (bootstrap) VMs only — do not block on Windows fleet readiness.
+# Wait for HammerDB target VMs before bootstrap (respects allowlist via hammerdb_target_vm_count).
 wait_for_bootstrap_vms_healthy() {
-  local expected="${DR_VALIDATION_BOOTSTRAP_VM_COUNT:-2}"
-  local pattern="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"
+  local expected pattern
+  if dr_validation_uses_hammerdb; then
+    expected="$(hammerdb_target_vm_count)"
+    pattern="."
+  elif [[ "${DR_VALIDATION_HAMMERDB_ALL_VMS:-1}" == "1" ]]; then
+    expected="${DR_VALIDATION_EXPECTED_VMS:-4}"
+    pattern="."
+  else
+    expected="${DR_VALIDATION_BOOTSTRAP_VM_COUNT:-2}"
+    pattern="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"
+  fi
   local max_tries="${DR_VALIDATION_HEALTH_WAIT_TRIES:-40}"
   local sleep_sec="${DR_VALIDATION_HEALTH_WAIT_SLEEP:-30}"
 
@@ -295,22 +316,33 @@ wait_for_bootstrap_ssh_endpoints() {
   ensure_hub_kubeconfig
 
   if dr_validation_uses_hammerdb; then
-    log "Waiting for SSH endpoint on HammerDB VM ${DR_VALIDATION_HAMMERDB_VM}..."
+    local expected
+    expected="$(hammerdb_target_vm_count)"
+    log "Waiting for SSH endpoint(s) on ${expected} HammerDB target VM(s)..."
     local tries=0
     while [[ $tries -lt $max_tries ]]; do
-      local primary spoke_kc hosts
+      local primary spoke_kc hosts ready=0
       primary="$(determine_primary_cluster)"
       [[ -z "$primary" ]] && primary="ocp-primary"
       if spoke_kc="$(resolve_spoke_kubeconfig "$primary" 2>/dev/null)" && \
-        hosts="$(get_hammerdb_vm_host "$spoke_kc" 2>/dev/null)" && [[ -n "$hosts" ]]; then
-        log "SSH endpoint ready for ${DR_VALIDATION_HAMMERDB_VM} on ${primary}."
-        return 0
+        hosts="$(get_hammerdb_vm_hosts "$spoke_kc" 2>/dev/null)" && [[ -n "$hosts" ]]; then
+        while IFS= read -r _; do
+          ready=$((ready + 1))
+        done <<< "$hosts"
+        log "  primary=${primary} hammerdb_ssh_endpoints=${ready}/${expected}"
+        if [[ "$ready" -ge "$expected" ]]; then
+          log "SSH endpoints ready for HammerDB targets on ${primary}."
+          return 0
+        fi
+      else
+        ready=0
+        log "  primary=${primary} hammerdb_ssh_endpoints=${ready}/${expected}"
       fi
-      log "  primary=${primary} waiting for ${DR_VALIDATION_HAMMERDB_VM} SSH endpoint (attempt $((tries + 1))/${max_tries})..."
+      log "  waiting for HammerDB SSH endpoints (attempt $((tries + 1))/${max_tries})..."
       sleep "$sleep_sec"
       tries=$((tries + 1))
     done
-    err "Timed out waiting for HammerDB VM SSH endpoint."
+    err "Timed out waiting for HammerDB VM SSH endpoint(s)."
     return 1
   fi
 
@@ -561,21 +593,225 @@ dr_validation_uses_hammerdb() {
   [[ "${DR_VALIDATION_MODE}" == "hammerdb" ]]
 }
 
-get_hammerdb_vm_host() {
-  local kubeconfig="$1"
-  local target="${DR_VALIDATION_HAMMERDB_VM:-}"
-  while IFS=$'\t' read -r route_name host port; do
-    [[ -z "$route_name" ]] && continue
-    if [[ -n "$target" && "$route_name" != "$target" ]]; then
-      continue
-    fi
-    echo "${route_name}	${host}	${port:-22}"
-    return 0
-  done < <(list_vm_ssh_hosts "$kubeconfig")
-  if [[ -n "$target" ]]; then
-    err "HammerDB target VM '${target}' not found in gitops-vms SSH endpoints."
+hammerdb_vm_platform() {
+  local name="$1"
+  if [[ "$name" == windows* ]]; then
+    echo windows
+  else
+    echo linux
+  fi
+}
+
+hammerdb_vm_ssh_user() {
+  local name="$1"
+  if [[ "$(hammerdb_vm_platform "$name")" == windows ]]; then
+    echo "${WINDOWS_SSH_USER}"
+  else
+    echo "${SSH_USER}"
+  fi
+}
+
+hammerdb_vm_is_target() {
+  local name="$1"
+  local vm
+  if [[ -n "${DR_VALIDATION_HAMMERDB_VMS:-}" ]]; then
+    IFS=',' read -ra targets <<< "${DR_VALIDATION_HAMMERDB_VMS}"
+    for vm in "${targets[@]}"; do
+      vm="${vm#"${vm%%[![:space:]]*}"}"
+      vm="${vm%"${vm##*[![:space:]]}"}"
+      [[ -n "$vm" && "$name" == "$vm" ]] && return 0
+    done
     return 1
   fi
-  err "No SSH endpoints for HammerDB target in gitops-vms."
+  if [[ "${DR_VALIDATION_HAMMERDB_ALL_VMS:-1}" == "1" ]]; then
+    return 0
+  fi
+  [[ "$name" == "${DR_VALIDATION_HAMMERDB_VM}" ]]
+}
+
+hammerdb_target_vm_count() {
+  if [[ -n "${DR_VALIDATION_HAMMERDB_VMS:-}" ]]; then
+    local count=0 vm
+    IFS=',' read -ra targets <<< "${DR_VALIDATION_HAMMERDB_VMS}"
+    for vm in "${targets[@]}"; do
+      vm="${vm#"${vm%%[![:space:]]*}"}"
+      vm="${vm%"${vm##*[![:space:]]}"}"
+      [[ -n "$vm" ]] && count=$((count + 1))
+    done
+    echo "$count"
+    return 0
+  fi
+  if [[ "${DR_VALIDATION_HAMMERDB_ALL_VMS:-1}" == "1" ]]; then
+    echo "${DR_VALIDATION_EXPECTED_VMS:-4}"
+    return 0
+  fi
+  echo 1
+}
+
+load_mssql_credentials() {
+  if [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    && -n "${DR_VALIDATION_MSSQL_USER:-}" \
+    && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$VALUES_SECRET" ]]; then
+    return 1
+  fi
+  local parsed
+  parsed="$(python3 - "$VALUES_SECRET" <<'PY'
+import re, sys
+
+text = open(sys.argv[1]).read()
+values = {}
+for key, pattern in (
+    ("sa_password", r"sa_password:\s*['\"]?([^'\"#\s]+)"),
+    ("user", r"user:\s*['\"]?([^'\"#\s]+)"),
+    ("password", r"password:\s*['\"]?([^'\"#\s]+)"),
+):
+    m = re.search(
+        rf"mssql-hammerdb:\s*(?:#.*\n)*\s*{pattern}",
+        text,
+        re.MULTILINE,
+    )
+    if m:
+        values[key] = m.group(1)
+if len(values) < 3:
+    def secret_block(secret: str) -> str:
+        m = re.search(
+            rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+            text,
+            re.MULTILINE,
+        )
+        if m:
+            rest = text[m.end() :]
+            n = re.search(r"^(?:  )?- (?:name:|fields:)", rest, re.MULTILINE)
+            end = m.end() + (n.start() if n else len(rest))
+            return text[m.start() : end]
+        for m in re.finditer(r"^- fields:", text, re.MULTILINE):
+            rest = text[m.end() :]
+            n = re.search(r"^- (?:name:|fields:)", rest, re.MULTILINE)
+            block = text[m.start() : m.end() + (n.start() if n else len(rest))]
+            if re.search(rf"name:\s*{re.escape(secret)}\s*$", block, re.MULTILINE):
+                return block
+        return ""
+
+    block = secret_block("mssql-hammerdb")
+    if block:
+        values = {}
+        for key in ("sa_password", "user", "password"):
+            m = re.search(
+                rf"^\s*- name:\s*{re.escape(key)}\s*\n\s*value:\s*['\"]?([^'\"#\n]+)",
+                block,
+                re.MULTILINE,
+            )
+            if m:
+                values[key] = m.group(1)
+if len(values) == 3:
+    print(values["sa_password"])
+    print(values["user"])
+    print(values["password"])
+PY
+)" || return 1
+  if [[ -z "$parsed" ]]; then
+    return 1
+  fi
+  DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(sed -n '1p' <<<"$parsed")}"
+  DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(sed -n '2p' <<<"$parsed")}"
+  DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(sed -n '3p' <<<"$parsed")}"
+  [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    && -n "${DR_VALIDATION_MSSQL_USER:-}" \
+    && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]
+}
+
+ensure_mssql_credentials() {
+  load_mssql_credentials || true
+  if [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    && -n "${DR_VALIDATION_MSSQL_USER:-}" \
+    && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  err "Windows MSSQL install requires DR_VALIDATION_MSSQL_SA_PASSWORD, DR_VALIDATION_MSSQL_USER, and DR_VALIDATION_MSSQL_PASSWORD (or mssql-hammerdb in VALUES_SECRET)."
   return 1
+}
+
+load_windows_ssh_password() {
+  if [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  if [[ -n "${DR_VALIDATION_WINDOWS_SSH_PASSWORD:-}" ]]; then
+    WINDOWS_SSH_PASSWORD="${DR_VALIDATION_WINDOWS_SSH_PASSWORD}"
+    return 0
+  fi
+  if [[ -f "$VALUES_SECRET" ]]; then
+    WINDOWS_SSH_PASSWORD=$(python3 - "$VALUES_SECRET" <<'PY'
+import re, sys
+
+text = open(sys.argv[1]).read()
+m = re.search(
+    r"windows-admin:\s*(?:#.*\n)*\s*password:\s*['\"]?([^'\"#\s]+)",
+    text,
+    re.MULTILINE,
+)
+if m:
+    print(m.group(1))
+    raise SystemExit(0)
+
+def secret_block(secret: str) -> str:
+    m = re.search(
+        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+        text,
+        re.MULTILINE,
+    )
+    if m:
+        rest = text[m.end() :]
+        n = re.search(r"^(?:  )?- (?:name:|fields:)", rest, re.MULTILINE)
+        end = m.end() + (n.start() if n else len(rest))
+        return text[m.start() : end]
+    for m in re.finditer(r"^- fields:", text, re.MULTILINE):
+        rest = text[m.end() :]
+        n = re.search(r"^- (?:name:|fields:)", rest, re.MULTILINE)
+        block = text[m.start() : m.end() + (n.start() if n else len(rest))]
+        if re.search(rf"name:\s*{re.escape(secret)}\s*$", block, re.MULTILINE):
+            return block
+    return ""
+
+block = secret_block("windows-admin")
+if block:
+    m = re.search(
+        r"^\s*- name:\s*password\s*\n\s*value:\s*['\"]?([^'\"#\n]+)",
+        block,
+        re.MULTILINE,
+    )
+    if m:
+        print(m.group(1))
+        raise SystemExit(0)
+PY
+)
+    [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]] && return 0
+  fi
+  ensure_hub_kubeconfig
+  WINDOWS_SSH_PASSWORD=$(oc exec -n vault vault-0 -- vault kv get -field=password secret/global/windows-admin 2>/dev/null || true)
+  [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]]
+}
+
+get_hammerdb_vm_hosts() {
+  local kubeconfig="$1"
+  local count=0 route_name host port platform ssh_user
+  while IFS=$'\t' read -r route_name host port; do
+    [[ -z "$route_name" ]] && continue
+    hammerdb_vm_is_target "$route_name" || continue
+    platform="$(hammerdb_vm_platform "$route_name")"
+    ssh_user="$(hammerdb_vm_ssh_user "$route_name")"
+    echo "${route_name}	${host}	${port:-22}	${platform}	${ssh_user}"
+    count=$((count + 1))
+  done < <(list_vm_ssh_hosts "$kubeconfig")
+  if [[ "$count" -eq 0 ]]; then
+    err "No SSH endpoints for HammerDB targets in gitops-vms."
+    return 1
+  fi
+}
+
+get_hammerdb_vm_host() {
+  local kubeconfig="$1"
+  get_hammerdb_vm_hosts "$kubeconfig" | head -1
 }

@@ -30,6 +30,15 @@ def hammerdb_mode_active() -> bool:
     return dr_validation_mode() == "hammerdb" and not dr_validation_skipped()
 
 
+def expected_hammerdb_vm_count() -> int:
+    explicit = os.getenv("DR_VALIDATION_HAMMERDB_VMS", "").strip()
+    if explicit:
+        return len([part for part in explicit.split(",") if part.strip()])
+    if os.getenv("DR_VALIDATION_HAMMERDB_ALL_VMS", "1") == "1":
+        return int(os.getenv("DR_VALIDATION_EXPECTED_VMS", "4"))
+    return 1
+
+
 def hub_env(kubeconfig: str) -> dict[str, str]:
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
@@ -90,7 +99,19 @@ def load_hammerdb_snapshot(
     )
 
 
+def load_all_hammerdb_snapshots(snapshot_dir: Path) -> dict[str, dict]:
+    files = sorted(snapshot_dir.glob("*.db-snapshot.json"))
+    assert files, f"No DB snapshot JSON found under {snapshot_dir}"
+    return {
+        path.stem.replace(".db-snapshot", ""): json.loads(
+            path.read_text(encoding="utf-8")
+        )
+        for path in files
+    }
+
+
 def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
+    """Require audit rows and HammerDB TPC-C minimum row counts on one VM snapshot."""
     audit = snapshot.get("audit") or {}
     records = audit.get("records") or []
     assert records, "dr_validation_audit has no rows — workload not recording"
@@ -103,4 +124,30 @@ def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
 
     assert tpcc.get("customer", 0) >= 3000, (
         "customer table should contain 3000 rows per warehouse (numeric c_id + profile fields)"
+    )
+
+
+def assert_all_hammerdb_snapshots_ready(snapshot_dir: Path) -> None:
+    """Validate every edge-VM HammerDB snapshot under ``snapshot_dir``.
+
+    Iterates all ``*.db-snapshot.json`` files and applies the same per-VM checks as
+    ``assert_hammerdb_snapshot_ready`` (audit trail + ``TPCC_MIN_ROW_COUNTS``:
+    customer >= 3000, warehouse >= 1, item >= 100_000, etc.). Thresholds are
+    identical for PostgreSQL and SQL Server backends.
+    """
+    snapshots = load_all_hammerdb_snapshots(snapshot_dir)
+    expected = expected_hammerdb_vm_count()
+    assert len(snapshots) >= expected, (
+        f"Expected at least {expected} HammerDB snapshot(s), found {len(snapshots)}: "
+        f"{sorted(snapshots)}"
+    )
+    failures: list[str] = []
+    for vm_name, snapshot in sorted(snapshots.items()):
+        backend = snapshot.get("database_backend", "unknown")
+        try:
+            assert_hammerdb_snapshot_ready(snapshot)
+        except AssertionError as exc:
+            failures.append(f"{vm_name} ({backend}): {exc}")
+    assert not failures, "HammerDB snapshot validation failed:\n" + "\n".join(
+        f"  - {item}" for item in failures
     )

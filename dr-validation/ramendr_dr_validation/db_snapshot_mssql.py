@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Export PostgreSQL DR validation snapshots as JSON."""
+"""Export SQL Server DR validation snapshots as JSON."""
 
 from __future__ import annotations
 
-from psycopg2 import sql
+import re
 
-from ramendr_dr_validation.backends.postgres import PostgresBackend
-from ramendr_dr_validation.db_audit import load_env_file, validate_table_name
+from ramendr_dr_validation.backends.mssql import MssqlBackend
+from ramendr_dr_validation.db_audit_mssql import load_env_file
 from ramendr_dr_validation.db_snapshot_common import (
     build_snapshot_payload,
     format_committed_at,
@@ -14,64 +14,69 @@ from ramendr_dr_validation.db_snapshot_common import (
 )
 
 
-def fetch_audit_records(conn, backend: PostgresBackend) -> list[dict]:
-    """Return all audit rows ordered by sequence."""
-    audit_table = validate_table_name(backend.audit_table)
+_VALID_MSSQL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def _validate_mssql_identifier(name: str, kind: str) -> str:
+    if not _VALID_MSSQL_IDENTIFIER.match(name):
+        raise ValueError(f"Invalid MSSQL {kind}: {name!r}")
+    return name
+
+
+def _qualified_table(schema: str, table: str) -> str:
+    schema = _validate_mssql_identifier(schema, "schema")
+    table = _validate_mssql_identifier(table, "table")
+    return f"[{schema}].[{table}]"
+
+
+def fetch_audit_records(conn, backend: MssqlBackend) -> list[dict]:
+    audit_table = _qualified_table(backend.schema, backend.audit_table)
     with conn.cursor() as cur:
         cur.execute(
-            sql.SQL(
-                """
+            f"""
             SELECT seq, committed_at, hostname, source
-            FROM {}
+            FROM {audit_table}
             ORDER BY seq
             """
-            ).format(sql.Identifier(audit_table))
         )
         rows = cur.fetchall()
     return [
         {
             "seq": int(seq),
             "committed_at": format_committed_at(committed_at),
-            "hostname": hostname,
-            "source": source,
+            "hostname": str(hostname),
+            "source": str(source),
         }
         for seq, committed_at, hostname, source in rows
     ]
 
 
-def fetch_tpcc_counts(conn, backend: PostgresBackend) -> dict[str, int]:
-    """Return row counts for HammerDB TPC-C tables that exist in the schema."""
+def fetch_tpcc_counts(conn, backend: MssqlBackend) -> dict[str, int]:
     counts: dict[str, int] = {}
     with conn.cursor() as cur:
         for table in backend.tpcc_tables:
             cur.execute(
                 """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                )
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
                 """,
                 (backend.schema, table),
             )
-            if not bool(cur.fetchone()[0]):
+            if not int(cur.fetchone()[0]):
                 continue
             cur.execute(
-                sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
-                    sql.Identifier(backend.schema),
-                    sql.Identifier(table),
-                )
+                f"SELECT COUNT(*) FROM {_qualified_table(backend.schema, table)}"
             )
             counts[table] = int(cur.fetchone()[0])
     return counts
 
 
 def collect_snapshot(
-    backend: PostgresBackend,
+    backend: MssqlBackend,
     *,
     vm_name: str | None = None,
 ) -> dict:
-    """Build a JSON-serializable snapshot of audit + TPC-C state."""
     conn = backend.connect()
     try:
         audit_records = fetch_audit_records(conn, backend)
@@ -80,7 +85,7 @@ def collect_snapshot(
         conn.close()
 
     return build_snapshot_payload(
-        database_backend="postgres",
+        database_backend="mssql",
         database=backend.database,
         audit_records=audit_records,
         tpcc_counts=tpcc_counts,
@@ -89,14 +94,13 @@ def collect_snapshot(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint: print a snapshot JSON document to stdout."""
     return run_snapshot_cli(
         argv,
-        description="Export DR validation DB snapshot JSON.",
-        default_env_file="/etc/ramendr-dr-validation/db.env",
-        database_backend="postgres",
+        description="Export DR validation SQL Server snapshot JSON.",
+        default_env_file=r"C:\ProgramData\ramendr-dr-validation\db.env",
+        database_backend="mssql",
         load_env_file=load_env_file,
-        backend_factory=PostgresBackend.from_env,
+        backend_factory=MssqlBackend.from_env,
         fetch_audit_records=fetch_audit_records,
         fetch_tpcc_counts=fetch_tpcc_counts,
     )

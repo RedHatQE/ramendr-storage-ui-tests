@@ -12,7 +12,7 @@ if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${hub_install_dir}/auth/kubeconfig" ]]; 
   export KUBECONFIG="${hub_install_dir}/auth/kubeconfig"
 fi
 
-echo "Validation mode: hammerdb (PostgreSQL on ${DR_VALIDATION_HAMMERDB_VM})"
+echo "Validation mode: hammerdb (all edge VMs when DR_VALIDATION_HAMMERDB_ALL_VMS=1)"
 echo "Checking HammerDB workload via in-cluster DB snapshot..."
 
 mkdir -p "${REPO_ROOT}/.work/dr-validation-db"
@@ -27,12 +27,17 @@ fi
 shopt -s nullglob
 snapshots=("$dest"/*.db-snapshot.json)
 if [[ ${#snapshots[@]} -eq 0 ]]; then
-  err "No DB snapshot collected for ${DR_VALIDATION_HAMMERDB_VM}."
+  err "No DB snapshot collected for HammerDB target VM(s)."
   exit 1
 fi
 
 max_age="${DR_VALIDATION_STATUS_MAX_AGE_SEC:-300}"
 overall_fail=0
+expected_snapshots="$(hammerdb_target_vm_count)"
+if [[ ${#snapshots[@]} -lt "$expected_snapshots" ]]; then
+  warn "Expected ${expected_snapshots} snapshot(s), collected ${#snapshots[@]}."
+  overall_fail=1
+fi
 for f in "${snapshots[@]}"; do
   name=$(basename "$f" .db-snapshot.json)
   read -r record_count last_seq age_ok tpcc_ok < <(

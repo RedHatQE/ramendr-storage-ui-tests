@@ -335,6 +335,8 @@ sudo install -m 0755 "${REPO_ROOT}/hammerdb/run-autopilot.sh" /usr/local/bin/ram
 sudo install -d -m 0755 /usr/local/lib/ramendr_dr_validation/backends
 sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/db_audit.py" \
   /usr/local/lib/ramendr_dr_validation/db_audit.py
+sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/db_snapshot_common.py" \
+  /usr/local/lib/ramendr_dr_validation/db_snapshot_common.py
 sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/db_snapshot.py" \
   /usr/local/lib/ramendr_dr_validation/db_snapshot.py
 sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/tpcc_schema.py" \

@@ -37,8 +37,8 @@ values files. Local edits next to the checkout do not affect Argo CD.
 
 **Mixed edge VM fleet (`gitops-vms`):**
 
-- 2× RHEL — `rhel9-node-*` (DataVolume data disk) + `rhel9-node-pvc-*` (PVC data disk); HammerDB on `rhel9-node-001`
-- 1× Windows Server 2022 (`windows2k22-server-*`) + 1× Windows Server 2025 (`windows2k25-server-*`)
+- 2× RHEL — `rhel9-node-*` (DataVolume data disk) + `rhel9-node-pvc-*` (PVC data disk); HammerDB PostgreSQL on both
+- 1× Windows Server 2022 (`windows2k22-server-*`) + 1× Windows Server 2025 (`windows2k25-server-*`); HammerDB SQL Server
 - Windows OS disks clone from fork `externalDataSources`; registry import requires
   **`privatevm-credentials`** (Quay robot account) in `values-secret.yaml`
 - **`windows-admin`** in `values-secret.yaml` — `password` for local Administrator SSH
