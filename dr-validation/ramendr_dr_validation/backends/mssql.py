@@ -12,11 +12,11 @@ from ramendr_dr_validation.tpcc_schema import TPCC_TABLE_NAMES
 class MssqlBackend:
     """Connection settings for the HammerDB SQL Server workload on a Windows VM."""
 
+    user: str
+    password: str
     host: str = "127.0.0.1"
     port: int = 1433
     database: str = "tpcc"
-    user: str = "hammerdb"
-    password: str = "hammerdb"
     instance: str = "SQLEXPRESS"
     schema: str = "dbo"
     audit_table: str = "dr_validation_audit"
@@ -24,12 +24,18 @@ class MssqlBackend:
     @classmethod
     def from_env(cls) -> MssqlBackend:
         """Build settings from DR_VALIDATION_MSSQL_* environment variables."""
+        user = os.environ.get("DR_VALIDATION_MSSQL_USER", "").strip()
+        password = os.environ.get("DR_VALIDATION_MSSQL_PASSWORD", "").strip()
+        if not user:
+            raise ValueError("DR_VALIDATION_MSSQL_USER is required")
+        if not password:
+            raise ValueError("DR_VALIDATION_MSSQL_PASSWORD is required")
         return cls(
             host=os.environ.get("DR_VALIDATION_MSSQL_HOST", "127.0.0.1"),
             port=int(os.environ.get("DR_VALIDATION_MSSQL_PORT", "1433")),
             database=os.environ.get("DR_VALIDATION_MSSQL_DATABASE", "tpcc"),
-            user=os.environ.get("DR_VALIDATION_MSSQL_USER", "hammerdb"),
-            password=os.environ.get("DR_VALIDATION_MSSQL_PASSWORD", "hammerdb"),
+            user=user,
+            password=password,
             instance=os.environ.get("DR_VALIDATION_MSSQL_INSTANCE", "SQLEXPRESS"),
             schema=os.environ.get("DR_VALIDATION_MSSQL_SCHEMA", "dbo"),
             audit_table=os.environ.get(
@@ -42,13 +48,8 @@ class MssqlBackend:
         import pymssql
 
         server = self.host
-        if self.instance and self.host.lower() in {
-            "(local)",
-            "localhost",
-            "127.0.0.1",
-            ".",
-        }:
-            server = f"(local)\\{self.instance}"
+        if self.instance:
+            server = f"{self.host}\\{self.instance}"
         trusted = os.environ.get("DR_VALIDATION_MSSQL_TRUSTED", "0") == "1"
         connect_kwargs = {
             "server": server,

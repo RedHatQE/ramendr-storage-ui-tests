@@ -18,7 +18,8 @@ Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
    this automatically; for manual runs use `./scripts/dr-validation/save-db-baseline-snapshot.sh`).
 3. **Run DR** — failover / relocate on DRPC `gitops-vm-protection`.
 4. **After DR** — sanity test or `./scripts/dr-validation/post-dr-automation.sh` validates
-   PostgreSQL table data automatically.
+   TPC-C table data on all supported platforms (PostgreSQL on Linux, SQL Server on Windows)
+   automatically.
 
 A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline,
 and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
@@ -40,6 +41,8 @@ Windows VMs receive **SQL Server 2022 Express** (via staged `SQL2022-SSEI-Expr.e
 install Job stages installers on the utility container and copies them over SSH — no winget,
 choco, or golden-image changes required. Windows `Administrator` password is read from Vault
 `secret/global/windows-admin` or `windows-admin` in `VALUES_SECRET`.
+`mssql-hammerdb` in `VALUES_SECRET` (`sa_password`, `user`, `password`) for Windows SQL
+install credentials, or set `DR_VALIDATION_MSSQL_*` in the environment.
 
 Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
 

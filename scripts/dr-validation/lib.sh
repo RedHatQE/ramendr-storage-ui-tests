@@ -265,10 +265,13 @@ _count_ssh_hosts_on_spoke() {
   echo "$count"
 }
 
-# Wait for HammerDB target VMs before bootstrap (full fleet when ALL_VMS=1).
+# Wait for HammerDB target VMs before bootstrap (respects allowlist via hammerdb_target_vm_count).
 wait_for_bootstrap_vms_healthy() {
   local expected pattern
-  if [[ "${DR_VALIDATION_HAMMERDB_ALL_VMS:-1}" == "1" ]] && dr_validation_uses_hammerdb; then
+  if dr_validation_uses_hammerdb; then
+    expected="$(hammerdb_target_vm_count)"
+    pattern="."
+  elif [[ "${DR_VALIDATION_HAMMERDB_ALL_VMS:-1}" == "1" ]]; then
     expected="${DR_VALIDATION_EXPECTED_VMS:-4}"
     pattern="."
   else
@@ -643,6 +646,61 @@ hammerdb_target_vm_count() {
     return 0
   fi
   echo 1
+}
+
+load_mssql_credentials() {
+  if [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    && -n "${DR_VALIDATION_MSSQL_USER:-}" \
+    && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$VALUES_SECRET" ]]; then
+    return 1
+  fi
+  local parsed
+  parsed="$(python3 - "$VALUES_SECRET" <<'PY'
+import re, sys
+
+text = open(sys.argv[1]).read()
+values = {}
+for key, pattern in (
+    ("sa_password", r"sa_password:\s*['\"]?([^'\"#\s]+)"),
+    ("user", r"user:\s*['\"]?([^'\"#\s]+)"),
+    ("password", r"password:\s*['\"]?([^'\"#\s]+)"),
+):
+    m = re.search(
+        rf"mssql-hammerdb:\s*(?:#.*\n)*\s*{pattern}",
+        text,
+        re.MULTILINE,
+    )
+    if m:
+        values[key] = m.group(1)
+if len(values) == 3:
+    print(values["sa_password"])
+    print(values["user"])
+    print(values["password"])
+PY
+)" || return 1
+  if [[ -z "$parsed" ]]; then
+    return 1
+  fi
+  DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(sed -n '1p' <<<"$parsed")}"
+  DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(sed -n '2p' <<<"$parsed")}"
+  DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(sed -n '3p' <<<"$parsed")}"
+  [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    && -n "${DR_VALIDATION_MSSQL_USER:-}" \
+    && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]
+}
+
+ensure_mssql_credentials() {
+  load_mssql_credentials || true
+  if [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    && -n "${DR_VALIDATION_MSSQL_USER:-}" \
+    && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  err "Windows MSSQL install requires DR_VALIDATION_MSSQL_SA_PASSWORD, DR_VALIDATION_MSSQL_USER, and DR_VALIDATION_MSSQL_PASSWORD (or mssql-hammerdb in VALUES_SECRET)."
+  return 1
 }
 
 load_windows_ssh_password() {

@@ -59,6 +59,7 @@ if echo "$HOSTS" | awk -F '\t' '$4 == "windows" { found=1 } END { exit !found }'
     err "Windows HammerDB target(s) require WINDOWS_SSH_PASSWORD or windows-admin in VALUES_SECRET."
     exit 1
   fi
+  ensure_mssql_credentials || exit 1
 fi
 log "Installing HammerDB workload on ${TARGET_COUNT} edge VM(s) (${PRIMARY})..."
 
@@ -71,7 +72,6 @@ install -m 0644 "$DR_VALIDATION_DIR/hammerdb/install-remote-windows.cmd" "$TMP_D
 install -m 0644 "$DR_VALIDATION_DIR/hammerdb/run-autopilot-mssql.ps1" "$TMP_DIR/hammerdb/run-autopilot-mssql.ps1"
 install -m 0644 "$DR_VALIDATION_DIR/hammerdb/sql/init-audit.sql" "$TMP_DIR/hammerdb/sql/init-audit.sql"
 install -m 0644 "$DR_VALIDATION_DIR/hammerdb/sql/init-audit-mssql.sql" "$TMP_DIR/hammerdb/sql/init-audit-mssql.sql"
-install -m 0644 "$DR_VALIDATION_DIR/hammerdb/sql/sql-express-hammerdb.ini" "$TMP_DIR/hammerdb/sql/sql-express-hammerdb.ini"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_audit.py" "$TMP_DIR/ramendr_dr_validation/db_audit.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_audit_mssql.py" "$TMP_DIR/ramendr_dr_validation/db_audit_mssql.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot.py"
@@ -97,6 +97,11 @@ SECRET_CREATE=(oc create secret generic ramendr-dr-hammerdb-ssh
   -n "$VM_NAMESPACE" --dry-run=client -o yaml)
 SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS:-}")
 SECRET_CREATE+=(--from-literal=windows-password="${WINDOWS_PASS:-}")
+if [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" ]]; then
+  SECRET_CREATE+=(--from-literal=mssql-sa-password="${DR_VALIDATION_MSSQL_SA_PASSWORD}")
+  SECRET_CREATE+=(--from-literal=mssql-user="${DR_VALIDATION_MSSQL_USER}")
+  SECRET_CREATE+=(--from-literal=mssql-password="${DR_VALIDATION_MSSQL_PASSWORD}")
+fi
 if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
   SECRET_CREATE+=(--from-file=ssh-privatekey="$SSH_KEY_FILE")
 fi
@@ -144,6 +149,9 @@ spec:
             dnf install -y sshpass openssh-clients tar gzip >/dev/null 2>&1 || true
             LINUX_PASS="\$(tr -d '\n' < /ssh/linux-password 2>/dev/null || true)"
             WINDOWS_PASS="\$(tr -d '\n' < /ssh/windows-password 2>/dev/null || true)"
+            MSSQL_SA="\$(tr -d '\n' < /ssh/mssql-sa-password 2>/dev/null || true)"
+            MSSQL_USER="\$(tr -d '\n' < /ssh/mssql-user 2>/dev/null || true)"
+            MSSQL_PASSWORD="\$(tr -d '\n' < /ssh/mssql-password 2>/dev/null || true)"
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
             cp /ssh/hosts.tsv /tmp/hosts.tsv
             mkdir -p /tmp/ramendr-dr-validation-install /tmp/windows-staging
@@ -232,27 +240,31 @@ spec:
                 echo "FAILED \$name: missing windows-password"
                 return 1
               fi
+              if [[ -z "\$MSSQL_SA" || -z "\$MSSQL_USER" || -z "\$MSSQL_PASSWORD" ]]; then
+                echo "FAILED \$name: missing MSSQL credentials in install secret"
+                return 1
+              fi
+              printf 'DR_VALIDATION_MSSQL_SA_PASSWORD=%s\nDR_VALIDATION_MSSQL_USER=%s\nDR_VALIDATION_MSSQL_PASSWORD=%s\n' \
+                "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" > /tmp/mssql-install.env
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$prep" && \
               sshpass -p "\$WINDOWS_PASS" scp \$scp_opts /payload/payload.tgz /payload/install-remote-windows.cmd \
                 "\${ssh_user}@\${host}:C:/Temp/" && \
-              if [[ -s "/tmp/windows-staging/\${sql_installer}" ]]; then
+              sshpass -p "\$WINDOWS_PASS" scp \$scp_opts /tmp/mssql-install.env \
+                "\${ssh_user}@\${host}:C:/Temp/mssql-install.env" && \
+              { [[ ! -s "/tmp/windows-staging/\${sql_installer}" ]] || \
                 sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
-                  "/tmp/windows-staging/\${sql_installer}" "\${ssh_user}@\${host}:C:/Temp/\${sql_installer}" || true
-              fi
-              if [[ -s "/tmp/windows-staging/\${python_installer}" ]]; then
+                  "/tmp/windows-staging/\${sql_installer}" "\${ssh_user}@\${host}:C:/Temp/\${sql_installer}"; } && \
+              { [[ ! -s "/tmp/windows-staging/\${python_installer}" ]] || \
                 sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
-                  "/tmp/windows-staging/\${python_installer}" "\${ssh_user}@\${host}:C:/Temp/\${python_installer}" || true
-              fi
-              if [[ -s "/tmp/windows-staging/\${odbc_installer}" ]]; then
+                  "/tmp/windows-staging/\${python_installer}" "\${ssh_user}@\${host}:C:/Temp/\${python_installer}"; } && \
+              { [[ ! -s "/tmp/windows-staging/\${odbc_installer}" ]] || \
                 sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
-                  "/tmp/windows-staging/\${odbc_installer}" "\${ssh_user}@\${host}:C:/Temp/\${odbc_installer}" || true
-              fi
-              if [[ -s "/tmp/windows-staging/\${hammer_zip}" ]]; then
+                  "/tmp/windows-staging/\${odbc_installer}" "\${ssh_user}@\${host}:C:/Temp/\${odbc_installer}"; } && \
+              { [[ ! -s "/tmp/windows-staging/\${hammer_zip}" ]] || \
                 sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
-                  "/tmp/windows-staging/\${hammer_zip}" "\${ssh_user}@\${host}:C:/Temp/\${hammer_zip}" || true
-              fi
+                  "/tmp/windows-staging/\${hammer_zip}" "\${ssh_user}@\${host}:C:/Temp/\${hammer_zip}"; } && \
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote"
@@ -283,6 +295,15 @@ spec:
             optional: true
           - key: windows-password
             path: windows-password
+            optional: true
+          - key: mssql-sa-password
+            path: mssql-sa-password
+            optional: true
+          - key: mssql-user
+            path: mssql-user
+            optional: true
+          - key: mssql-password
+            path: mssql-password
             optional: true
           - key: ssh-privatekey
             path: ssh-privatekey

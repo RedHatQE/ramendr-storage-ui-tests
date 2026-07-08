@@ -19,12 +19,17 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def _qualified_table(schema: str, table: str) -> str:
+    return f"[{schema}].[{table}]"
+
+
 def fetch_audit_records(conn, backend: MssqlBackend) -> list[dict]:
+    audit_table = _qualified_table(backend.schema, backend.audit_table)
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT seq, committed_at, hostname, source
-            FROM dbo.{backend.audit_table}
+            FROM {audit_table}
             ORDER BY seq
             """
         )
@@ -65,7 +70,9 @@ def fetch_tpcc_counts(conn, backend: MssqlBackend) -> dict[str, int]:
             )
             if not int(cur.fetchone()[0]):
                 continue
-            cur.execute(f"SELECT COUNT(*) FROM dbo.{table}")
+            cur.execute(
+                f"SELECT COUNT(*) FROM {_qualified_table(backend.schema, table)}"
+            )
             counts[table] = int(cur.fetchone()[0])
     return counts
 

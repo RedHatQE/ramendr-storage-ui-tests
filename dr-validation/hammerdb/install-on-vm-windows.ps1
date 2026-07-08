@@ -14,10 +14,34 @@ $HammerRoot = 'C:\HammerDB'
 $HammerHome = Join-Path $HammerRoot 'current'
 $Instance = if ($env:DR_VALIDATION_MSSQL_INSTANCE) { $env:DR_VALIDATION_MSSQL_INSTANCE } else { 'SQLEXPRESS' }
 $Database = if ($env:DR_VALIDATION_MSSQL_DATABASE) { $env:DR_VALIDATION_MSSQL_DATABASE } else { 'tpcc' }
-$SaPassword = if ($env:DR_VALIDATION_MSSQL_SA_PASSWORD) { $env:DR_VALIDATION_MSSQL_SA_PASSWORD } else { 'RamenDR-Sa-ChangeMe1!' }
-$User = if ($env:DR_VALIDATION_MSSQL_USER) { $env:DR_VALIDATION_MSSQL_USER } else { 'hammerdb' }
-$Password = if ($env:DR_VALIDATION_MSSQL_PASSWORD) { $env:DR_VALIDATION_MSSQL_PASSWORD } else { 'hammerdb' }
 $Warehouses = if ($env:DR_VALIDATION_HAMMERDB_WAREHOUSES) { $env:DR_VALIDATION_HAMMERDB_WAREHOUSES } else { '1' }
+
+function Import-InstallCredentials {
+    $credentialFile = 'C:\Temp\mssql-install.env'
+    if (Test-Path $credentialFile) {
+        Get-Content $credentialFile | ForEach-Object {
+            if ($_ -match '^\s*([^#=]+)=(.*)$') {
+                $name = $matches[1].Trim()
+                $value = $matches[2].Trim().Trim('"')
+                Set-Item -Path "env:$name" -Value $value
+            }
+        }
+    }
+}
+
+function Require-EnvVar {
+    param([string]$Name)
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "Required environment variable $Name is not set."
+    }
+    return $value
+}
+
+Import-InstallCredentials
+$SaPassword = Require-EnvVar 'DR_VALIDATION_MSSQL_SA_PASSWORD'
+$User = Require-EnvVar 'DR_VALIDATION_MSSQL_USER'
+$Password = Require-EnvVar 'DR_VALIDATION_MSSQL_PASSWORD'
 
 Write-Host '=== RamenDR HammerDB install (SQL Server / Windows) ==='
 
@@ -213,16 +237,19 @@ function Ensure-Python {
     throw 'Python not found and no staged installer at C:\Temp\python-amd64.exe'
 }
 
-function Get-TpccCoreTableCount {
-    $sqlcmd = $null
+function Get-SqlCmdPath {
     foreach ($candidate in @(
         "${env:ProgramFiles}\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE",
         "${env:ProgramFiles}\Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe",
         "${env:ProgramFiles(x86)}\Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe"
     )) {
-        if (Test-Path $candidate) { $sqlcmd = $candidate; break }
+        if (Test-Path $candidate) { return $candidate }
     }
-    if (-not $sqlcmd) { $sqlcmd = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source }
+    return (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source
+}
+
+function Get-TpccCoreTableCount {
+    $sqlcmd = Get-SqlCmdPath
     if (-not $sqlcmd) { return 0 }
     $query = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('customer','orders','warehouse')"
     $out = & $sqlcmd -S "(local)\$Instance" -U $User -P $Password -d $Database -h -1 -W -b -Q $query 2>$null
@@ -231,15 +258,7 @@ function Get-TpccCoreTableCount {
 }
 
 function Get-AuditRowCount {
-    $sqlcmd = $null
-    foreach ($candidate in @(
-        "${env:ProgramFiles}\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE",
-        "${env:ProgramFiles}\Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe",
-        "${env:ProgramFiles(x86)}\Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe"
-    )) {
-        if (Test-Path $candidate) { $sqlcmd = $candidate; break }
-    }
-    if (-not $sqlcmd) { $sqlcmd = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source }
+    $sqlcmd = Get-SqlCmdPath
     if (-not $sqlcmd) { return 0 }
     $out = & $sqlcmd -S "(local)\$Instance" -U $User -P $Password -d $Database -h -1 -W -b -Q 'SELECT COUNT(*) FROM dr_validation_audit' 2>$null
     if ($LASTEXITCODE -ne 0) { return 0 }
@@ -248,21 +267,7 @@ function Get-AuditRowCount {
 
 function Invoke-SqlCmd {
     param([string]$Query)
-    $sqlcmd = $null
-    $candidates = @(
-        "${env:ProgramFiles}\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE",
-        "${env:ProgramFiles}\Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe",
-        "${env:ProgramFiles(x86)}\Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe"
-    )
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) {
-            $sqlcmd = $candidate
-            break
-        }
-    }
-    if (-not $sqlcmd) {
-        $sqlcmd = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source
-    }
+    $sqlcmd = Get-SqlCmdPath
     if (-not $sqlcmd) { throw 'sqlcmd not found after SQL Server install' }
 
     & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -b -Q $Query
@@ -331,7 +336,6 @@ DR_VALIDATION_MSSQL_DATABASE=$Database
 DR_VALIDATION_MSSQL_USER=$User
 DR_VALIDATION_MSSQL_PASSWORD=$Password
 DR_VALIDATION_MSSQL_INSTANCE=$Instance
-DR_VALIDATION_MSSQL_SA_PASSWORD=$SaPassword
 DR_VALIDATION_HAMMERDB_WAREHOUSES=$Warehouses
 DR_VALIDATION_HAMMERDB_HOME=$HammerHome
 "@ | Set-Content -Encoding ASCII $EnvFile

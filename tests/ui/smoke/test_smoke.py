@@ -535,7 +535,7 @@ class TestInfraSmoke:
         )
 
     # ------------------------------------------------------------------
-    # HammerDB PostgreSQL DR validation workload
+    # HammerDB DR validation workload (PostgreSQL + SQL Server)
     # ------------------------------------------------------------------
 
     def test_hammerdb_tables_populated_on_all_vms(self, hub_kubeconfig, tmp_path):

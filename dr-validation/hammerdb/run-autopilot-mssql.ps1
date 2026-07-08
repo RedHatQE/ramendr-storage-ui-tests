@@ -7,7 +7,7 @@ if (Test-Path $EnvFile) {
         if ($_ -match '^\s*([^#=]+)=(.*)$') {
             $name = $matches[1].Trim()
             $value = $matches[2].Trim().Trim('"')
-            if (-not (Get-Variable -Name "env:$name" -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path "env:$name")) {
                 Set-Item -Path "env:$name" -Value $value
             }
         }
@@ -92,3 +92,4 @@ if (-not (Test-Path $schemaFlag)) {
 Write-Host 'Starting HammerDB TPC-C workload...'
 $runTcl | Set-Content -Encoding ASCII (Join-Path $StateDir 'runload.tcl')
 & .\hammerdbcli.exe tcl auto (Join-Path $StateDir 'runload.tcl')
+if ($LASTEXITCODE -ne 0) { throw 'HammerDB TPC-C workload failed' }
