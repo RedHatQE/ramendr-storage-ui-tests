@@ -41,9 +41,10 @@ Windows VMs receive **SQL Server 2022 Express** (via staged `SQL2022-SSEI-Expr.e
 `download.microsoft.com`) and **HammerDB** `HammerDB-5.0-Prod-Win.tar.gz`. The in-cluster
 install Job stages installers on the utility container and copies them over SSH — no winget,
 choco, or golden-image changes required. Windows `Administrator` password is read from Vault
-`secret/global/windows-admin` or `windows-admin` in `VALUES_SECRET`.
+`secret/global/windows-admin` or `windows-admin` in `VALUES_SECRET` (v2.0 `secrets` list form).
 `mssql-hammerdb` in `VALUES_SECRET` (`sa_password`, `user`, `password`) for Windows SQL
-install credentials, or set `DR_VALIDATION_MSSQL_*` in the environment.
+install credentials, or set `DR_VALIDATION_MSSQL_*` in the environment. See
+[`examples/values-secret-v2-windows.fragment.yaml`](examples/values-secret-v2-windows.fragment.yaml).
 
 Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
 

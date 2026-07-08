@@ -55,21 +55,31 @@ if m:
     print(m.group(1))
     raise SystemExit(0)
 
-# Fork values-secret v2 list form (name/fields order may vary):
-# - name: windows-admin
-#   fields:
-#   - name: password
-#     value: <redacted-password>
-for item in re.finditer(
-    r"^- (?:fields:|name:)[^\n]*(?:\n(?!^- ).*?)*?(?=^- |\nversion:|\Z)",
-    text,
-    re.DOTALL | re.MULTILINE,
-):
-    chunk = item.group(0)
-    if not re.search(r"name:\s*windows-admin\s*$", chunk, re.MULTILINE):
-        continue
+def secret_block(secret: str) -> str:
     m = re.search(
-        r"- name:\s*password\s*\n\s*value:\s*['\"]?([^'\"#\n]+)", chunk
+        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+        text,
+        re.MULTILINE,
+    )
+    if m:
+        rest = text[m.end() :]
+        n = re.search(r"^(?:  )?- (?:name:|fields:)", rest, re.MULTILINE)
+        end = m.end() + (n.start() if n else len(rest))
+        return text[m.start() : end]
+    for m in re.finditer(r"^- fields:", text, re.MULTILINE):
+        rest = text[m.end() :]
+        n = re.search(r"^- (?:name:|fields:)", rest, re.MULTILINE)
+        block = text[m.start() : m.end() + (n.start() if n else len(rest))]
+        if re.search(rf"name:\s*{re.escape(secret)}\s*$", block, re.MULTILINE):
+            return block
+    return ""
+
+block = secret_block("windows-admin")
+if block:
+    m = re.search(
+        r"^\s*- name:\s*password\s*\n\s*value:\s*['\"]?([^'\"#\n]+)",
+        block,
+        re.MULTILINE,
     )
     if m:
         print(m.group(1))

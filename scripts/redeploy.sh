@@ -83,6 +83,24 @@ check_prerequisites() {
   if [[ ! -f "$VALUES_SECRET" ]]; then
     err "Missing secrets file: $VALUES_SECRET"
     missing=1
+  elif [[ "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]]; then
+    local missing_windows_secrets
+    missing_windows_secrets=$(python3 - "$VALUES_SECRET" <<'PY'
+import re, sys
+
+text = open(sys.argv[1]).read()
+for name in ("privatevm-credentials", "windows-admin"):
+    if re.search(rf"^\s*- name:\s*{re.escape(name)}\s*$", text, re.MULTILINE):
+        continue
+    if re.search(rf"^{re.escape(name)}:", text, re.MULTILINE):
+        continue
+    print(name)
+PY
+)
+    if [[ -n "${missing_windows_secrets:-}" ]]; then
+      warn "VALUES_SECRET missing Windows VM secrets: $(tr '\n' ' ' <<<"$missing_windows_secrets")"
+      warn "Add privatevm-credentials and windows-admin before redeploy (see dr-validation/examples/values-secret-v2-windows.fragment.yaml)."
+    fi
   fi
   for dir_var in HUB_INSTALL_DIR PRIMARY_INSTALL_DIR SECONDARY_INSTALL_DIR; do
     local dir="${!dir_var}"
