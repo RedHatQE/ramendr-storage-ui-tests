@@ -111,6 +111,7 @@ def load_all_hammerdb_snapshots(snapshot_dir: Path) -> dict[str, dict]:
 
 
 def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
+    """Require audit rows and HammerDB TPC-C minimum row counts on one VM snapshot."""
     audit = snapshot.get("audit") or {}
     records = audit.get("records") or []
     assert records, "dr_validation_audit has no rows — workload not recording"
@@ -127,6 +128,13 @@ def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
 
 
 def assert_all_hammerdb_snapshots_ready(snapshot_dir: Path) -> None:
+    """Validate every edge-VM HammerDB snapshot under ``snapshot_dir``.
+
+    Iterates all ``*.db-snapshot.json`` files and applies the same per-VM checks as
+    ``assert_hammerdb_snapshot_ready`` (audit trail + ``TPCC_MIN_ROW_COUNTS``:
+    customer >= 3000, warehouse >= 1, item >= 100_000, etc.). Thresholds are
+    identical for PostgreSQL and SQL Server backends.
+    """
     snapshots = load_all_hammerdb_snapshots(snapshot_dir)
     expected = expected_hammerdb_vm_count()
     assert len(snapshots) >= expected, (
@@ -135,15 +143,11 @@ def assert_all_hammerdb_snapshots_ready(snapshot_dir: Path) -> None:
     )
     failures: list[str] = []
     for vm_name, snapshot in sorted(snapshots.items()):
+        backend = snapshot.get("database_backend", "unknown")
         try:
             assert_hammerdb_snapshot_ready(snapshot)
-            tpcc = snapshot["tpcc"]
-            if tpcc.get("warehouse", 0) < 1 or tpcc.get("item", 0) < 100_000:
-                failures.append(
-                    f"{vm_name}: warehouse/item counts too low ({tpcc.get('warehouse')}, {tpcc.get('item')})"
-                )
         except AssertionError as exc:
-            failures.append(f"{vm_name}: {exc}")
+            failures.append(f"{vm_name} ({backend}): {exc}")
     assert not failures, "HammerDB snapshot validation failed:\n" + "\n".join(
         f"  - {item}" for item in failures
     )

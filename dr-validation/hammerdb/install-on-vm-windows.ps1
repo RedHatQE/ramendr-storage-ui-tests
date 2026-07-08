@@ -58,6 +58,36 @@ function Protect-SecretFile {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Test-StagedExecutable {
+    param(
+        [string]$Path,
+        [string]$Label,
+        [int]$MinBytes = 1000000
+    )
+    if (-not (Test-Path $Path)) {
+        throw "$Label missing at $Path (expected from in-cluster staging)."
+    }
+    $info = Get-Item $Path
+    if ($info.Length -lt $MinBytes) {
+        throw "$Label at $Path is too small ($($info.Length) bytes); expected a binary payload."
+    }
+    $header = [byte[]](Get-Content -Path $Path -Encoding Byte -TotalCount 512)
+    if ($header.Length -lt 2) {
+        throw "$Label at $Path is unreadable or truncated."
+    }
+    $textPrefix = [System.Text.Encoding]::ASCII.GetString(
+        $header[0..([Math]::Min(63, $header.Length - 1))]
+    ).TrimStart()
+    if ($textPrefix -match '^(?:<!DOCTYPE|<html\b|<HTML\b)') {
+        throw "$Label at $Path looks like HTML, not an executable (check download URL / proxy)."
+    }
+    if ($header[0] -ne 0x4D -or $header[1] -ne 0x5A) {
+        throw "$Label at $Path is not a Windows PE executable (missing MZ header)."
+    }
+    $hash = Get-FileHash -Algorithm SHA256 -Path $Path
+    Write-Host "Validated $Label at $Path ($($info.Length) bytes, SHA256=$($hash.Hash))"
+}
+
 function Import-InstallCredentials {
     $credentialFile = 'C:\Temp\mssql-install.env'
     if (-not (Test-Path $credentialFile)) { return }
@@ -101,7 +131,10 @@ function Enable-SqlPrerequisites {
         return
     }
     Write-Host 'Enabling .NET Framework 3.5 (SQL Server prerequisite)...'
-    Install-WindowsFeature -Name NET-Framework-Core -ErrorAction SilentlyContinue | Out-Null
+    $result = Install-WindowsFeature -Name NET-Framework-Core
+    if (-not $result.Success) {
+        throw ".NET Framework 3.5 installation failed: exit code $($result.ExitCode)"
+    }
 }
 
 function Get-RunningSqlInstanceName {
@@ -139,9 +172,7 @@ function Ensure-SqlExpress {
     }
 
     $stagedSsei = 'C:\Temp\SQL2022-SSEI-Expr.exe'
-    if (-not (Test-Path $stagedSsei) -or (Get-Item $stagedSsei).Length -lt 1000000) {
-        throw 'SQL Server SSEI bootstrapper missing at C:\Temp\SQL2022-SSEI-Expr.exe (expected from in-cluster staging).'
-    }
+    Test-StagedExecutable -Path $stagedSsei -Label 'SQL Server SSEI bootstrapper'
 
     $mediaPath = 'C:\Temp\sqlserver-media'
     if (Test-Path $mediaPath) {
@@ -328,7 +359,7 @@ function Ensure-OdbcDriver {
         return
     }
     $installer = 'C:\Temp\msodbcsql17.exe'
-    if (-not (Test-Path $installer) -or (Get-Item $installer).Length -lt 1000000) {
+    if (-not (Test-Path $installer)) {
         Write-Host 'Downloading Microsoft ODBC Driver 17 for SQL Server...'
         $url = 'https://go.microsoft.com/fwlink/?linkid=2361646'
         if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
@@ -337,9 +368,7 @@ function Ensure-OdbcDriver {
             Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
         }
     }
-    if (-not (Test-Path $installer)) {
-        throw 'ODBC Driver 17 installer missing at C:\Temp\msodbcsql17.exe'
-    }
+    Test-StagedExecutable -Path $installer -Label 'ODBC Driver 17 installer'
     Write-Host 'Installing ODBC Driver 17 for SQL Server...'
     $proc = Start-Process -FilePath $installer -ArgumentList @('/quiet', 'IACCEPTMSODBCSQLLICENSETERMS=YES') -Wait -PassThru
     if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
