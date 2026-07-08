@@ -3,23 +3,15 @@
 
 from __future__ import annotations
 
-import argparse
-import json
-import os
-import socket
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
 from psycopg2 import sql
 
 from ramendr_dr_validation.backends.postgres import PostgresBackend
 from ramendr_dr_validation.db_audit import load_env_file, validate_table_name
-
-
-def utc_now_iso() -> str:
-    """Return current UTC time as ISO-8601."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+from ramendr_dr_validation.db_snapshot_common import (
+    build_snapshot_payload,
+    format_committed_at,
+    run_snapshot_cli,
+)
 
 
 def fetch_audit_records(conn, backend: PostgresBackend) -> list[dict]:
@@ -36,22 +28,15 @@ def fetch_audit_records(conn, backend: PostgresBackend) -> list[dict]:
             ).format(sql.Identifier(audit_table))
         )
         rows = cur.fetchall()
-    records: list[dict] = []
-    for seq, committed_at, hostname, source in rows:
-        ts = committed_at
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        else:
-            ts = ts.astimezone(timezone.utc)
-        records.append(
-            {
-                "seq": int(seq),
-                "committed_at": ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-                "hostname": hostname,
-                "source": source,
-            }
-        )
-    return records
+    return [
+        {
+            "seq": int(seq),
+            "committed_at": format_committed_at(committed_at),
+            "hostname": hostname,
+            "source": source,
+        }
+        for seq, committed_at, hostname, source in rows
+    ]
 
 
 def fetch_tpcc_counts(conn, backend: PostgresBackend) -> dict[str, int]:
@@ -69,8 +54,7 @@ def fetch_tpcc_counts(conn, backend: PostgresBackend) -> dict[str, int]:
                 """,
                 (backend.schema, table),
             )
-            exists = bool(cur.fetchone()[0])
-            if not exists:
+            if not bool(cur.fetchone()[0]):
                 continue
             cur.execute(
                 sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
@@ -95,54 +79,27 @@ def collect_snapshot(
     finally:
         conn.close()
 
-    return {
-        "collected_at_utc": utc_now_iso(),
-        "vm_name": vm_name or socket.gethostname(),
-        "database_backend": "postgres",
-        "database": backend.database,
-        "audit": {
-            "record_count": len(audit_records),
-            "first_seq": audit_records[0]["seq"] if audit_records else None,
-            "last_seq": audit_records[-1]["seq"] if audit_records else None,
-            "records": audit_records,
-        },
-        "tpcc": tpcc_counts,
-    }
+    return build_snapshot_payload(
+        database_backend="postgres",
+        database=backend.database,
+        audit_records=audit_records,
+        tpcc_counts=tpcc_counts,
+        vm_name=vm_name,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: print a snapshot JSON document to stdout."""
-    parser = argparse.ArgumentParser(
-        description="Export DR validation DB snapshot JSON."
+    return run_snapshot_cli(
+        argv,
+        description="Export DR validation DB snapshot JSON.",
+        default_env_file="/etc/ramendr-dr-validation/db.env",
+        database_backend="postgres",
+        load_env_file=load_env_file,
+        backend_factory=PostgresBackend.from_env,
+        fetch_audit_records=fetch_audit_records,
+        fetch_tpcc_counts=fetch_tpcc_counts,
     )
-    parser.add_argument(
-        "--env-file",
-        default=os.environ.get(
-            "DR_VALIDATION_DB_ENV_FILE",
-            "/etc/ramendr-dr-validation/db.env",
-        ),
-    )
-    parser.add_argument(
-        "--vm-name", default=os.environ.get("DR_VALIDATION_HAMMERDB_VM", "")
-    )
-    parser.add_argument(
-        "-o", "--output", type=Path, help="Write JSON to file instead of stdout"
-    )
-    args = parser.parse_args(argv)
-    load_env_file(Path(args.env_file))
-    snapshot = collect_snapshot(
-        PostgresBackend.from_env(),
-        vm_name=args.vm_name or None,
-    )
-    payload = json.dumps(snapshot, indent=2)
-    if args.output:
-        args.output.write_text(payload + "\n", encoding="utf-8")
-    else:
-        try:
-            print(payload)
-        except BrokenPipeError:
-            sys.stdout.close()
-    return 0
 
 
 if __name__ == "__main__":

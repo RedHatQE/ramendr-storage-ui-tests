@@ -21,7 +21,8 @@ Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
    TPC-C table data on all supported platforms (PostgreSQL on Linux, SQL Server on Windows)
    automatically.
 
-A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline,
+A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline
+on any supported platform (PostgreSQL or SQL Server),
 and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 
 | Path | Purpose |

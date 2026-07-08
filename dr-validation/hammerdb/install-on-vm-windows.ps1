@@ -322,6 +322,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\db_audit_mssql.py') (Join-Path $LibDir 'db_audit_mssql.py')
+Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\db_snapshot_common.py') (Join-Path $LibDir 'db_snapshot_common.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\db_snapshot_mssql.py') (Join-Path $LibDir 'db_snapshot_mssql.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\tpcc_schema.py') (Join-Path $LibDir 'tpcc_schema.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\backends\mssql.py') (Join-Path $LibDir 'backends\mssql.py')

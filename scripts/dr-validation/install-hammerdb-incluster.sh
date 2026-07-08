@@ -74,6 +74,7 @@ install -m 0644 "$DR_VALIDATION_DIR/hammerdb/sql/init-audit.sql" "$TMP_DIR/hamme
 install -m 0644 "$DR_VALIDATION_DIR/hammerdb/sql/init-audit-mssql.sql" "$TMP_DIR/hammerdb/sql/init-audit-mssql.sql"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_audit.py" "$TMP_DIR/ramendr_dr_validation/db_audit.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_audit_mssql.py" "$TMP_DIR/ramendr_dr_validation/db_audit_mssql.py"
+install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot_common.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot_common.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot_mssql.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot_mssql.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/tpcc_schema.py" "$TMP_DIR/ramendr_dr_validation/tpcc_schema.py"
