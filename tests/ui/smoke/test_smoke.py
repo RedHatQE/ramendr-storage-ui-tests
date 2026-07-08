@@ -22,10 +22,9 @@ from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
 from utils.oc import run_oc
 from tests.utils.dr_validation import (
-    assert_hammerdb_snapshot_ready,
+    assert_all_hammerdb_snapshots_ready,
     collect_db_snapshot,
     hammerdb_mode_active,
-    load_hammerdb_snapshot,
     run_status_hammerdb,
 )
 
@@ -539,18 +538,18 @@ class TestInfraSmoke:
     # HammerDB PostgreSQL DR validation workload
     # ------------------------------------------------------------------
 
-    def test_hammerdb_postgres_tables_populated(self, hub_kubeconfig, tmp_path):
-        """HammerDB TPC-C database is deployed with populated tables after redeploy.
+    def test_hammerdb_tables_populated_on_all_vms(self, hub_kubeconfig, tmp_path):
+        """HammerDB TPC-C databases are deployed on every edge VM after redeploy.
 
-        Validates the production-like schema (customer IDs, orders, stock, …) and
-        the dr_validation_audit trail on the DR-protected PostgreSQL instance.
+        Linux VMs use PostgreSQL; Windows VMs use SQL Server. Validates populated
+        TPC-C tables and the dr_validation_audit trail on each target.
         """
         if not hammerdb_mode_active():
             pytest.skip("HammerDB DR validation is disabled")
 
         status = run_status_hammerdb(kubeconfig=hub_kubeconfig)
         assert status.returncode == 0, (
-            "HammerDB PostgreSQL workload is not healthy after redeploy.\n"
+            "HammerDB workload is not healthy on one or more edge VMs after redeploy.\n"
             f"stdout:\n{status.stdout}\n"
             f"stderr:\n{status.stderr}"
         )
@@ -561,20 +560,12 @@ class TestInfraSmoke:
             out_dir=snapshot_dir,
         )
         assert collected.returncode == 0, (
-            "Could not collect HammerDB DB snapshot during smoke test.\n"
+            "Could not collect HammerDB DB snapshot(s) during smoke test.\n"
             f"stdout:\n{collected.stdout}\n"
             f"stderr:\n{collected.stderr}"
         )
 
-        snapshot = load_hammerdb_snapshot(snapshot_dir)
-        assert_hammerdb_snapshot_ready(snapshot)
-
-        tpcc = snapshot["tpcc"]
-        assert tpcc["customer"] >= 3000, (
-            "customer table must contain 3000 rows per warehouse"
-        )
-        assert tpcc["warehouse"] >= 1
-        assert tpcc["item"] >= 100_000
+        assert_all_hammerdb_snapshots_ready(snapshot_dir)
 
     # ------------------------------------------------------------------
     # DRPolicy

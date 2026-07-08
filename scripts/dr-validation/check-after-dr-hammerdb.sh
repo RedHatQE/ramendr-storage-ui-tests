@@ -53,10 +53,10 @@ else
 fi
 echo ""
 
-log "Collecting current DB snapshot from ${DR_VALIDATION_HAMMERDB_VM}..."
+log "Collecting current DB snapshot(s) from HammerDB edge VM(s)..."
 mkdir -p "$AFTER_DIR"
 if ! "$SCRIPT_DIR/collect-db-snapshot-incluster.sh" "$AFTER_DIR"; then
-  err "Could not collect DB snapshot. Fix SSH/services on ${DR_VALIDATION_HAMMERDB_VM}, then retry."
+  err "Could not collect DB snapshot. Fix SSH/services on HammerDB target VM(s), then retry."
   exit 1
 fi
 echo ""

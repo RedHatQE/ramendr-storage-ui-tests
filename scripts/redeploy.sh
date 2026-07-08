@@ -822,7 +822,8 @@ show_status() {
   echo "KUBECONFIG: $HUB_INSTALL_DIR/auth/kubeconfig"
   echo "DR validation mode: ${DR_VALIDATION_MODE:-hammerdb}"
   if [[ "${DR_VALIDATION_MODE:-hammerdb}" == "hammerdb" ]]; then
-    echo "HammerDB VM: ${DR_VALIDATION_HAMMERDB_VM:-rhel9-node-001} (PostgreSQL TPC-C + audit table)"
+    echo "HammerDB targets: all edge VMs in gitops-vms (automatic during redeploy when DR_VALIDATION_HAMMERDB_ALL_VMS=1)"
+    echo "  Linux: PostgreSQL TPC-C | Windows: SQL Server TPC-C + audit table per VM"
   else
     echo "Timestamp log (each edge VM): /var/lib/ramendr-dr-validation/timestamps.log"
   fi
@@ -910,7 +911,11 @@ case "${1:-}" in
     echo " BASE_DOMAIN           Base domain for the clusters (required, no default)"
     echo " CLEANUP_DNS           Set to 1 to bulk-delete DNS records in the hosted zone before install"
     echo " DR_VALIDATION_MODE   hammerdb (default) or timestamp for legacy log validation"
-    echo " DR_VALIDATION_HAMMERDB_VM  Edge VM name for PostgreSQL workload (default rhel9-node-001)"
+    echo " DR_VALIDATION_HAMMERDB_ALL_VMS  Install on every edge VM (default 1; 0 = legacy single VM)"
+    echo " DR_VALIDATION_HAMMERDB_VMS      Comma-separated VM name filter (overrides ALL_VMS)"
+    echo " DR_VALIDATION_HAMMERDB_VM       Legacy single VM when ALL_VMS=0 (default rhel9-node-001)"
+    echo " DR_VALIDATION_SQL_SSEI_URL       Direct URL for SQL2022-SSEI-Expr.exe (staged to Windows VMs)"
+    echo " DR_VALIDATION_PYTHON_WINDOWS_URL Python amd64 installer URL (staged to Windows VMs)"
     echo " SKIP_DR_VALIDATION    Set to 1 to skip automatic DR validation bootstrap and snapshots"
     echo " SKIP_DR_VALIDATION_SNAPSHOTS  Set to 1 to skip only the 5-min snapshot daemon"
     echo " REQUIRE_WINDOWS_VMS   Fail redeploy if Windows stabilize/OpenSSH fails (default 1; set 0 to warn only)"

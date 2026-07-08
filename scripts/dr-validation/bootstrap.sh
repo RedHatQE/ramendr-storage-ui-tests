@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 if dr_validation_uses_hammerdb; then
-  log "DR validation mode: hammerdb (PostgreSQL on ${DR_VALIDATION_HAMMERDB_VM})"
+  log "DR validation mode: hammerdb (all edge VMs when DR_VALIDATION_HAMMERDB_ALL_VMS=1)"
   "$SCRIPT_DIR/bootstrap-hammerdb.sh"
   exit $?
 fi

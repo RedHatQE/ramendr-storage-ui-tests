@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export PostgreSQL DR validation snapshots as JSON."""
+"""Export SQL Server DR validation snapshots as JSON."""
 
 from __future__ import annotations
 
@@ -11,83 +11,70 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from psycopg2 import sql
-
-from ramendr_dr_validation.backends.postgres import PostgresBackend
-from ramendr_dr_validation.db_audit import load_env_file, validate_table_name
+from ramendr_dr_validation.backends.mssql import MssqlBackend
+from ramendr_dr_validation.db_audit_mssql import load_env_file
 
 
 def utc_now_iso() -> str:
-    """Return current UTC time as ISO-8601."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def fetch_audit_records(conn, backend: PostgresBackend) -> list[dict]:
-    """Return all audit rows ordered by sequence."""
-    audit_table = validate_table_name(backend.audit_table)
+def fetch_audit_records(conn, backend: MssqlBackend) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
-            sql.SQL(
-                """
+            f"""
             SELECT seq, committed_at, hostname, source
-            FROM {}
+            FROM dbo.{backend.audit_table}
             ORDER BY seq
             """
-            ).format(sql.Identifier(audit_table))
         )
         rows = cur.fetchall()
     records: list[dict] = []
     for seq, committed_at, hostname, source in rows:
         ts = committed_at
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts = ts.astimezone(timezone.utc)
+            committed = ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         else:
-            ts = ts.astimezone(timezone.utc)
+            committed = str(committed_at)
         records.append(
             {
                 "seq": int(seq),
-                "committed_at": ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-                "hostname": hostname,
-                "source": source,
+                "committed_at": committed,
+                "hostname": str(hostname),
+                "source": str(source),
             }
         )
     return records
 
 
-def fetch_tpcc_counts(conn, backend: PostgresBackend) -> dict[str, int]:
-    """Return row counts for HammerDB TPC-C tables that exist in the schema."""
+def fetch_tpcc_counts(conn, backend: MssqlBackend) -> dict[str, int]:
     counts: dict[str, int] = {}
     with conn.cursor() as cur:
         for table in backend.tpcc_tables:
             cur.execute(
                 """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                )
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
                 """,
                 (backend.schema, table),
             )
-            exists = bool(cur.fetchone()[0])
-            if not exists:
+            if not int(cur.fetchone()[0]):
                 continue
-            cur.execute(
-                sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
-                    sql.Identifier(backend.schema),
-                    sql.Identifier(table),
-                )
-            )
+            cur.execute(f"SELECT COUNT(*) FROM dbo.{table}")
             counts[table] = int(cur.fetchone()[0])
     return counts
 
 
 def collect_snapshot(
-    backend: PostgresBackend,
+    backend: MssqlBackend,
     *,
     vm_name: str | None = None,
 ) -> dict:
-    """Build a JSON-serializable snapshot of audit + TPC-C state."""
     conn = backend.connect()
     try:
         audit_records = fetch_audit_records(conn, backend)
@@ -98,7 +85,7 @@ def collect_snapshot(
     return {
         "collected_at_utc": utc_now_iso(),
         "vm_name": vm_name or socket.gethostname(),
-        "database_backend": "postgres",
+        "database_backend": "mssql",
         "database": backend.database,
         "audit": {
             "record_count": len(audit_records),
@@ -111,27 +98,24 @@ def collect_snapshot(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint: print a snapshot JSON document to stdout."""
     parser = argparse.ArgumentParser(
-        description="Export DR validation DB snapshot JSON."
+        description="Export DR validation SQL Server snapshot JSON."
     )
     parser.add_argument(
         "--env-file",
         default=os.environ.get(
             "DR_VALIDATION_DB_ENV_FILE",
-            "/etc/ramendr-dr-validation/db.env",
+            r"C:\ProgramData\ramendr-dr-validation\db.env",
         ),
     )
     parser.add_argument(
         "--vm-name", default=os.environ.get("DR_VALIDATION_HAMMERDB_VM", "")
     )
-    parser.add_argument(
-        "-o", "--output", type=Path, help="Write JSON to file instead of stdout"
-    )
+    parser.add_argument("-o", "--output", type=Path)
     args = parser.parse_args(argv)
     load_env_file(Path(args.env_file))
     snapshot = collect_snapshot(
-        PostgresBackend.from_env(),
+        MssqlBackend.from_env(),
         vm_name=args.vm_name or None,
     )
     payload = json.dumps(snapshot, indent=2)
