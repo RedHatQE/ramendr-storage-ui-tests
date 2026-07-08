@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 
 function Escape-TclBracedString {
     param([string]$Value)
-    $escaped = $Value -replace '\\', '\\\\' -replace '\}', '\}'
+    $escaped = $Value -replace '\}', '\}'
     return "{$escaped}"
 }
 

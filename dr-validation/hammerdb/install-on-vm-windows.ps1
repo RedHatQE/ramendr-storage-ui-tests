@@ -38,7 +38,7 @@ function Format-SqlStringLiteral {
 
 function Escape-TclBracedString {
     param([string]$Value)
-    $escaped = $Value -replace '\\', '\\\\' -replace '\}', '\}'
+    $escaped = $Value -replace '\}', '\}'
     return "{$escaped}"
 }
 
@@ -133,7 +133,20 @@ function Enable-SqlPrerequisites {
     Write-Host 'Enabling .NET Framework 3.5 (SQL Server prerequisite)...'
     $result = Install-WindowsFeature -Name NET-Framework-Core
     if (-not $result.Success) {
-        throw ".NET Framework 3.5 installation failed: exit code $($result.ExitCode)"
+        throw (
+            ".NET Framework 3.5 installation failed: exit code $($result.ExitCode), " +
+            "restart needed: $($result.RestartNeeded)"
+        )
+    }
+    $feature = Get-WindowsFeature -Name NET-Framework-Core -ErrorAction SilentlyContinue
+    if (-not $feature -or $feature.InstallState -ne 'Installed') {
+        throw (
+            ".NET Framework 3.5 is not installed after Install-WindowsFeature " +
+            "(exit code $($result.ExitCode), restart needed: $($result.RestartNeeded))"
+        )
+    }
+    if ($result.RestartNeeded -eq 'Yes') {
+        Write-Host 'Warning: .NET Framework 3.5 install requested a reboot before SQL Server setup.'
     }
 }
 
