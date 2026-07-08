@@ -24,12 +24,14 @@ class MssqlBackend:
     @classmethod
     def from_env(cls) -> MssqlBackend:
         """Build settings from DR_VALIDATION_MSSQL_* environment variables."""
+        trusted = os.environ.get("DR_VALIDATION_MSSQL_TRUSTED", "0") == "1"
         user = os.environ.get("DR_VALIDATION_MSSQL_USER", "").strip()
         password = os.environ.get("DR_VALIDATION_MSSQL_PASSWORD", "").strip()
-        if not user:
-            raise ValueError("DR_VALIDATION_MSSQL_USER is required")
-        if not password:
-            raise ValueError("DR_VALIDATION_MSSQL_PASSWORD is required")
+        if not trusted:
+            if not user:
+                raise ValueError("DR_VALIDATION_MSSQL_USER is required")
+            if not password:
+                raise ValueError("DR_VALIDATION_MSSQL_PASSWORD is required")
         return cls(
             host=os.environ.get("DR_VALIDATION_MSSQL_HOST", "127.0.0.1"),
             port=int(os.environ.get("DR_VALIDATION_MSSQL_PORT", "1433")),

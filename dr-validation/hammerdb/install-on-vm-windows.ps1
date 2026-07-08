@@ -16,9 +16,52 @@ $Instance = if ($env:DR_VALIDATION_MSSQL_INSTANCE) { $env:DR_VALIDATION_MSSQL_IN
 $Database = if ($env:DR_VALIDATION_MSSQL_DATABASE) { $env:DR_VALIDATION_MSSQL_DATABASE } else { 'tpcc' }
 $Warehouses = if ($env:DR_VALIDATION_HAMMERDB_WAREHOUSES) { $env:DR_VALIDATION_HAMMERDB_WAREHOUSES } else { '1' }
 
+function Test-MssqlIdentifier {
+    param(
+        [string]$Name,
+        [string]$Kind
+    )
+    if ($Name -notmatch '^[a-zA-Z_][a-zA-Z0-9_]*$') {
+        throw "Invalid MSSQL $Kind identifier: $Name"
+    }
+}
+
+function Format-SqlIdentifier {
+    param([string]$Name)
+    return "[$($Name.Replace(']', ']]'))]"
+}
+
+function Format-SqlStringLiteral {
+    param([string]$Value)
+    return "N'$($Value.Replace("'", "''"))'"
+}
+
+function Escape-TclBracedString {
+    param([string]$Value)
+    $escaped = $Value -replace '\\', '\\\\' -replace '\}', '\}'
+    return "{$escaped}"
+}
+
+function Protect-SecretFile {
+    param([string]$Path)
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) {
+        [void]$acl.RemoveAccessRule($rule)
+    }
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+    $adminSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $systemSid, 'FullControl', 'Allow')))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $adminSid, 'FullControl', 'Allow')))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Import-InstallCredentials {
     $credentialFile = 'C:\Temp\mssql-install.env'
-    if (Test-Path $credentialFile) {
+    if (-not (Test-Path $credentialFile)) { return }
+    try {
         Get-Content $credentialFile | ForEach-Object {
             if ($_ -match '^\s*([^#=]+)=(.*)$') {
                 $name = $matches[1].Trim()
@@ -26,6 +69,8 @@ function Import-InstallCredentials {
                 Set-Item -Path "env:$name" -Value $value
             }
         }
+    } finally {
+        Remove-Item -LiteralPath $credentialFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -42,6 +87,9 @@ Import-InstallCredentials
 $SaPassword = Require-EnvVar 'DR_VALIDATION_MSSQL_SA_PASSWORD'
 $User = Require-EnvVar 'DR_VALIDATION_MSSQL_USER'
 $Password = Require-EnvVar 'DR_VALIDATION_MSSQL_PASSWORD'
+Test-MssqlIdentifier -Name $Database -Kind 'database'
+Test-MssqlIdentifier -Name $User -Kind 'user'
+Test-MssqlIdentifier -Name $Instance -Kind 'instance'
 
 Write-Host '=== RamenDR HammerDB install (SQL Server / Windows) ==='
 
@@ -304,14 +352,19 @@ Ensure-OdbcDriver
 Ensure-HammerDb
 
 Write-Host 'Configuring SQL Server database and login...'
-Invoke-SqlCmd "IF DB_ID(N'$Database') IS NULL CREATE DATABASE [$Database];"
+$dbLiteral = Format-SqlStringLiteral $Database
+$dbIdent = Format-SqlIdentifier $Database
+$userLiteral = Format-SqlStringLiteral $User
+$userIdent = Format-SqlIdentifier $User
+$passLiteral = Format-SqlStringLiteral $Password
+Invoke-SqlCmd "IF DB_ID($dbLiteral) IS NULL CREATE DATABASE $dbIdent;"
 Invoke-SqlCmd @"
-IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$User')
-    CREATE LOGIN [$User] WITH PASSWORD = N'$Password', CHECK_POLICY = OFF, DEFAULT_DATABASE=[$Database];
-USE [$Database];
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$User')
-    CREATE USER [$User] FOR LOGIN [$User];
-ALTER ROLE db_owner ADD MEMBER [$User];
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = $userLiteral)
+    CREATE LOGIN $userIdent WITH PASSWORD = $passLiteral, CHECK_POLICY = OFF, DEFAULT_DATABASE=$dbIdent;
+USE $dbIdent;
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = $userLiteral)
+    CREATE USER $userIdent FOR LOGIN $userIdent;
+ALTER ROLE db_owner ADD MEMBER $userIdent;
 "@
 
 $python = Ensure-Python
@@ -340,6 +393,7 @@ DR_VALIDATION_MSSQL_INSTANCE=$Instance
 DR_VALIDATION_HAMMERDB_WAREHOUSES=$Warehouses
 DR_VALIDATION_HAMMERDB_HOME=$HammerHome
 "@ | Set-Content -Encoding ASCII $EnvFile
+Protect-SecretFile -Path $EnvFile
 
 function Register-LongRunningTask {
     param(
@@ -405,7 +459,12 @@ $stateDir = Join-Path $DataRoot 'hammerdb'
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 $schemaFlag = Join-Path $stateDir 'schema-built'
 $server = "(local)\$Instance"
+$serverTcl = Escape-TclBracedString $server
+$odbcDriverTcl = Escape-TclBracedString 'ODBC Driver 17 for SQL Server'
 $buildVus = [Math]::Min([int]$Warehouses, 2)
+$env:DR_VALIDATION_MSSQL_USER = $User
+$env:DR_VALIDATION_MSSQL_PASSWORD = $Password
+$env:DR_VALIDATION_MSSQL_DATABASE = $Database
 
 if ((Get-TpccCoreTableCount) -lt 3) {
     Stop-ScheduledTask -TaskName 'ramendr-dr-hammerdb' -ErrorAction SilentlyContinue
@@ -414,14 +473,14 @@ if ((Get-TpccCoreTableCount) -lt 3) {
     $buildTcl = @"
 dbset db mssqls
 dbset bm TPC-C
-diset connection mssqls_server {$server}
+diset connection mssqls_server $serverTcl
 diset connection mssqls_authentication sql
-diset connection mssqls_uid {$User}
-diset connection mssqls_pass {$Password}
-diset connection mssqls_odbc_driver {ODBC Driver 17 for SQL Server}
+diset connection mssqls_uid `$::env(DR_VALIDATION_MSSQL_USER)
+diset connection mssqls_pass `$::env(DR_VALIDATION_MSSQL_PASSWORD)
+diset connection mssqls_odbc_driver $odbcDriverTcl
 diset connection mssqls_encrypt_connection false
 diset connection mssqls_trust_server_cert true
-diset tpcc mssqls_dbase {$Database}
+diset tpcc mssqls_dbase `$::env(DR_VALIDATION_MSSQL_DATABASE)
 diset tpcc mssqls_count_ware $Warehouses
 diset tpcc mssqls_num_vu $buildVus
 puts "SCHEMA BUILD START"

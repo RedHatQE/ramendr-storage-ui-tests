@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ramendr_dr_validation.backends.mssql import MssqlBackend
 from ramendr_dr_validation.db_audit_mssql import load_env_file
 from ramendr_dr_validation.db_snapshot_common import (
@@ -12,7 +14,18 @@ from ramendr_dr_validation.db_snapshot_common import (
 )
 
 
+_VALID_MSSQL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def _validate_mssql_identifier(name: str, kind: str) -> str:
+    if not _VALID_MSSQL_IDENTIFIER.match(name):
+        raise ValueError(f"Invalid MSSQL {kind}: {name!r}")
+    return name
+
+
 def _qualified_table(schema: str, table: str) -> str:
+    schema = _validate_mssql_identifier(schema, "schema")
+    table = _validate_mssql_identifier(table, "table")
     return f"[{schema}].[{table}]"
 
 

@@ -1,6 +1,12 @@
 # Build HammerDB TPC-C schema once, then run continuous timed OLTP load (SQL Server / Windows).
 $ErrorActionPreference = 'Stop'
 
+function Escape-TclBracedString {
+    param([string]$Value)
+    $escaped = $Value -replace '\\', '\\\\' -replace '\}', '\}'
+    return "{$escaped}"
+}
+
 $EnvFile = if ($env:DR_VALIDATION_DB_ENV_FILE) { $env:DR_VALIDATION_DB_ENV_FILE } else { 'C:\ProgramData\ramendr-dr-validation\db.env' }
 if (Test-Path $EnvFile) {
     Get-Content $EnvFile | ForEach-Object {
@@ -21,20 +27,26 @@ $BuildVus = [Math]::Min($Warehouses, $Vus)
 $Instance = if ($env:DR_VALIDATION_MSSQL_INSTANCE) { $env:DR_VALIDATION_MSSQL_INSTANCE } else { 'SQLEXPRESS' }
 $Server = "(local)\$Instance"
 $Database = if ($env:DR_VALIDATION_MSSQL_DATABASE) { $env:DR_VALIDATION_MSSQL_DATABASE } else { 'tpcc' }
-$User = if ($env:DR_VALIDATION_MSSQL_USER) { $env:DR_VALIDATION_MSSQL_USER } else { 'hammerdb' }
-$Password = if ($env:DR_VALIDATION_MSSQL_PASSWORD) { $env:DR_VALIDATION_MSSQL_PASSWORD } else { 'hammerdb' }
+if ([string]::IsNullOrWhiteSpace($env:DR_VALIDATION_MSSQL_USER)) {
+    throw 'DR_VALIDATION_MSSQL_USER is required'
+}
+if ([string]::IsNullOrWhiteSpace($env:DR_VALIDATION_MSSQL_PASSWORD)) {
+    throw 'DR_VALIDATION_MSSQL_PASSWORD is required'
+}
 $OdbcDriver = if ($env:DR_VALIDATION_MSSQL_ODBC_DRIVER) { $env:DR_VALIDATION_MSSQL_ODBC_DRIVER } else { 'ODBC Driver 17 for SQL Server' }
+$ServerTcl = Escape-TclBracedString $Server
+$OdbcDriverTcl = Escape-TclBracedString $OdbcDriver
 $StateDir = 'C:\ProgramData\ramendr-dr-validation\hammerdb'
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 Set-Location $HammerHome
 
 $connectionTcl = @"
-diset connection mssqls_server {$Server}
+diset connection mssqls_server $ServerTcl
 diset connection mssqls_authentication sql
-diset connection mssqls_uid {$User}
-diset connection mssqls_pass {$Password}
-diset connection mssqls_odbc_driver {$OdbcDriver}
+diset connection mssqls_uid `$::env(DR_VALIDATION_MSSQL_USER)
+diset connection mssqls_pass `$::env(DR_VALIDATION_MSSQL_PASSWORD)
+diset connection mssqls_odbc_driver $OdbcDriverTcl
 diset connection mssqls_encrypt_connection false
 diset connection mssqls_trust_server_cert true
 "@
@@ -43,7 +55,7 @@ $buildTcl = @"
 dbset db mssqls
 dbset bm TPC-C
 $connectionTcl
-diset tpcc mssqls_dbase {$Database}
+diset tpcc mssqls_dbase `$::env(DR_VALIDATION_MSSQL_DATABASE)
 diset tpcc mssqls_count_ware $Warehouses
 diset tpcc mssqls_num_vu $BuildVus
 puts "SCHEMA BUILD START"
@@ -61,7 +73,7 @@ proc wait_to_complete {} {
 dbset db mssqls
 dbset bm TPC-C
 $connectionTcl
-diset tpcc mssqls_dbase {$Database}
+diset tpcc mssqls_dbase `$::env(DR_VALIDATION_MSSQL_DATABASE)
 diset tpcc mssqls_driver timed
 diset tpcc mssqls_total_iterations 10000000
 diset tpcc mssqls_rampup 0
