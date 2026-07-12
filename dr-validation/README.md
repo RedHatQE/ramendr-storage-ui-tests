@@ -48,6 +48,20 @@ install credentials, or set `DR_VALIDATION_MSSQL_*` in the environment. See
 
 Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
 
+### Dual-disk layout (one `tpcc` database)
+
+Each edge VM has an OS disk plus a DR-protected `{vm-name}-data` block volume. HammerDB
+install prepares the data disk and keeps **one** logical database while splitting storage:
+
+| Platform | Data disk | TPC-C tables (HammerDB) | Audit table (`dr_validation_audit`) |
+|----------|-----------|-------------------------|-------------------------------------|
+| Linux (PostgreSQL) | XFS at `/mnt/ramendr-data`; `PGDATA` there | Default tablespace on data disk | `ramendr_os` tablespace on OS disk |
+| Windows (SQL Server) | NTFS `D:` (`RAMENDR-DATA`) | `PRIMARY` filegroup on `D:\MSSQL` | `ramendr_os` filegroup on OS disk |
+
+DB snapshots include a `storage` section with `dual_disk: true` when the split layout
+is detected. Override mount/drive via `DR_VALIDATION_DATA_DISK_MOUNT` /
+`DR_VALIDATION_DATA_DISK_DRIVE` if needed.
+
 ### In-cluster utility container (amd64)
 
 DR validation Jobs (`install-hammerdb-incluster.sh`, `collect-db-snapshot-incluster.sh`,

@@ -64,8 +64,9 @@ fi
 log "Installing HammerDB workload on ${TARGET_COUNT} edge VM(s) (${PRIMARY})..."
 
 TMP_DIR="$(mktemp -d)"
-mkdir -p "$TMP_DIR/ramendr_dr_validation/backends" "$TMP_DIR/hammerdb/sql" "$TMP_DIR/systemd"
+mkdir -p "$TMP_DIR/ramendr_dr_validation/backends" "$TMP_DIR/hammerdb/sql" "$TMP_DIR/hammerdb/lib" "$TMP_DIR/systemd"
 install -m 0755 "$DR_VALIDATION_DIR/hammerdb/install-on-vm.sh" "$TMP_DIR/hammerdb/install-on-vm.sh"
+install -m 0755 "$DR_VALIDATION_DIR/hammerdb/lib/ensure-data-disk-linux.sh" "$TMP_DIR/hammerdb/lib/ensure-data-disk-linux.sh"
 install -m 0755 "$DR_VALIDATION_DIR/hammerdb/run-autopilot.sh" "$TMP_DIR/hammerdb/run-autopilot.sh"
 install -m 0644 "$DR_VALIDATION_DIR/hammerdb/install-on-vm-windows.ps1" "$TMP_DIR/hammerdb/install-on-vm-windows.ps1"
 install -m 0644 "$DR_VALIDATION_DIR/hammerdb/install-remote-windows.cmd" "$TMP_DIR/hammerdb/install-remote-windows.cmd"

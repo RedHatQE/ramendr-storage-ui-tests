@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 from ramendr_dr_validation.backends.mssql import MssqlBackend
@@ -72,6 +73,34 @@ def fetch_tpcc_counts(conn, backend: MssqlBackend) -> dict[str, int]:
     return counts
 
 
+def fetch_storage_layout(conn, backend: MssqlBackend) -> dict:
+    """Report whether audit and TPC-C data span OS vs DR data disk filegroups."""
+    components: dict[str, str] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.name, fg.name
+            FROM sys.tables t
+            JOIN sys.indexes i ON t.object_id = i.object_id AND i.index_id IN (0, 1)
+            JOIN sys.filegroups fg ON i.data_space_id = fg.data_space_id
+            WHERE t.name IN ('dr_validation_audit', 'warehouse')
+            """
+        )
+        for name, filegroup in cur.fetchall():
+            components[str(name)] = str(filegroup)
+
+    audit_fg = components.get(backend.audit_table, "PRIMARY")
+    tpcc_fg = components.get("warehouse", "PRIMARY")
+    data_root = os.environ.get("DR_VALIDATION_MSSQL_DATA_ROOT", "")
+    return {
+        "dual_disk": audit_fg == "ramendr_os" and tpcc_fg == "PRIMARY",
+        "audit_filegroup": audit_fg,
+        "tpcc_filegroup": tpcc_fg,
+        "data_disk_drive": os.environ.get("DR_VALIDATION_DATA_DISK_DRIVE"),
+        "mssql_data_root": data_root or None,
+    }
+
+
 def collect_snapshot(
     backend: MssqlBackend,
     *,
@@ -81,6 +110,7 @@ def collect_snapshot(
     try:
         audit_records = fetch_audit_records(conn, backend)
         tpcc_counts = fetch_tpcc_counts(conn, backend)
+        storage = fetch_storage_layout(conn, backend)
     finally:
         conn.close()
 
@@ -90,6 +120,7 @@ def collect_snapshot(
         audit_records=audit_records,
         tpcc_counts=tpcc_counts,
         vm_name=vm_name,
+        storage=storage,
     )
 
 
@@ -103,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         backend_factory=MssqlBackend.from_env,
         fetch_audit_records=fetch_audit_records,
         fetch_tpcc_counts=fetch_tpcc_counts,
+        fetch_storage_layout=fetch_storage_layout,
     )
 
 

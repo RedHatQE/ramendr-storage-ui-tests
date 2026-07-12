@@ -15,6 +15,43 @@ $HammerHome = Join-Path $HammerRoot 'current'
 $Instance = if ($env:DR_VALIDATION_MSSQL_INSTANCE) { $env:DR_VALIDATION_MSSQL_INSTANCE } else { 'SQLEXPRESS' }
 $Database = if ($env:DR_VALIDATION_MSSQL_DATABASE) { $env:DR_VALIDATION_MSSQL_DATABASE } else { 'tpcc' }
 $Warehouses = if ($env:DR_VALIDATION_HAMMERDB_WAREHOUSES) { $env:DR_VALIDATION_HAMMERDB_WAREHOUSES } else { '1' }
+$DataDiskDrive = if ($env:DR_VALIDATION_DATA_DISK_DRIVE) { $env:DR_VALIDATION_DATA_DISK_DRIVE.TrimEnd(':') } else { 'D' }
+$DataDiskRoot = "${DataDiskDrive}:\MSSQL"
+$OsDbDir = Join-Path $DataRoot 'mssql'
+
+function Ensure-DataDisk {
+    param([string]$DriveLetter = $DataDiskDrive)
+    $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+    if ($volume -and $volume.FileSystem -eq 'NTFS') {
+        Write-Host "Data disk already available as ${DriveLetter}:"
+        return
+    }
+
+    $osDisk = Get-Disk | Where-Object { $_.IsBoot -or $_.IsSystem } | Select-Object -First 1
+    $dataDisk = Get-Disk | Where-Object {
+        $_.Number -ne $osDisk.Number -and $_.OperationalStatus -eq 'Online'
+    } | Sort-Object Number | Select-Object -First 1
+    if (-not $dataDisk) {
+        throw 'DR validation data disk not found (expected a second online disk besides the OS disk).'
+    }
+
+    if ($dataDisk.PartitionStyle -eq 'RAW') {
+        Initialize-Disk -Number $dataDisk.Number -PartitionStyle GPT -ErrorAction Stop
+    }
+
+    $partition = Get-Partition -DiskNumber $dataDisk.Number -ErrorAction SilentlyContinue |
+        Where-Object { $_.DriveLetter -eq $DriveLetter } |
+        Select-Object -First 1
+    if (-not $partition) {
+        $partition = New-Partition -DiskNumber $dataDisk.Number -UseMaximumSize -DriveLetter $DriveLetter -ErrorAction Stop
+    }
+
+    $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+    if (-not $volume -or $volume.FileSystem -ne 'NTFS') {
+        Format-Volume -DriveLetter $DriveLetter -FileSystem NTFS -NewFileSystemLabel 'RAMENDR-DATA' -Confirm:$false -ErrorAction Stop | Out-Null
+    }
+    Write-Host "HammerDB data disk ready on ${DriveLetter}: (disk $($dataDisk.Number))"
+}
 
 function Test-MssqlIdentifier {
     param(
@@ -123,7 +160,8 @@ Test-MssqlIdentifier -Name $Instance -Kind 'instance'
 
 Write-Host '=== RamenDR HammerDB install (SQL Server / Windows) ==='
 
-New-Item -ItemType Directory -Force -Path $DataRoot, $BinDir, $LibDir, (Join-Path $LibDir 'backends') | Out-Null
+Ensure-DataDisk
+New-Item -ItemType Directory -Force -Path $DataRoot, $BinDir, $LibDir, (Join-Path $LibDir 'backends'), $OsDbDir, "$DataDiskRoot\DATA", "$DataDiskRoot\LOG" | Out-Null
 
 function Enable-SqlPrerequisites {
     if (Get-WindowsFeature -Name NET-Framework-Core -ErrorAction SilentlyContinue |
@@ -399,7 +437,36 @@ $dbIdent = Format-SqlIdentifier $Database
 $userLiteral = Format-SqlStringLiteral $User
 $userIdent = Format-SqlIdentifier $User
 $passLiteral = Format-SqlStringLiteral $Password
-Invoke-SqlCmd "IF DB_ID($dbLiteral) IS NULL CREATE DATABASE $dbIdent;"
+$dataMdf = "$DataDiskRoot\DATA\tpcc.mdf"
+$dataLog = "$DataDiskRoot\LOG\tpcc_log.ldf"
+$osNdf = Join-Path $OsDbDir 'tpcc_os.ndf'
+$dataMdfLiteral = Format-SqlStringLiteral $dataMdf
+$dataLogLiteral = Format-SqlStringLiteral $dataLog
+$osNdfLiteral = Format-SqlStringLiteral $osNdf
+Invoke-SqlCmd @"
+IF DB_ID($dbLiteral) IS NULL
+BEGIN
+    CREATE DATABASE $dbIdent
+    ON PRIMARY (
+        NAME = N'tpcc_primary',
+        FILENAME = $dataMdfLiteral,
+        SIZE = 64MB,
+        FILEGROWTH = 64MB
+    ),
+    FILEGROUP [ramendr_os] (
+        NAME = N'tpcc_os',
+        FILENAME = $osNdfLiteral,
+        SIZE = 32MB,
+        FILEGROWTH = 32MB
+    )
+    LOG ON (
+        NAME = N'tpcc_log',
+        FILENAME = $dataLogLiteral,
+        SIZE = 32MB,
+        FILEGROWTH = 32MB
+    );
+END
+"@
 Invoke-SqlCmd @"
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = $userLiteral)
     CREATE LOGIN $userIdent WITH PASSWORD = $passLiteral, CHECK_POLICY = OFF, DEFAULT_DATABASE=$dbIdent;
@@ -432,6 +499,8 @@ DR_VALIDATION_MSSQL_DATABASE=$Database
 DR_VALIDATION_MSSQL_USER=$User
 DR_VALIDATION_MSSQL_PASSWORD=$Password
 DR_VALIDATION_MSSQL_INSTANCE=$Instance
+DR_VALIDATION_DATA_DISK_DRIVE=$DataDiskDrive
+DR_VALIDATION_MSSQL_DATA_ROOT=$DataDiskRoot
 DR_VALIDATION_HAMMERDB_WAREHOUSES=$Warehouses
 DR_VALIDATION_HAMMERDB_HOME=$HammerHome
 "@ | Set-Content -Encoding ASCII $EnvFile

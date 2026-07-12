@@ -44,9 +44,10 @@ def build_snapshot_payload(
     audit_records: list[dict],
     tpcc_counts: dict[str, int],
     vm_name: str | None = None,
+    storage: dict | None = None,
 ) -> dict:
     """Assemble the JSON snapshot document shared by all database backends."""
-    return {
+    payload = {
         "collected_at_utc": utc_now_iso(),
         "vm_name": vm_name or socket.gethostname(),
         "database_backend": database_backend,
@@ -59,6 +60,9 @@ def build_snapshot_payload(
         },
         "tpcc": tpcc_counts,
     }
+    if storage is not None:
+        payload["storage"] = storage
+    return payload
 
 
 def emit_snapshot_payload(payload: dict, output: Path | None = None) -> int:
@@ -84,6 +88,7 @@ def run_snapshot_cli(
     backend_factory: Callable[[], SnapshotBackend],
     fetch_audit_records: Callable[[Any, SnapshotBackend], list[dict]],
     fetch_tpcc_counts: Callable[[Any, SnapshotBackend], dict[str, int]],
+    fetch_storage_layout: Callable[[Any, SnapshotBackend], dict] | None = None,
 ) -> int:
     """Shared CLI entrypoint for backend-specific snapshot exporters."""
     parser = argparse.ArgumentParser(description=description)
@@ -102,6 +107,7 @@ def run_snapshot_cli(
     try:
         audit_records = fetch_audit_records(conn, backend)
         tpcc_counts = fetch_tpcc_counts(conn, backend)
+        storage = fetch_storage_layout(conn, backend) if fetch_storage_layout else None
     finally:
         conn.close()
     payload = build_snapshot_payload(
@@ -110,5 +116,6 @@ def run_snapshot_cli(
         audit_records=audit_records,
         tpcc_counts=tpcc_counts,
         vm_name=args.vm_name or None,
+        storage=storage,
     )
     return emit_snapshot_payload(payload, args.output)

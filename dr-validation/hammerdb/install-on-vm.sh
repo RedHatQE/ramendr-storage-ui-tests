@@ -3,9 +3,16 @@
 # Intended to run on the VM via SSH from install-hammerdb-incluster.sh.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/ensure-data-disk-linux.sh
+source "${SCRIPT_DIR}/lib/ensure-data-disk-linux.sh"
+
 REPO_ROOT="${REPO_ROOT:-/tmp/ramendr-dr-validation-install}"
 DATA_ROOT="${DR_VALIDATION_DATA_ROOT:-/var/lib/ramendr-dr-validation}"
-PGDATA="${DR_VALIDATION_PGDATA:-${DATA_ROOT}/postgres/data}"
+DATA_DISK_MOUNT="${DR_VALIDATION_DATA_DISK_MOUNT:-/mnt/ramendr-data}"
+OS_TABLESPACE_NAME="${DR_VALIDATION_OS_TABLESPACE:-ramendr_os}"
+OS_TABLESPACE_DIR="${DR_VALIDATION_OS_TABLESPACE_DIR:-${DATA_ROOT}/postgres/os-tablespace}"
+PGDATA="${DR_VALIDATION_PGDATA:-${DATA_DISK_MOUNT}/postgres/data}"
 ENV_DIR="/etc/ramendr-dr-validation"
 ENV_FILE="${ENV_DIR}/db.env"
 PG_ENV_FILE="${ENV_DIR}/postgresql.env"
@@ -37,7 +44,10 @@ pg_quote_literal() {
 
 echo "=== RamenDR HammerDB install (PostgreSQL) ==="
 
+ensure_dr_validation_data_disk
+
 sudo install -m 0755 -d "$DATA_ROOT/postgres" "$ENV_DIR" "${DATA_ROOT}/hammerdb" "${DATA_ROOT}/hammerdb/tmp"
+sudo install -m 0755 -d "${DATA_DISK_MOUNT}/postgres"
 sudo chown -R cloud-user:cloud-user "${DATA_ROOT}/hammerdb" || true
 
 dnf_rhel_repos_enabled() {
@@ -261,6 +271,8 @@ EOF
 
 install_postgresql
 
+sudo install -m 0700 -d -o postgres -g postgres "$OS_TABLESPACE_DIR"
+
 ensure_python_psycopg2
 
 sudo tee /usr/local/bin/ramendr-dr-db-audit >/dev/null <<'WRAPPER'
@@ -302,6 +314,10 @@ fi
 sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 -c \
   "GRANT ALL PRIVILEGES ON DATABASE $(pg_quote_ident "$PG_DATABASE") TO $(pg_quote_ident "$PG_USER");"
 
+sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 -d postgres <<SQL
+CREATE TABLESPACE IF NOT EXISTS $(pg_quote_ident "$OS_TABLESPACE_NAME") LOCATION $(pg_quote_literal "$OS_TABLESPACE_DIR");
+SQL
+
 sudo install -m 0755 -d "$ENV_DIR"
 sudo tee "$ENV_FILE" >/dev/null <<ENV
 DR_VALIDATION_PG_HOST=127.0.0.1
@@ -314,6 +330,9 @@ DR_VALIDATION_PG_AUDIT_TABLE=dr_validation_audit
 DR_VALIDATION_HAMMERDB_WAREHOUSES=${WAREHOUSES}
 DR_VALIDATION_HAMMERDB_HOME=${HAMMERDB_HOME}
 DR_VALIDATION_PG_LIB_DIR=${PG_HOME}/lib
+DR_VALIDATION_DATA_DISK_MOUNT=${DATA_DISK_MOUNT}
+DR_VALIDATION_PGDATA=${PGDATA}
+DR_VALIDATION_OS_TABLESPACE=${OS_TABLESPACE_NAME}
 ENV
 sudo chown root:cloud-user "$ENV_FILE"
 sudo chmod 0640 "$ENV_FILE"

@@ -1,4 +1,5 @@
 -- Audit trail for DR validation on SQL Server (HammerDB TPC-C workload).
+-- Stored on the ramendr_os filegroup (OS disk); TPC-C tables use the PRIMARY filegroup on the data disk.
 IF OBJECT_ID(N'dbo.dr_validation_audit', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.dr_validation_audit (
@@ -6,7 +7,7 @@ BEGIN
         committed_at DATETIME2 NOT NULL,
         hostname NVARCHAR(256) NOT NULL,
         source NVARCHAR(64) NOT NULL DEFAULT N'db_audit'
-    );
+    ) ON ramendr_os;
 END;
 
 IF NOT EXISTS (
