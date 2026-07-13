@@ -28,6 +28,9 @@ function Ensure-DataDisk {
     }
 
     $osDisk = Get-Disk | Where-Object { $_.IsBoot -or $_.IsSystem } | Select-Object -First 1
+    if (-not $osDisk) {
+        throw 'DR validation OS disk not found (expected a boot or system disk).'
+    }
     $dataDisk = Get-Disk | Where-Object {
         $_.Number -ne $osDisk.Number -and $_.OperationalStatus -in @('Online', 'Offline')
     } | Sort-Object Number | Select-Object -First 1
@@ -194,6 +197,46 @@ function Enable-SqlPrerequisites {
     if ($result.RestartNeeded -eq 'Yes') {
         Write-Host 'Warning: .NET Framework 3.5 install requested a reboot before SQL Server setup.'
     }
+}
+
+function Grant-SqlDataDiskAccess {
+    $svcName = "MSSQL`$$Instance"
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        throw "SQL Server service $svcName not found; cannot grant data-disk ACLs."
+    }
+    $sqlAccount = "NT SERVICE\$svcName"
+    foreach ($path in @("$DataDiskRoot\DATA", "$DataDiskRoot\LOG")) {
+        if (-not (Test-Path $path)) {
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+        }
+        $acl = Get-Acl -LiteralPath $path
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $sqlAccount,
+            'FullControl',
+            'ContainerInherit,ObjectInherit',
+            'None',
+            'Allow'
+        )
+        $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $path -AclObject $acl
+    }
+    Write-Host "Granted $sqlAccount access to ${DataDiskRoot}\DATA and ${DataDiskRoot}\LOG"
+}
+
+function Get-DatabasePrimaryFilePath {
+    param([string]$DbName)
+    $dbLiteral = Format-SqlStringLiteral $DbName
+    $sqlcmd = Get-SqlCmdPath
+    if (-not $sqlcmd) { return $null }
+    $out = & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -d master -h -1 -W -b -Q @"
+SELECT TOP 1 mf.physical_name
+FROM sys.master_files mf
+INNER JOIN sys.databases d ON d.database_id = mf.database_id
+WHERE d.name = $dbLiteral AND mf.type = 0
+"@ 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return ($out | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1).Trim()
 }
 
 function Get-RunningSqlInstanceName {
@@ -441,6 +484,7 @@ function Ensure-OdbcDriver {
 Ensure-SqlExpress
 Ensure-OdbcDriver
 Ensure-HammerDb
+Grant-SqlDataDiskAccess
 
 Write-Host 'Configuring SQL Server database and login...'
 $dbLiteral = Format-SqlStringLiteral $Database
@@ -454,9 +498,16 @@ $osNdf = Join-Path $OsDbDir 'tpcc_os.ndf'
 $dataMdfLiteral = Format-SqlStringLiteral $dataMdf
 $dataLogLiteral = Format-SqlStringLiteral $dataLog
 $osNdfLiteral = Format-SqlStringLiteral $osNdf
-Stop-ScheduledTask -TaskName 'ramendr-dr-hammerdb' -ErrorAction SilentlyContinue
-Stop-ScheduledTask -TaskName 'ramendr-dr-db-audit' -ErrorAction SilentlyContinue
-Invoke-SqlCmd @"
+$existingPrimary = Get-DatabasePrimaryFilePath -DbName $Database
+$skipDatabaseRebuild = $false
+if ($existingPrimary -and ($existingPrimary -ieq $dataMdf)) {
+    Write-Host "Database $Database already uses primary data file $dataMdf; preserving existing database."
+    $skipDatabaseRebuild = $true
+}
+if (-not $skipDatabaseRebuild) {
+    Stop-ScheduledTask -TaskName 'ramendr-dr-hammerdb' -ErrorAction SilentlyContinue
+    Stop-ScheduledTask -TaskName 'ramendr-dr-db-audit' -ErrorAction SilentlyContinue
+    Invoke-SqlCmd @"
 USE master;
 IF DB_ID($dbLiteral) IS NOT NULL
 BEGIN
@@ -470,10 +521,10 @@ BEGIN
     DROP DATABASE $dbIdent;
 END
 "@
-foreach ($stale in @($dataMdf, $dataLog, $osNdf)) {
-    if (Test-Path $stale) { Remove-Item -Force $stale -ErrorAction SilentlyContinue }
-}
-Invoke-SqlCmd @"
+    foreach ($stale in @($dataMdf, $dataLog, $osNdf)) {
+        if (Test-Path $stale) { Remove-Item -Force $stale -ErrorAction SilentlyContinue }
+    }
+    Invoke-SqlCmd @"
 CREATE DATABASE $dbIdent
 ON PRIMARY (
     NAME = N'tpcc_primary',
@@ -494,6 +545,7 @@ LOG ON (
     FILEGROWTH = 32MB
 );
 "@
+}
 Invoke-SqlCmd @"
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = $userLiteral)
     CREATE LOGIN $userIdent WITH PASSWORD = $passLiteral, CHECK_POLICY = OFF, DEFAULT_DATABASE=$dbIdent;

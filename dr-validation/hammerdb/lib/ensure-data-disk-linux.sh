@@ -16,8 +16,8 @@ ensure_dr_validation_data_disk() {
   root_src="$(findmnt -n -o SOURCE /)"
   root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)"
   if [[ -z "$root_disk" ]]; then
-    root_disk="$(basename "$root_src")"
-    root_disk="${root_disk%%[0-9p]*}"
+    echo "ERROR: Cannot determine root block device from ${root_src}"
+    return 1
   fi
 
   local candidate_dev=""

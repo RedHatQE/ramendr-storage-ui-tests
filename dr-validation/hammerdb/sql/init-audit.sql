@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS dr_validation_audit (
     committed_at TIMESTAMPTZ NOT NULL,
     hostname TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'db_audit'
-) TABLESPACE ramendr_os;
+) TABLESPACE __DR_VALIDATION_OS_TABLESPACE__;
 
 CREATE INDEX IF NOT EXISTS dr_validation_audit_committed_at_idx
     ON dr_validation_audit (committed_at);

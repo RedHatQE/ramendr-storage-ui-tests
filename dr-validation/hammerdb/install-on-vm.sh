@@ -426,8 +426,11 @@ if [[ "$schema_ready" -ne 1 ]]; then
   exit 1
 fi
 
-sudo -u postgres "$PSQL" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
-  -f "${REPO_ROOT}/hammerdb/sql/init-audit.sql"
+audit_sql="$(mktemp)"
+sed "s/__DR_VALIDATION_OS_TABLESPACE__/${OS_TABLESPACE_NAME}/g" \
+  "${REPO_ROOT}/hammerdb/sql/init-audit.sql" > "$audit_sql"
+sudo -u postgres "$PSQL" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 -f "$audit_sql"
+rm -f "$audit_sql"
 sudo -u postgres "$PSQL" -d "$PG_DATABASE" -c \
   "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $(pg_quote_ident "$PG_USER");"
 sudo -u postgres "$PSQL" -d "$PG_DATABASE" -c \

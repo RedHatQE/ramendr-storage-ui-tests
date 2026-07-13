@@ -41,6 +41,9 @@ printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
 collect_db_cleanup() {
   [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"
   cleanup_collect_secret
+  if [[ -n "${COLLECT_JOB_NAME:-}" ]]; then
+    KUBECONFIG="$SPOKE_KC" oc delete job "$COLLECT_JOB_NAME" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+  fi
 }
 trap collect_db_cleanup EXIT
 

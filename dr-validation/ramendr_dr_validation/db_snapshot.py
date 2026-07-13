@@ -80,17 +80,18 @@ def fetch_storage_layout(conn, backend: PostgresBackend) -> dict:
             LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace
             WHERE n.nspname = %s
               AND c.relkind = 'r'
-              AND c.relname IN ('dr_validation_audit', 'warehouse')
+              AND c.relname IN (%s, %s)
             """,
-            (backend.schema,),
+            (backend.schema, backend.audit_table, "warehouse"),
         )
         for name, tablespace in cur.fetchall():
             components[str(name)] = str(tablespace)
 
     audit_ts = components.get(backend.audit_table, "pg_default")
     tpcc_ts = components.get("warehouse", "pg_default")
+    os_tablespace = os.environ.get("DR_VALIDATION_OS_TABLESPACE", "ramendr_os")
     return {
-        "dual_disk": audit_ts == "ramendr_os" and tpcc_ts == "pg_default",
+        "dual_disk": audit_ts == os_tablespace and tpcc_ts == "pg_default",
         "audit_tablespace": audit_ts,
         "tpcc_tablespace": tpcc_ts,
         "data_disk_mount": os.environ.get("DR_VALIDATION_DATA_DISK_MOUNT"),
