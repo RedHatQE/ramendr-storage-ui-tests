@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from psycopg2 import sql
 
 from ramendr_dr_validation.backends.postgres import PostgresBackend
@@ -66,6 +68,37 @@ def fetch_tpcc_counts(conn, backend: PostgresBackend) -> dict[str, int]:
     return counts
 
 
+def fetch_storage_layout(conn, backend: PostgresBackend) -> dict:
+    """Report whether audit and TPC-C data span OS vs DR data disk tablespaces."""
+    components: dict[str, str] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.relname, COALESCE(ts.spcname, 'pg_default')
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace
+            WHERE n.nspname = %s
+              AND c.relkind = 'r'
+              AND c.relname IN (%s, %s)
+            """,
+            (backend.schema, backend.audit_table, "warehouse"),
+        )
+        for name, tablespace in cur.fetchall():
+            components[str(name)] = str(tablespace)
+
+    audit_ts = components.get(backend.audit_table, "pg_default")
+    tpcc_ts = components.get("warehouse", "pg_default")
+    os_tablespace = os.environ.get("DR_VALIDATION_OS_TABLESPACE", "ramendr_os")
+    return {
+        "dual_disk": audit_ts == os_tablespace and tpcc_ts == "pg_default",
+        "audit_tablespace": audit_ts,
+        "tpcc_tablespace": tpcc_ts,
+        "data_disk_mount": os.environ.get("DR_VALIDATION_DATA_DISK_MOUNT"),
+        "pgdata": os.environ.get("DR_VALIDATION_PGDATA"),
+    }
+
+
 def collect_snapshot(
     backend: PostgresBackend,
     *,
@@ -76,6 +109,7 @@ def collect_snapshot(
     try:
         audit_records = fetch_audit_records(conn, backend)
         tpcc_counts = fetch_tpcc_counts(conn, backend)
+        storage = fetch_storage_layout(conn, backend)
     finally:
         conn.close()
 
@@ -85,6 +119,7 @@ def collect_snapshot(
         audit_records=audit_records,
         tpcc_counts=tpcc_counts,
         vm_name=vm_name,
+        storage=storage,
     )
 
 
@@ -99,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         backend_factory=PostgresBackend.from_env,
         fetch_audit_records=fetch_audit_records,
         fetch_tpcc_counts=fetch_tpcc_counts,
+        fetch_storage_layout=fetch_storage_layout,
     )
 
 

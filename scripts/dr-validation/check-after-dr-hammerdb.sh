@@ -107,7 +107,7 @@ else
     fi
 
     if [[ -f "$validate_json" ]]; then
-      read -r estimated_rpo missing_count gap_exceeded cutoff_rpo cutoff_exceeded tpcc_issues < <(
+      read -r estimated_rpo missing_count gap_exceeded cutoff_rpo cutoff_exceeded tpcc_issues cross_disk_issues < <(
         python3 - "$validate_json" "$MAX_RPO_SECONDS" <<'PY'
 import sys
 from pathlib import Path
@@ -121,7 +121,8 @@ cutoff_val = data.get("rpo_from_cutoff_seconds")
 cutoff_rpo = int(cutoff_val) if cutoff_val is not None else -1
 cutoff_exceeded = 1 if (cutoff_val is not None and cutoff_rpo > max_rpo) else 0
 tpcc_issues = len(data.get("tpcc_regressions") or [])
-print(estimated, missing, gap_exceeded, cutoff_rpo, cutoff_exceeded, tpcc_issues)
+cross_disk_issues = len(data.get("cross_disk_inconsistencies") or [])
+print(estimated, missing, gap_exceeded, cutoff_rpo, cutoff_exceeded, tpcc_issues, cross_disk_issues)
 PY
       )
       if [[ "$gap_exceeded" == "1" ]]; then
@@ -135,6 +136,10 @@ PY
       elif [[ "$tpcc_issues" != "0" ]]; then
         result="FAIL"
         notes="TPC-C row-count regression (${tpcc_issues} table(s))"
+        overall_fail=1
+      elif [[ "$cross_disk_issues" != "0" ]]; then
+        result="FAIL"
+        notes="cross-disk coherence failed (${cross_disk_issues} issue(s))"
         overall_fail=1
       elif [[ "$result" == "PASS" ]]; then
         if [[ "$missing_count" != "0" ]]; then

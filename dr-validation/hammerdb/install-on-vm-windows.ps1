@@ -15,6 +15,54 @@ $HammerHome = Join-Path $HammerRoot 'current'
 $Instance = if ($env:DR_VALIDATION_MSSQL_INSTANCE) { $env:DR_VALIDATION_MSSQL_INSTANCE } else { 'SQLEXPRESS' }
 $Database = if ($env:DR_VALIDATION_MSSQL_DATABASE) { $env:DR_VALIDATION_MSSQL_DATABASE } else { 'tpcc' }
 $Warehouses = if ($env:DR_VALIDATION_HAMMERDB_WAREHOUSES) { $env:DR_VALIDATION_HAMMERDB_WAREHOUSES } else { '1' }
+$DataDiskDrive = if ($env:DR_VALIDATION_DATA_DISK_DRIVE) { $env:DR_VALIDATION_DATA_DISK_DRIVE.TrimEnd(':') } else { 'D' }
+$DataDiskRoot = "${DataDiskDrive}:\MSSQL"
+$OsDbDir = Join-Path $DataRoot 'mssql'
+
+function Ensure-DataDisk {
+    param([string]$DriveLetter = $DataDiskDrive)
+    $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+    if ($volume -and $volume.FileSystem -eq 'NTFS') {
+        Write-Host "Data disk already available as ${DriveLetter}:"
+        return
+    }
+
+    $osDisk = Get-Disk | Where-Object { $_.IsBoot -or $_.IsSystem } | Select-Object -First 1
+    if (-not $osDisk) {
+        throw 'DR validation OS disk not found (expected a boot or system disk).'
+    }
+    $dataDisk = Get-Disk | Where-Object {
+        $_.Number -ne $osDisk.Number -and $_.OperationalStatus -in @('Online', 'Offline')
+    } | Sort-Object Number | Select-Object -First 1
+    if (-not $dataDisk) {
+        throw 'DR validation data disk not found (expected a second disk besides the OS disk).'
+    }
+
+    if ($dataDisk.OperationalStatus -eq 'Offline') {
+        if ($dataDisk.IsReadOnly) {
+            Set-Disk -Number $dataDisk.Number -IsReadOnly $false -ErrorAction Stop
+        }
+        Set-Disk -Number $dataDisk.Number -IsOffline $false -ErrorAction Stop
+        $dataDisk = Get-Disk -Number $dataDisk.Number
+    }
+
+    if ($dataDisk.PartitionStyle -eq 'RAW') {
+        Initialize-Disk -Number $dataDisk.Number -PartitionStyle GPT -ErrorAction Stop
+    }
+
+    $partition = Get-Partition -DiskNumber $dataDisk.Number -ErrorAction SilentlyContinue |
+        Where-Object { $_.DriveLetter -eq $DriveLetter } |
+        Select-Object -First 1
+    if (-not $partition) {
+        $partition = New-Partition -DiskNumber $dataDisk.Number -UseMaximumSize -DriveLetter $DriveLetter -ErrorAction Stop
+    }
+
+    $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+    if (-not $volume -or $volume.FileSystem -ne 'NTFS') {
+        Format-Volume -DriveLetter $DriveLetter -FileSystem NTFS -NewFileSystemLabel 'RAMENDR-DATA' -Confirm:$false -ErrorAction Stop | Out-Null
+    }
+    Write-Host "HammerDB data disk ready on ${DriveLetter}: (disk $($dataDisk.Number))"
+}
 
 function Test-MssqlIdentifier {
     param(
@@ -123,7 +171,8 @@ Test-MssqlIdentifier -Name $Instance -Kind 'instance'
 
 Write-Host '=== RamenDR HammerDB install (SQL Server / Windows) ==='
 
-New-Item -ItemType Directory -Force -Path $DataRoot, $BinDir, $LibDir, (Join-Path $LibDir 'backends') | Out-Null
+Ensure-DataDisk
+New-Item -ItemType Directory -Force -Path $DataRoot, $BinDir, $LibDir, (Join-Path $LibDir 'backends'), $OsDbDir, "$DataDiskRoot\DATA", "$DataDiskRoot\LOG" | Out-Null
 
 function Enable-SqlPrerequisites {
     if (Get-WindowsFeature -Name NET-Framework-Core -ErrorAction SilentlyContinue |
@@ -148,6 +197,46 @@ function Enable-SqlPrerequisites {
     if ($result.RestartNeeded -eq 'Yes') {
         Write-Host 'Warning: .NET Framework 3.5 install requested a reboot before SQL Server setup.'
     }
+}
+
+function Grant-SqlDataDiskAccess {
+    $svcName = "MSSQL`$$Instance"
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        throw "SQL Server service $svcName not found; cannot grant data-disk ACLs."
+    }
+    $sqlAccount = "NT SERVICE\$svcName"
+    foreach ($path in @("$DataDiskRoot\DATA", "$DataDiskRoot\LOG")) {
+        if (-not (Test-Path $path)) {
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+        }
+        $acl = Get-Acl -LiteralPath $path
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $sqlAccount,
+            'FullControl',
+            'ContainerInherit,ObjectInherit',
+            'None',
+            'Allow'
+        )
+        $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $path -AclObject $acl
+    }
+    Write-Host "Granted $sqlAccount access to ${DataDiskRoot}\DATA and ${DataDiskRoot}\LOG"
+}
+
+function Get-DatabasePrimaryFilePath {
+    param([string]$DbName)
+    $dbLiteral = Format-SqlStringLiteral $DbName
+    $sqlcmd = Get-SqlCmdPath
+    if (-not $sqlcmd) { return $null }
+    $out = & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -d master -h -1 -W -b -Q @"
+SELECT TOP 1 mf.physical_name
+FROM sys.master_files mf
+INNER JOIN sys.databases d ON d.database_id = mf.database_id
+WHERE d.name = $dbLiteral AND mf.type = 0
+"@ 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return ($out | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1).Trim()
 }
 
 function Get-RunningSqlInstanceName {
@@ -358,11 +447,14 @@ function Get-AuditRowCount {
 }
 
 function Invoke-SqlCmd {
-    param([string]$Query)
+    param(
+        [string]$Query,
+        [string]$Database = 'master'
+    )
     $sqlcmd = Get-SqlCmdPath
     if (-not $sqlcmd) { throw 'sqlcmd not found after SQL Server install' }
 
-    & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -b -Q $Query
+    & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -d $Database -b -Q $Query
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed: $Query" }
 }
 
@@ -392,6 +484,7 @@ function Ensure-OdbcDriver {
 Ensure-SqlExpress
 Ensure-OdbcDriver
 Ensure-HammerDb
+Grant-SqlDataDiskAccess
 
 Write-Host 'Configuring SQL Server database and login...'
 $dbLiteral = Format-SqlStringLiteral $Database
@@ -399,7 +492,60 @@ $dbIdent = Format-SqlIdentifier $Database
 $userLiteral = Format-SqlStringLiteral $User
 $userIdent = Format-SqlIdentifier $User
 $passLiteral = Format-SqlStringLiteral $Password
-Invoke-SqlCmd "IF DB_ID($dbLiteral) IS NULL CREATE DATABASE $dbIdent;"
+$dataMdf = "$DataDiskRoot\DATA\tpcc.mdf"
+$dataLog = "$DataDiskRoot\LOG\tpcc_log.ldf"
+$osNdf = Join-Path $OsDbDir 'tpcc_os.ndf'
+$dataMdfLiteral = Format-SqlStringLiteral $dataMdf
+$dataLogLiteral = Format-SqlStringLiteral $dataLog
+$osNdfLiteral = Format-SqlStringLiteral $osNdf
+$existingPrimary = Get-DatabasePrimaryFilePath -DbName $Database
+$skipDatabaseRebuild = $false
+if ($existingPrimary -and ($existingPrimary -ieq $dataMdf)) {
+    Write-Host "Database $Database already uses primary data file $dataMdf; preserving existing database."
+    $skipDatabaseRebuild = $true
+}
+if (-not $skipDatabaseRebuild) {
+    Stop-ScheduledTask -TaskName 'ramendr-dr-hammerdb' -ErrorAction SilentlyContinue
+    Stop-ScheduledTask -TaskName 'ramendr-dr-db-audit' -ErrorAction SilentlyContinue
+    Invoke-SqlCmd @"
+USE master;
+IF DB_ID($dbLiteral) IS NOT NULL
+BEGIN
+    BEGIN TRY
+        ALTER DATABASE $dbIdent SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    END TRY
+    BEGIN CATCH
+        ALTER DATABASE $dbIdent SET EMERGENCY;
+        ALTER DATABASE $dbIdent SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    END CATCH
+    DROP DATABASE $dbIdent;
+END
+"@
+    foreach ($stale in @($dataMdf, $dataLog, $osNdf)) {
+        if (Test-Path $stale) { Remove-Item -Force $stale -ErrorAction SilentlyContinue }
+    }
+    Invoke-SqlCmd @"
+CREATE DATABASE $dbIdent
+ON PRIMARY (
+    NAME = N'tpcc_primary',
+    FILENAME = $dataMdfLiteral,
+    SIZE = 64MB,
+    FILEGROWTH = 64MB
+),
+FILEGROUP [ramendr_os] (
+    NAME = N'tpcc_os',
+    FILENAME = $osNdfLiteral,
+    SIZE = 32MB,
+    FILEGROWTH = 32MB
+)
+LOG ON (
+    NAME = N'tpcc_log',
+    FILENAME = $dataLogLiteral,
+    SIZE = 32MB,
+    FILEGROWTH = 32MB
+);
+"@
+}
 Invoke-SqlCmd @"
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = $userLiteral)
     CREATE LOGIN $userIdent WITH PASSWORD = $passLiteral, CHECK_POLICY = OFF, DEFAULT_DATABASE=$dbIdent;
@@ -432,6 +578,8 @@ DR_VALIDATION_MSSQL_DATABASE=$Database
 DR_VALIDATION_MSSQL_USER=$User
 DR_VALIDATION_MSSQL_PASSWORD=$Password
 DR_VALIDATION_MSSQL_INSTANCE=$Instance
+DR_VALIDATION_DATA_DISK_DRIVE=$DataDiskDrive
+DR_VALIDATION_MSSQL_DATA_ROOT=$DataDiskRoot
 DR_VALIDATION_HAMMERDB_WAREHOUSES=$Warehouses
 DR_VALIDATION_HAMMERDB_HOME=$HammerHome
 "@ | Set-Content -Encoding ASCII $EnvFile
@@ -541,7 +689,7 @@ puts "SCHEMA BUILD DONE"
     }
 }
 
-Invoke-SqlCmd -Query (Get-Content (Join-Path $RepoRoot 'hammerdb\sql\init-audit-mssql.sql') -Raw)
+Invoke-SqlCmd -Database $Database -Query (Get-Content (Join-Path $RepoRoot 'hammerdb\sql\init-audit-mssql.sql') -Raw)
 
 Write-Host 'Seeding audit writer...'
 $env:PYTHONPATH = $PyLibDir

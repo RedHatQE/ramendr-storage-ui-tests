@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 from ramendr_dr_validation.backends.mssql import MssqlBackend
@@ -18,18 +19,21 @@ _VALID_MSSQL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 def _validate_mssql_identifier(name: str, kind: str) -> str:
+    """Return ``name`` when it is a safe MSSQL identifier, else raise ``ValueError``."""
     if not _VALID_MSSQL_IDENTIFIER.match(name):
         raise ValueError(f"Invalid MSSQL {kind}: {name!r}")
     return name
 
 
 def _qualified_table(schema: str, table: str) -> str:
+    """Build a bracket-quoted ``[schema].[table]`` reference for dynamic SQL."""
     schema = _validate_mssql_identifier(schema, "schema")
     table = _validate_mssql_identifier(table, "table")
     return f"[{schema}].[{table}]"
 
 
 def fetch_audit_records(conn, backend: MssqlBackend) -> list[dict]:
+    """Return all audit rows for ``backend.audit_table`` ordered by sequence."""
     audit_table = _qualified_table(backend.schema, backend.audit_table)
     with conn.cursor() as cur:
         cur.execute(
@@ -52,6 +56,7 @@ def fetch_audit_records(conn, backend: MssqlBackend) -> list[dict]:
 
 
 def fetch_tpcc_counts(conn, backend: MssqlBackend) -> dict[str, int]:
+    """Return row counts for HammerDB TPC-C tables that exist in ``backend.schema``."""
     counts: dict[str, int] = {}
     with conn.cursor() as cur:
         for table in backend.tpcc_tables:
@@ -72,15 +77,48 @@ def fetch_tpcc_counts(conn, backend: MssqlBackend) -> dict[str, int]:
     return counts
 
 
+def fetch_storage_layout(conn, backend: MssqlBackend) -> dict:
+    """Report whether audit and TPC-C data span OS vs DR data disk filegroups."""
+    components: dict[str, str] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.name, fg.name
+            FROM sys.tables t
+            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+            INNER JOIN sys.indexes i ON t.object_id = i.object_id AND i.index_id IN (0, 1)
+            INNER JOIN sys.filegroups fg ON i.data_space_id = fg.data_space_id
+            WHERE s.name = %s AND t.name IN (%s, %s)
+            """,
+            (backend.schema, backend.audit_table, "warehouse"),
+        )
+        for name, filegroup in cur.fetchall():
+            components[str(name)] = str(filegroup)
+
+    audit_fg = components.get(backend.audit_table, "PRIMARY")
+    tpcc_fg = components.get("warehouse", "PRIMARY")
+    data_root = os.environ.get("DR_VALIDATION_MSSQL_DATA_ROOT", "")
+    os_filegroup = os.environ.get("DR_VALIDATION_OS_FILEGROUP", "ramendr_os")
+    return {
+        "dual_disk": audit_fg == os_filegroup and tpcc_fg == "PRIMARY",
+        "audit_filegroup": audit_fg,
+        "tpcc_filegroup": tpcc_fg,
+        "data_disk_drive": os.environ.get("DR_VALIDATION_DATA_DISK_DRIVE"),
+        "mssql_data_root": data_root or None,
+    }
+
+
 def collect_snapshot(
     backend: MssqlBackend,
     *,
     vm_name: str | None = None,
 ) -> dict:
+    """Build a JSON-serializable snapshot of audit + TPC-C state on SQL Server."""
     conn = backend.connect()
     try:
         audit_records = fetch_audit_records(conn, backend)
         tpcc_counts = fetch_tpcc_counts(conn, backend)
+        storage = fetch_storage_layout(conn, backend)
     finally:
         conn.close()
 
@@ -90,10 +128,12 @@ def collect_snapshot(
         audit_records=audit_records,
         tpcc_counts=tpcc_counts,
         vm_name=vm_name,
+        storage=storage,
     )
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint: print a SQL Server snapshot JSON document to stdout."""
     return run_snapshot_cli(
         argv,
         description="Export DR validation SQL Server snapshot JSON.",
@@ -103,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         backend_factory=MssqlBackend.from_env,
         fetch_audit_records=fetch_audit_records,
         fetch_tpcc_counts=fetch_tpcc_counts,
+        fetch_storage_layout=fetch_storage_layout,
     )
 
 

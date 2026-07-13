@@ -126,6 +126,12 @@ def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
         "customer table should contain 3000 rows per warehouse (numeric c_id + profile fields)"
     )
 
+    storage = snapshot.get("storage") or {}
+    if storage:
+        assert storage.get("dual_disk") is True, (
+            f"HammerDB database is not split across OS and data disks: {storage!r}"
+        )
+
 
 def assert_all_hammerdb_snapshots_ready(snapshot_dir: Path) -> None:
     """Validate every edge-VM HammerDB snapshot under ``snapshot_dir``.

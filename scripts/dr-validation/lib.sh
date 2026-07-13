@@ -30,6 +30,11 @@ WINDOWS_SSH_USER="${WINDOWS_SSH_USER:-Administrator}"
 VALUES_SECRET="${VALUES_SECRET:-$HOME/values-secret.yaml}"
 # Full fleet size in gitops-vms (2 Linux + 2 Windows); post-DR checks still use this.
 DR_VALIDATION_EXPECTED_VMS="${DR_VALIDATION_EXPECTED_VMS:-4}"
+# Linux DR data disk mount and PostgreSQL split-tablespace layout (see hammerdb/install-on-vm.sh).
+DR_VALIDATION_DATA_DISK_MOUNT="${DR_VALIDATION_DATA_DISK_MOUNT:-/mnt/ramendr-data}"
+DR_VALIDATION_OS_TABLESPACE="${DR_VALIDATION_OS_TABLESPACE:-ramendr_os}"
+# Windows DR data disk drive letter for SQL Server PRIMARY filegroup (audit uses ramendr_os on OS disk).
+DR_VALIDATION_DATA_DISK_DRIVE="${DR_VALIDATION_DATA_DISK_DRIVE:-D}"
 # Bootstrap waits only for Linux edge VMs (Windows DR bootstrap is separate).
 DR_VALIDATION_BOOTSTRAP_VM_COUNT="${DR_VALIDATION_BOOTSTRAP_VM_COUNT:-2}"
 DR_VALIDATION_BOOTSTRAP_VM_PATTERN="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"

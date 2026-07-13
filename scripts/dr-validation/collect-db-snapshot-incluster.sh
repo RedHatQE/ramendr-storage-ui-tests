@@ -14,8 +14,12 @@ PRIMARY="$(determine_primary_cluster)"
 [[ -z "$PRIMARY" ]] && PRIMARY="ocp-primary"
 SPOKE_KC="$(resolve_spoke_kubeconfig "$PRIMARY")"
 
+COLLECT_RUN_ID="${DR_VALIDATION_COLLECT_RUN_ID:-$(date +%s)-$$}"
+COLLECT_JOB_NAME="ramendr-dr-db-collect-${COLLECT_RUN_ID}"
+COLLECT_SECRET_NAME="ramendr-dr-db-collect-ssh-${COLLECT_RUN_ID}"
+
 cleanup_collect_secret() {
-  KUBECONFIG="$SPOKE_KC" oc delete secret ramendr-dr-db-collect-ssh -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+  KUBECONFIG="$SPOKE_KC" oc delete secret "$COLLECT_SECRET_NAME" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
 }
 
 HOSTS="$(get_hammerdb_vm_hosts "$SPOKE_KC")"
@@ -37,10 +41,13 @@ printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
 collect_db_cleanup() {
   [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"
   cleanup_collect_secret
+  if [[ -n "${COLLECT_JOB_NAME:-}" ]]; then
+    KUBECONFIG="$SPOKE_KC" oc delete job "$COLLECT_JOB_NAME" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+  fi
 }
 trap collect_db_cleanup EXIT
 
-COLLECT_SECRET_CREATE=(oc create secret generic ramendr-dr-db-collect-ssh
+COLLECT_SECRET_CREATE=(oc create secret generic "$COLLECT_SECRET_NAME"
   --from-file=hosts.tsv="$TMP_DIR/hosts.tsv"
   -n "$VM_NAMESPACE" --dry-run=client -o yaml)
 COLLECT_SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS:-}")
@@ -54,16 +61,11 @@ if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
 fi
 KUBECONFIG="$SPOKE_KC" "${COLLECT_SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
-KUBECONFIG="$SPOKE_KC" oc delete job ramendr-dr-db-collect -n "$VM_NAMESPACE" --ignore-not-found
-if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-db-collect -n "$VM_NAMESPACE" >/dev/null 2>&1; then
-  KUBECONFIG="$SPOKE_KC" oc wait --for=delete job/ramendr-dr-db-collect \
-    -n "$VM_NAMESPACE" --timeout=120s
-fi
 KUBECONFIG="$SPOKE_KC" oc apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ramendr-dr-db-collect
+  name: ${COLLECT_JOB_NAME}
   namespace: ${VM_NAMESPACE}
 spec:
   backoffLimit: 0
@@ -126,7 +128,7 @@ spec:
       volumes:
       - name: ssh
         secret:
-          secretName: ramendr-dr-db-collect-ssh
+          secretName: ${COLLECT_SECRET_NAME}
           items:
           - key: hosts.tsv
             path: hosts.tsv
@@ -144,12 +146,12 @@ EOF
 collect_failed=0
 job_done=0
 for _ in $(seq 1 180); do
-  if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-db-collect -n "$VM_NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -q 1; then
+  if KUBECONFIG="$SPOKE_KC" oc get job "$COLLECT_JOB_NAME" -n "$VM_NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -q 1; then
     job_done=1
     break
   fi
-  if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-db-collect -n "$VM_NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null | grep -q 1; then
-    KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-db-collect
+  if KUBECONFIG="$SPOKE_KC" oc get job "$COLLECT_JOB_NAME" -n "$VM_NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null | grep -q 1; then
+    KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" "job/${COLLECT_JOB_NAME}"
     collect_failed=1
     job_done=1
     break
@@ -157,18 +159,22 @@ for _ in $(seq 1 180); do
   sleep 10
 done
 
-cleanup_collect_secret
-
 if [[ "$collect_failed" -eq 1 ]]; then
+  cleanup_collect_secret
+  KUBECONFIG="$SPOKE_KC" oc delete job "$COLLECT_JOB_NAME" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
   exit 1
 fi
 if [[ "$job_done" -ne 1 ]]; then
-  err "Timed out waiting for ramendr-dr-db-collect job."
+  cleanup_collect_secret
+  KUBECONFIG="$SPOKE_KC" oc delete job "$COLLECT_JOB_NAME" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
+  err "Timed out waiting for ${COLLECT_JOB_NAME} job."
   exit 1
 fi
 
 mkdir -p "$OUT_DIR"
-KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-db-collect > "$TMP_DIR/collect.raw"
+KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" "job/${COLLECT_JOB_NAME}" > "$TMP_DIR/collect.raw"
+cleanup_collect_secret
+KUBECONFIG="$SPOKE_KC" oc delete job "$COLLECT_JOB_NAME" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null || true
 
 snapshot_count="$(
 python3 <<PY
