@@ -302,6 +302,40 @@ def test_compare_cross_disk_detects_tpcc_only_recovery() -> None:
     assert "data-disk-only" in issues[0]
 
 
+def test_compare_cross_disk_detects_dual_disk_metadata_cleared() -> None:
+    dual = {"dual_disk": True, "audit_tablespace": "ramendr_os"}
+    before = _snapshot(
+        [
+            {
+                "seq": 10,
+                "committed_at": "2026-06-15T12:00:10.000Z",
+                "hostname": "edgenode-0",
+                "source": "db_audit",
+            }
+        ],
+        tpcc={"orders": 900, "order_line": 0, "new_order": 0, "history": 0},
+        storage=dual,
+    )
+    after = _snapshot(
+        [
+            {
+                "seq": 15,
+                "committed_at": "2026-06-15T12:01:00.000Z",
+                "hostname": "edgenode-0",
+                "source": "db_audit",
+            }
+        ],
+        tpcc={"orders": 950, "order_line": 0, "new_order": 0, "history": 0},
+        storage={"dual_disk": False},
+    )
+
+    issues = compare_cross_disk_coherence(before, after)
+    assert issues == [
+        "cross-disk: baseline snapshot had dual_disk=True but after snapshot "
+        "omits or clears dual_disk metadata"
+    ]
+
+
 def test_validate_cross_disk_coherence_against_baseline(tmp_path: Path) -> None:
     dual = {"dual_disk": True, "audit_tablespace": "ramendr_os"}
     before_records = [

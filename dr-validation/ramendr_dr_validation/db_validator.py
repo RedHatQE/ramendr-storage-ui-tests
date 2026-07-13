@@ -164,8 +164,18 @@ def compare_cross_disk_coherence(before: dict, after: dict) -> list[str]:
     """
     after_storage = after.get("storage") or {}
     before_storage = before.get("storage") or {}
-    if not after_storage.get("dual_disk") and not before_storage.get("dual_disk"):
+    before_dual = bool(before_storage.get("dual_disk"))
+    after_dual = bool(after_storage.get("dual_disk"))
+    if not before_dual and not after_dual:
         return []
+
+    inconsistencies: list[str] = []
+    if before_dual and not after_dual:
+        inconsistencies.append(
+            "cross-disk: baseline snapshot had dual_disk=True but after snapshot "
+            "omits or clears dual_disk metadata"
+        )
+        return inconsistencies
 
     before_seq = _last_audit_seq(before)
     after_seq = _last_audit_seq(after)
@@ -181,7 +191,6 @@ def compare_cross_disk_coherence(before: dict, after: dict) -> list[str]:
     }
     tpcc_advanced = any(delta > 0 for delta in tpcc_deltas.values())
 
-    inconsistencies: list[str] = []
     if audit_delta > 0 and not tpcc_advanced:
         inconsistencies.append(
             "cross-disk: audit seq advanced "
