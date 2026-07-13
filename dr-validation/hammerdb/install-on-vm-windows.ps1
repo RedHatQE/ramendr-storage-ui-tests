@@ -29,10 +29,18 @@ function Ensure-DataDisk {
 
     $osDisk = Get-Disk | Where-Object { $_.IsBoot -or $_.IsSystem } | Select-Object -First 1
     $dataDisk = Get-Disk | Where-Object {
-        $_.Number -ne $osDisk.Number -and $_.OperationalStatus -eq 'Online'
+        $_.Number -ne $osDisk.Number -and $_.OperationalStatus -in @('Online', 'Offline')
     } | Sort-Object Number | Select-Object -First 1
     if (-not $dataDisk) {
-        throw 'DR validation data disk not found (expected a second online disk besides the OS disk).'
+        throw 'DR validation data disk not found (expected a second disk besides the OS disk).'
+    }
+
+    if ($dataDisk.OperationalStatus -eq 'Offline') {
+        if ($dataDisk.IsReadOnly) {
+            Set-Disk -Number $dataDisk.Number -IsReadOnly $false -ErrorAction Stop
+        }
+        Set-Disk -Number $dataDisk.Number -IsOffline $false -ErrorAction Stop
+        $dataDisk = Get-Disk -Number $dataDisk.Number
     }
 
     if ($dataDisk.PartitionStyle -eq 'RAW') {
@@ -396,11 +404,14 @@ function Get-AuditRowCount {
 }
 
 function Invoke-SqlCmd {
-    param([string]$Query)
+    param(
+        [string]$Query,
+        [string]$Database = 'master'
+    )
     $sqlcmd = Get-SqlCmdPath
     if (-not $sqlcmd) { throw 'sqlcmd not found after SQL Server install' }
 
-    & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -b -Q $Query
+    & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -d $Database -b -Q $Query
     if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed: $Query" }
 }
 
@@ -443,29 +454,45 @@ $osNdf = Join-Path $OsDbDir 'tpcc_os.ndf'
 $dataMdfLiteral = Format-SqlStringLiteral $dataMdf
 $dataLogLiteral = Format-SqlStringLiteral $dataLog
 $osNdfLiteral = Format-SqlStringLiteral $osNdf
+Stop-ScheduledTask -TaskName 'ramendr-dr-hammerdb' -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName 'ramendr-dr-db-audit' -ErrorAction SilentlyContinue
 Invoke-SqlCmd @"
-IF DB_ID($dbLiteral) IS NULL
+USE master;
+IF DB_ID($dbLiteral) IS NOT NULL
 BEGIN
-    CREATE DATABASE $dbIdent
-    ON PRIMARY (
-        NAME = N'tpcc_primary',
-        FILENAME = $dataMdfLiteral,
-        SIZE = 64MB,
-        FILEGROWTH = 64MB
-    ),
-    FILEGROUP [ramendr_os] (
-        NAME = N'tpcc_os',
-        FILENAME = $osNdfLiteral,
-        SIZE = 32MB,
-        FILEGROWTH = 32MB
-    )
-    LOG ON (
-        NAME = N'tpcc_log',
-        FILENAME = $dataLogLiteral,
-        SIZE = 32MB,
-        FILEGROWTH = 32MB
-    );
+    BEGIN TRY
+        ALTER DATABASE $dbIdent SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    END TRY
+    BEGIN CATCH
+        ALTER DATABASE $dbIdent SET EMERGENCY;
+        ALTER DATABASE $dbIdent SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    END CATCH
+    DROP DATABASE $dbIdent;
 END
+"@
+foreach ($stale in @($dataMdf, $dataLog, $osNdf)) {
+    if (Test-Path $stale) { Remove-Item -Force $stale -ErrorAction SilentlyContinue }
+}
+Invoke-SqlCmd @"
+CREATE DATABASE $dbIdent
+ON PRIMARY (
+    NAME = N'tpcc_primary',
+    FILENAME = $dataMdfLiteral,
+    SIZE = 64MB,
+    FILEGROWTH = 64MB
+),
+FILEGROUP [ramendr_os] (
+    NAME = N'tpcc_os',
+    FILENAME = $osNdfLiteral,
+    SIZE = 32MB,
+    FILEGROWTH = 32MB
+)
+LOG ON (
+    NAME = N'tpcc_log',
+    FILENAME = $dataLogLiteral,
+    SIZE = 32MB,
+    FILEGROWTH = 32MB
+);
 "@
 Invoke-SqlCmd @"
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = $userLiteral)
@@ -610,7 +637,7 @@ puts "SCHEMA BUILD DONE"
     }
 }
 
-Invoke-SqlCmd -Query (Get-Content (Join-Path $RepoRoot 'hammerdb\sql\init-audit-mssql.sql') -Raw)
+Invoke-SqlCmd -Database $Database -Query (Get-Content (Join-Path $RepoRoot 'hammerdb\sql\init-audit-mssql.sql') -Raw)
 
 Write-Host 'Seeding audit writer...'
 $env:PYTHONPATH = $PyLibDir

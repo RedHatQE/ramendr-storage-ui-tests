@@ -122,7 +122,7 @@ metadata:
   namespace: ${VM_NAMESPACE}
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 7200
+  activeDeadlineSeconds: 14400
   template:
     spec:
       restartPolicy: Never
@@ -269,7 +269,24 @@ spec:
                   "/tmp/windows-staging/\${hammer_zip}" "\${ssh_user}@\${host}:C:/Temp/\${hammer_zip}"; } && \
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                "\${ssh_user}@\${host}" "\$remote"
+                "\${ssh_user}@\${host}" "\$remote" || return 1
+              local poll_tries=0 poll_max=240 poll_sleep=60
+              while [[ \$poll_tries -lt \$poll_max ]]; do
+                if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                  "\${ssh_user}@\${host}" "if exist C:\\ProgramData\\ramendr-dr-validation\\install.done (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 0) else if exist C:\\ProgramData\\ramendr-dr-validation\\install.failed (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 1) else exit 2" 2>/dev/null; then
+                  return 0
+                fi
+                local poll_rc=\$?
+                if [[ \$poll_rc -eq 1 ]]; then
+                  return 1
+                fi
+                echo "  Waiting for detached Windows HammerDB install on \$name (attempt \$((poll_tries + 1))/\$poll_max)..."
+                sleep "\$poll_sleep"
+                poll_tries=\$((poll_tries + 1))
+              done
+              echo "FAILED \$name: timed out waiting for detached Windows HammerDB install"
+              return 1
             }
             while IFS=\$'\t' read -r name host port platform ssh_user; do
               [[ -z "\$name" ]] && continue
@@ -312,7 +329,7 @@ spec:
             optional: true
 EOF
 
-for _ in $(seq 1 480); do
+for _ in $(seq 1 960); do
   if KUBECONFIG="$SPOKE_KC" oc get job ramendr-dr-hammerdb-install -n "$VM_NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -q 1; then
     logs="$(KUBECONFIG="$SPOKE_KC" oc logs -n "$VM_NAMESPACE" job/ramendr-dr-hammerdb-install 2>/dev/null || true)"
     echo "$logs" | tail -n 200

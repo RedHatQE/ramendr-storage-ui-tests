@@ -314,9 +314,11 @@ fi
 sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 -c \
   "GRANT ALL PRIVILEGES ON DATABASE $(pg_quote_ident "$PG_DATABASE") TO $(pg_quote_ident "$PG_USER");"
 
-sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 -d postgres <<SQL
-CREATE TABLESPACE IF NOT EXISTS $(pg_quote_ident "$OS_TABLESPACE_NAME") LOCATION $(pg_quote_literal "$OS_TABLESPACE_DIR");
-SQL
+if ! sudo -u postgres "$PSQL" -Atqc \
+  "SELECT 1 FROM pg_tablespace WHERE spcname=$(pg_quote_literal "$OS_TABLESPACE_NAME")" | grep -q 1; then
+  sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 -d postgres -c \
+    "CREATE TABLESPACE $(pg_quote_ident "$OS_TABLESPACE_NAME") LOCATION $(pg_quote_literal "$OS_TABLESPACE_DIR");"
+fi
 
 sudo install -m 0755 -d "$ENV_DIR"
 sudo tee "$ENV_FILE" >/dev/null <<ENV

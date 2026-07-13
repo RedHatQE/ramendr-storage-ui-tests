@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+# macOS ships bash 3.2 (no mapfile). Re-exec with Homebrew bash when available.
+if [[ -z "${RAMENDR_GNU_BASH_REEXECED:-}" && "${BASH_VERSINFO[0]:-0}" -lt 4 ]]; then
+  for _bash in "${GNU_BASH:-}" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [[ -n "${_bash:-}" && -x "$_bash" ]]; then
+      export RAMENDR_GNU_BASH_REEXECED=1
+      exec "$_bash" "$0" "$@"
+    fi
+  done
+  echo "ERROR: GNU bash 4+ is required (mapfile). On macOS: brew install bash" >&2
+  exit 1
+fi
 set -euo pipefail
 
 #
@@ -66,12 +77,26 @@ err() { echo -e "${RED}[$(date +%H:%M:%S)] ERROR:${NC} $*"; }
 check_prerequisites() {
   log "Checking prerequisites..."
   local missing=0
-  for cmd in oc openshift-install aws podman git python3 curl; do
+  for cmd in oc openshift-install aws podman git python3 curl jq; do
     if ! command -v "$cmd" &>/dev/null; then
       err "Missing: $cmd"
       missing=1
     fi
   done
+  if ! python3 -c "import yaml" 2>/dev/null; then
+    log "PyYAML not found; installing with pip (user)..."
+    if ! python3 -m pip install --user PyYAML >/dev/null 2>&1; then
+      err "PyYAML is required for BYOC kubeconfig merge. Install: python3 -m pip install pyyaml"
+      missing=1
+    elif ! python3 -c "import yaml" 2>/dev/null; then
+      err "PyYAML install did not succeed. Install: python3 -m pip install pyyaml"
+      missing=1
+    fi
+  fi
+  if [[ "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]] && ! command -v virtctl &>/dev/null; then
+    err "Missing: virtctl (required for Windows VM SSH verification). On macOS: brew install virtctl"
+    missing=1
+  fi
   if [[ -z "$HOSTED_ZONE_ID" ]]; then
     err "HOSTED_ZONE_ID is not set. Export it or set a default in this script."
     missing=1

@@ -7,7 +7,7 @@ BEGIN
         committed_at DATETIME2 NOT NULL,
         hostname NVARCHAR(256) NOT NULL,
         source NVARCHAR(64) NOT NULL DEFAULT N'db_audit'
-    ) ON ramendr_os;
+    ) ON [ramendr_os];
 END;
 
 IF NOT EXISTS (
