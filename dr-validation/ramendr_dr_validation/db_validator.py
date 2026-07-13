@@ -40,6 +40,7 @@ class DbValidationReport:
     timestamp_regressions: list[str] = field(default_factory=list)
     tpcc_counts: dict[str, int] = field(default_factory=dict)
     tpcc_regressions: list[str] = field(default_factory=list)
+    cross_disk_inconsistencies: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -50,6 +51,7 @@ class DbValidationReport:
             and not self.parse_errors
             and not self.timestamp_regressions
             and not self.tpcc_regressions
+            and not self.cross_disk_inconsistencies
         )
 
     def max_seq_gap(self) -> int:
@@ -121,6 +123,99 @@ def validate_audit_records(records: list[AuditRecord]) -> DbValidationReport:
 
     report.duplicate_seqs = sorted(set(report.duplicate_seqs))
     return report
+
+
+_TPCC_MUTABLE_COUNTERS = ("orders", "order_line", "new_order", "history")
+
+
+def _last_audit_seq(snapshot: dict) -> int | None:
+    audit = snapshot.get("audit") or {}
+    last_seq = audit.get("last_seq")
+    if last_seq is not None:
+        try:
+            return int(last_seq)
+        except (TypeError, ValueError):
+            pass
+    records = audit.get("records") or []
+    if not records:
+        return None
+    try:
+        return int(records[-1]["seq"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _last_audit_timestamp(snapshot: dict) -> datetime | None:
+    records = (snapshot.get("audit") or {}).get("records") or []
+    if not records:
+        return None
+    try:
+        return parse_timestamp(str(records[-1]["committed_at"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def compare_cross_disk_coherence(before: dict, after: dict) -> list[str]:
+    """Detect split-brain DR where only one disk's data appears to have survived.
+
+    For dual-disk HammerDB (TPC-C on the data disk, audit on the OS disk), both sides
+    should advance together under normal load. A large delta on one side with no
+    movement on the other suggests partial protection or recovery.
+    """
+    after_storage = after.get("storage") or {}
+    before_storage = before.get("storage") or {}
+    if not after_storage.get("dual_disk") and not before_storage.get("dual_disk"):
+        return []
+
+    before_seq = _last_audit_seq(before)
+    after_seq = _last_audit_seq(after)
+    if before_seq is None or after_seq is None:
+        return []
+
+    audit_delta = after_seq - before_seq
+    before_tpcc = dict(before.get("tpcc") or {})
+    after_tpcc = dict(after.get("tpcc") or {})
+    tpcc_deltas = {
+        table: int(after_tpcc.get(table, 0)) - int(before_tpcc.get(table, 0))
+        for table in _TPCC_MUTABLE_COUNTERS
+    }
+    tpcc_advanced = any(delta > 0 for delta in tpcc_deltas.values())
+
+    inconsistencies: list[str] = []
+    if audit_delta > 0 and not tpcc_advanced:
+        inconsistencies.append(
+            "cross-disk: audit seq advanced "
+            f"({before_seq} -> {after_seq}) but TPC-C transactional counters "
+            f"({', '.join(_TPCC_MUTABLE_COUNTERS)}) did not increase "
+            "(possible OS-disk-only recovery)"
+        )
+    if tpcc_advanced and audit_delta <= 0:
+        advanced = ", ".join(
+            f"{table}+{tpcc_deltas[table]}"
+            for table in _TPCC_MUTABLE_COUNTERS
+            if tpcc_deltas[table] > 0
+        )
+        inconsistencies.append(
+            "cross-disk: TPC-C counters advanced "
+            f"({advanced}) but audit seq did not increase "
+            f"({before_seq} -> {after_seq}) "
+            "(possible data-disk-only recovery)"
+        )
+
+    before_ts = _last_audit_timestamp(before)
+    after_ts = _last_audit_timestamp(after)
+    if (
+        before_ts is not None
+        and after_ts is not None
+        and audit_delta >= 0
+        and after_ts < before_ts
+    ):
+        inconsistencies.append(
+            "cross-disk: last audit committed_at regressed "
+            f"({before_ts.isoformat()} -> {after_ts.isoformat()}) "
+            "while audit seq did not decrease"
+        )
+    return inconsistencies
 
 
 def compare_tpcc_counts(before: dict[str, int], after: dict[str, int]) -> list[str]:
@@ -229,6 +324,10 @@ def validate_snapshot_file(
             report.tpcc_regressions = compare_tpcc_counts(
                 dict(before_snapshot.get("tpcc") or {}),
                 report.tpcc_counts,
+            )
+            report.cross_disk_inconsistencies = compare_cross_disk_coherence(
+                before_snapshot,
+                snapshot,
             )
     report.tpcc_regressions.extend(validate_tpcc_populated(report.tpcc_counts))
 

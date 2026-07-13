@@ -27,6 +27,15 @@ from tests.utils.dr_validation import (
     hammerdb_mode_active,
     run_status_hammerdb,
 )
+from tests.utils.vrg import (
+    active_cluster_from_drpc,
+    load_drpc,
+    load_vrg,
+    protected_pvc_index,
+    pvc_replication_issues,
+    spoke_kubeconfig,
+    vm_os_and_data_pvc_names,
+)
 
 # ArgoCD apps that are expected to be OutOfSync due to known drift.
 # These are still required to be Healthy; only the sync status is tolerated.
@@ -506,6 +515,64 @@ class TestInfraSmoke:
         assert not pvc_failures, (
             f"PVC(s) for VM data disks have unexpected properties on {active_cluster}:\n"
             + "\n".join(f"  - {f}" for f in pvc_failures)
+        )
+
+    def test_vm_disks_dr_protected_in_vrg(
+        self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
+    ):
+        """OS and data PVCs for each gitops-vms VM are VRG-protected with healthy replication.
+
+        Dual-disk HammerDB splits TPC-C (data disk) and dr_validation_audit (OS disk).
+        Both PVCs must be listed in the gitops-vm-protection VolumeReplicationGroup and
+        report DataReady plus active Ceph mirroring before DR — partial protection would
+        leave only one side of the database coherent after failover.
+        """
+        drpc = load_drpc(hub_kubeconfig)
+        active_cluster = active_cluster_from_drpc(drpc)
+        kubeconfig = spoke_kubeconfig(
+            active_cluster,
+            primary_kubeconfig=primary_kubeconfig,
+            secondary_kubeconfig=secondary_kubeconfig,
+        )
+
+        raw_vms = run_oc(
+            [
+                "get",
+                "virtualmachines",
+                "-n",
+                "gitops-vms",
+                "--output=json",
+            ],
+            kubeconfig,
+        )
+        vms = json.loads(raw_vms)["items"]
+        assert vms, f"No VirtualMachines found in gitops-vms on {active_cluster}"
+
+        vrg = load_vrg(kubeconfig)
+        protected = protected_pvc_index(vrg)
+
+        failures: list[str] = []
+        for vm in vms:
+            name = vm["metadata"]["name"]
+            try:
+                os_pvc, data_pvc = vm_os_and_data_pvc_names(vm)
+            except ValueError as exc:
+                failures.append(str(exc))
+                continue
+
+            for pvc_name in (os_pvc, data_pvc):
+                entry = protected.get(pvc_name)
+                if entry is None:
+                    failures.append(
+                        f"{name}: PVC {pvc_name!r} not listed in VRG "
+                        f"gitops-vm-protection protectedPVCs"
+                    )
+                    continue
+                failures.extend(pvc_replication_issues(pvc_name, entry))
+
+        assert not failures, (
+            f"VM disk PVC(s) missing or unhealthy in VRG on {active_cluster}:\n"
+            + "\n".join(f"  - {f}" for f in failures)
         )
 
     # ------------------------------------------------------------------

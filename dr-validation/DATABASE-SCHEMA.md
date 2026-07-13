@@ -4,6 +4,21 @@ HammerDB **TPC-C** builds a production-style OLTP database on the DR-protected e
 (`rhel9-node-001` by default). There is no separate literal `users` table; **`customer`**
 serves that role with numeric IDs and profile fields.
 
+## Storage layout (dual-disk HammerDB)
+
+HammerDB uses one logical `tpcc` database split across two DR-protected disks so
+post-DR validation exercises both PVCs:
+
+| Workload | PostgreSQL (Linux) | SQL Server (Windows) |
+|----------|-------------------|----------------------|
+| TPC-C tables (`warehouse`, `orders`, …) | Default tablespace on **data disk** (`PGDATA` under `/mnt/ramendr-data`) | `PRIMARY` filegroup on **data disk** (`D:\MSSQL`) |
+| `dr_validation_audit` | `ramendr_os` tablespace on **OS disk** | `ramendr_os` filegroup on **OS disk** |
+
+Both the OS-disk PVC (VM name) and the `{vm}-data` PVC must be listed in the
+`gitops-vm-protection` VolumeReplicationGroup. Post-DR checks compare audit sequence
+and TPC-C transactional counters against the pre-DR baseline to detect split-brain
+recovery where only one disk survived failover.
+
 ## Application tables (HammerDB TPC-C)
 
 | Table | Role | Key identifiers / data |
@@ -26,10 +41,11 @@ transactions.
 
 | Table | Role | Columns |
 |-------|------|---------|
-| `dr_validation_audit` | Continuous DR audit trail on replicated PostgreSQL data | `seq`, `committed_at`, `hostname`, `source` |
+| `dr_validation_audit` | Continuous DR audit trail (OS disk in dual-disk mode) | `seq`, `committed_at`, `hostname`, `source` |
 
 Post-DR checks validate audit sequence continuity, TPC-C row-count regression vs the
-automatic baseline, and RPO relative to the DR initiation timestamp.
+automatic baseline, cross-disk coherence between audit and TPC-C growth, and RPO relative
+to the DR initiation timestamp.
 
 See `ramendr_dr_validation/tpcc_schema.py` for programmatic minimum row counts used
 in smoke tests and redeploy verification.

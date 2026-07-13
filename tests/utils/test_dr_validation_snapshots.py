@@ -61,6 +61,12 @@ def test_assert_hammerdb_snapshot_ready_checks_dual_disk_layout() -> None:
         )
 
 
+_DUAL_DISK_STORAGE = {
+    "dual_disk": True,
+    "audit_tablespace": "ramendr_os",
+}
+
+
 def test_assert_all_hammerdb_snapshots_ready_validates_each_vm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -69,10 +75,22 @@ def test_assert_all_hammerdb_snapshots_ready_validates_each_vm(
     monkeypatch.delenv("DR_VALIDATION_HAMMERDB_VMS", raising=False)
 
     (tmp_path / "linux.db-snapshot.json").write_text(
-        json.dumps(_snapshot(backend="postgres")), encoding="utf-8"
+        json.dumps(
+            _snapshot(
+                backend="postgres",
+                storage=_DUAL_DISK_STORAGE,
+            )
+        ),
+        encoding="utf-8",
     )
     (tmp_path / "windows.db-snapshot.json").write_text(
-        json.dumps(_snapshot(backend="mssql")), encoding="utf-8"
+        json.dumps(
+            _snapshot(
+                backend="mssql",
+                storage=_DUAL_DISK_STORAGE,
+            )
+        ),
+        encoding="utf-8",
     )
 
     assert_all_hammerdb_snapshots_ready(tmp_path)
@@ -86,13 +104,20 @@ def test_assert_all_hammerdb_snapshots_ready_reports_per_vm_failures(
     monkeypatch.delenv("DR_VALIDATION_HAMMERDB_VMS", raising=False)
 
     (tmp_path / "good.db-snapshot.json").write_text(
-        json.dumps(_snapshot(backend="postgres")), encoding="utf-8"
+        json.dumps(
+            _snapshot(
+                backend="postgres",
+                storage=_DUAL_DISK_STORAGE,
+            )
+        ),
+        encoding="utf-8",
     )
     (tmp_path / "bad.db-snapshot.json").write_text(
         json.dumps(
             _snapshot(
                 backend="mssql",
                 tpcc={**_POPULATED_TPCC, "item": 0},
+                storage=_DUAL_DISK_STORAGE,
             )
         ),
         encoding="utf-8",

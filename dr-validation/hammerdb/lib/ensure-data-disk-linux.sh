@@ -65,6 +65,10 @@ ensure_dr_validation_data_disk() {
     sudo mkfs.xfs -L "$fs_label" -f "$target_dev"
     uuid="$(sudo blkid -s UUID -o value "$target_dev")"
   fi
+  if [[ -z "$uuid" ]]; then
+    echo "ERROR: Failed to read UUID for ${target_dev}" >&2
+    return 1
+  fi
 
   if ! grep -q "$fstab_marker" /etc/fstab 2>/dev/null; then
     echo "UUID=${uuid} ${mount_point} xfs defaults,nofail 0 2 ${fstab_marker}" | sudo tee -a /etc/fstab >/dev/null
