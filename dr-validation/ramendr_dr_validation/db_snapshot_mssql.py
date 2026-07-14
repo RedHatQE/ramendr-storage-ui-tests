@@ -55,6 +55,27 @@ def fetch_audit_records(conn, backend: MssqlBackend) -> list[dict]:
     ]
 
 
+def fetch_audit_summary(conn, backend: MssqlBackend) -> dict:
+    """Return audit row count and latest commit time without exporting full history."""
+    audit_table = _qualified_table(backend.schema, backend.audit_table)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT COUNT(*), MIN(seq), MAX(seq), MAX(committed_at)
+            FROM {audit_table}
+            """
+        )
+        count, first_seq, last_seq, last_committed_at = cur.fetchone()
+    return {
+        "record_count": int(count),
+        "first_seq": int(first_seq) if first_seq is not None else None,
+        "last_seq": int(last_seq) if last_seq is not None else None,
+        "last_committed_at": (
+            format_committed_at(last_committed_at) if last_committed_at else None
+        ),
+    }
+
+
 def fetch_tpcc_counts(conn, backend: MssqlBackend) -> dict[str, int]:
     """Return row counts for HammerDB TPC-C tables that exist in ``backend.schema``."""
     counts: dict[str, int] = {}
@@ -142,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         load_env_file=load_env_file,
         backend_factory=MssqlBackend.from_env,
         fetch_audit_records=fetch_audit_records,
+        fetch_audit_summary=fetch_audit_summary,
         fetch_tpcc_counts=fetch_tpcc_counts,
         fetch_storage_layout=fetch_storage_layout,
     )

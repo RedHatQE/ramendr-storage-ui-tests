@@ -15,6 +15,8 @@ fi
 echo "Validation mode: hammerdb (all edge VMs when DR_VALIDATION_HAMMERDB_ALL_VMS=1)"
 echo "Checking HammerDB workload via in-cluster DB snapshot..."
 
+export DR_VALIDATION_SNAPSHOT_STATUS_ONLY=1
+
 mkdir -p "${REPO_ROOT}/.work/dr-validation-db"
 dest="$(mktemp -d "${REPO_ROOT}/.work/dr-validation-db/status-check.XXXXXX")"
 trap 'rm -rf "$dest"' EXIT
@@ -53,17 +55,32 @@ snap = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 max_age = float(sys.argv[2])
 audit = snap.get("audit") or {}
 records = audit.get("records") or []
-record_count = len(records)
+record_count = audit.get("record_count")
+if record_count is None:
+    record_count = len(records)
+else:
+    record_count = int(record_count)
 last_seq = audit.get("last_seq") or 0
 age_ok = 0
-if records:
+last_ts = audit.get("last_committed_at")
+if not last_ts and records:
     last_ts = records[-1]["committed_at"]
+if last_ts:
     if last_ts.endswith("Z"):
         last_ts = last_ts[:-1] + "+00:00"
-    dt = datetime.fromisoformat(last_ts)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    age = (datetime.now(timezone.utc) - dt).total_seconds()
+    last_dt = datetime.fromisoformat(last_ts)
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    ref_raw = snap.get("collected_at_utc")
+    if ref_raw:
+        if ref_raw.endswith("Z"):
+            ref_raw = ref_raw[:-1] + "+00:00"
+        ref_dt = datetime.fromisoformat(ref_raw)
+        if ref_dt.tzinfo is None:
+            ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+    else:
+        ref_dt = datetime.now(timezone.utc)
+    age = (ref_dt - last_dt).total_seconds()
     age_ok = 1 if age <= max_age else 0
 tpcc = snap.get("tpcc") or {}
 tpcc_errors = validate_tpcc_populated(tpcc)

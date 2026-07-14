@@ -228,7 +228,7 @@ spec:
               return 1
             }
             install_windows_vm() {
-              local host="\$1" port="\$2" ssh_user="\$3"
+              local name="\$1" host="\$2" port="\$3" ssh_user="\$4"
               local scp_opts="-P \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local prep='if not exist C:\\Temp mkdir C:\\Temp'
@@ -238,22 +238,23 @@ spec:
               local sql_installer="SQL2022-SSEI-Expr.exe"
               local python_installer="python-amd64.exe"
               local odbc_installer="msodbcsql17.exe"
+              local mssql_env_file="/tmp/mssql-install-\${name}.env"
               if [[ -z "\$WINDOWS_PASS" ]]; then
-                echo "FAILED \$name: missing windows-password"
+                echo "FAILED \${name}: missing windows-password"
                 return 1
               fi
               if [[ -z "\$MSSQL_SA" || -z "\$MSSQL_USER" || -z "\$MSSQL_PASSWORD" ]]; then
-                echo "FAILED \$name: missing MSSQL credentials in install secret"
+                echo "FAILED \${name}: missing MSSQL credentials in install secret"
                 return 1
               fi
               printf 'DR_VALIDATION_MSSQL_SA_PASSWORD=%s\nDR_VALIDATION_MSSQL_USER=%s\nDR_VALIDATION_MSSQL_PASSWORD=%s\n' \
-                "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" > /tmp/mssql-install.env
+                "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" > "\$mssql_env_file"
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$prep" && \
               sshpass -p "\$WINDOWS_PASS" scp \$scp_opts /payload/payload.tgz /payload/install-remote-windows.cmd \
                 "\${ssh_user}@\${host}:C:/Temp/" && \
-              sshpass -p "\$WINDOWS_PASS" scp \$scp_opts /tmp/mssql-install.env \
+              sshpass -p "\$WINDOWS_PASS" scp \$scp_opts "\$mssql_env_file" \
                 "\${ssh_user}@\${host}:C:/Temp/mssql-install.env" && \
               { [[ ! -s "/tmp/windows-staging/\${sql_installer}" ]] || \
                 sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
@@ -281,23 +282,108 @@ spec:
                 if [[ \$poll_rc -eq 1 ]]; then
                   return 1
                 fi
-                echo "  Waiting for detached Windows HammerDB install on \$name (attempt \$((poll_tries + 1))/\$poll_max)..."
+                echo "  Waiting for detached Windows HammerDB install on \${name} (attempt \$((poll_tries + 1))/\$poll_max)..."
                 sleep "\$poll_sleep"
                 poll_tries=\$((poll_tries + 1))
               done
-              echo "FAILED \$name: timed out waiting for detached Windows HammerDB install"
+              echo "FAILED \${name}: timed out waiting for detached Windows HammerDB install"
               return 1
+            }
+            INSTALL_LOG_DIR=/tmp/install-logs
+            mkdir -p "\$INSTALL_LOG_DIR"
+            INSTALL_ORDER=()
+            INSTALL_PIDS=()
+            run_vm_install() {
+              local name="\$1" host="\$2" port="\$3" platform="\$4" ssh_user="\$5"
+              local log_file="\${INSTALL_LOG_DIR}/\${name}.log"
+              local rc_file="\${INSTALL_LOG_DIR}/\${name}.rc"
+              local rc=0
+              {
+                echo "=== \${name} @ \${host}:\${port} (\${platform}) ==="
+                if [[ "\$platform" == windows ]]; then
+                  install_windows_vm "\$name" "\$host" "\$port" "\$ssh_user" || rc=1
+                else
+                  install_linux_vm "\$host" "\$port" "\$ssh_user" || rc=1
+                fi
+                if [[ \$rc -eq 0 ]]; then
+                  echo "INSTALL OK \${name}"
+                else
+                  echo "INSTALL FAILED \${name}"
+                fi
+              } > "\$log_file" 2>&1
+              echo "\$rc" > "\$rc_file"
             }
             while IFS=\$'\t' read -r name host port platform ssh_user; do
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
-              echo "=== \$name @ \$host:\$port (\$platform) ==="
-              if [[ "\$platform" == windows ]]; then
-                install_windows_vm "\$host" "\$port" "\$ssh_user" || { echo "FAILED \$name"; exit 1; }
+              INSTALL_ORDER+=("\$name")
+              run_vm_install "\$name" "\$host" "\$port" "\$platform" "\$ssh_user" &
+              INSTALL_PIDS+=("\$!")
+            done < /tmp/hosts.tsv
+            echo "Installing HammerDB on \${#INSTALL_PIDS[@]} VM(s) in parallel..."
+            for pid in "\${INSTALL_PIDS[@]}"; do
+              wait "\$pid" || true
+            done
+            install_fail=0
+            for name in "\${INSTALL_ORDER[@]}"; do
+              echo ""
+              echo "========== \${name} =========="
+              if [[ -f "\${INSTALL_LOG_DIR}/\${name}.log" ]]; then
+                cat "\${INSTALL_LOG_DIR}/\${name}.log"
               else
-                install_linux_vm "\$host" "\$port" "\$ssh_user" || { echo "FAILED \$name"; exit 1; }
+                echo "WARN: missing install log for \${name}"
+                install_fail=1
+                continue
+              fi
+              rc="\$(tr -d '[:space:]' < "\${INSTALL_LOG_DIR}/\${name}.rc" 2>/dev/null || echo 1)"
+              if [[ "\$rc" != "0" ]]; then
+                echo "FAILED \${name} (exit \${rc})"
+                install_fail=1
+              fi
+            done
+            if [[ "\$install_fail" -ne 0 ]]; then
+              echo "One or more HammerDB installs failed."
+              exit 1
+            fi
+            refresh_linux_audit() {
+              local host="\$1" port="\$2" ssh_user="\$3"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local cmd="sudo systemctl restart ramendr-dr-db-audit.service"
+              if [[ -f /tmp/ssh-privatekey ]]; then
+                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$cmd"
+                return \$?
+              fi
+              if [[ -n "\$LINUX_PASS" ]]; then
+                sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
+                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                  "\${ssh_user}@\${host}" "\$cmd"
+                return \$?
+              fi
+              return 1
+            }
+            refresh_windows_audit() {
+              local host="\$1" port="\$2" ssh_user="\$3"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local cmd='powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-ScheduledTask -TaskName ramendr-dr-db-audit -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName ramendr-dr-db-audit"'
+              if [[ -z "\$WINDOWS_PASS" ]]; then
+                return 1
+              fi
+              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                "\${ssh_user}@\${host}" "\$cmd"
+            }
+            echo "Refreshing audit writers on all target VMs..."
+            while IFS=\$'\t' read -r name host port platform ssh_user; do
+              [[ -z "\$name" ]] && continue
+              port="\${port:-22}"
+              if [[ "\$platform" == windows ]]; then
+                refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \$name"
+              else
+                refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \$name"
               fi
             done < /tmp/hosts.tsv
+            echo "Waiting 45s for audit writers to append fresh rows..."
+            sleep 45
             echo "HammerDB install completed."
       volumes:
       - name: payload

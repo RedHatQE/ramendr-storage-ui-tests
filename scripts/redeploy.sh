@@ -35,7 +35,7 @@ source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-7d24917bae80392615ed4877773260a7221d8d1a}"  # ocp-4.22 (merged add_pvc_disk)
+UPSTREAM_REF="${UPSTREAM_REF:-d9dcdc4c24b8a868c62d528ee74e6e2becf4fc9f}"  # fork ocp-4.22 (pin ODF 4.22 version)
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
@@ -118,6 +118,9 @@ for name in ("privatevm-credentials", "windows-admin"):
     if re.search(rf"^\s*- name:\s*{re.escape(name)}\s*$", text, re.MULTILINE):
         continue
     if re.search(rf"^{re.escape(name)}:", text, re.MULTILINE):
+        continue
+    # v2.0 list entries may put "fields:" before "name:" (same layout as lib.sh secret_block).
+    if re.search(rf"^\s*name:\s*{re.escape(name)}\s*$", text, re.MULTILINE):
         continue
     print(name)
 PY
