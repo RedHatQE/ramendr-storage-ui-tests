@@ -57,3 +57,13 @@ def test_mirrorpeer_setup_complete_rejects_failed_completed_condition():
     )
     assert ok is False
     assert "Completed=False" in detail
+
+
+def test_mirrorpeer_setup_complete_handles_null_status_and_conditions():
+    ok, detail = mirrorpeer_setup_complete(None)
+    assert ok is False
+    assert "phase=''" in detail
+
+    ok, detail = mirrorpeer_setup_complete({"phase": "Ready", "conditions": None})
+    assert ok is False
+    assert "phase='Ready'" in detail

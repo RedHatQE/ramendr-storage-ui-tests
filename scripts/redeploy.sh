@@ -114,15 +114,31 @@ check_prerequisites() {
 import re, sys
 
 text = open(sys.argv[1]).read()
+
+def has_secret(text: str, secret: str) -> bool:
+    if re.search(rf"^{re.escape(secret)}:", text, re.MULTILINE):
+        return True
+    if re.search(
+        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+        text,
+        re.MULTILINE,
+    ):
+        return True
+    for m in re.finditer(r"^- fields:", text, re.MULTILINE):
+        rest = text[m.end() :]
+        n = re.search(r"^- (?:name:|fields:)", rest, re.MULTILINE)
+        block = text[m.start() : m.end() + (n.start() if n else len(rest))]
+        if re.search(
+            rf"^\s*- name:\s*{re.escape(secret)}\s*$",
+            block,
+            re.MULTILINE,
+        ):
+            return True
+    return False
+
 for name in ("privatevm-credentials", "windows-admin"):
-    if re.search(rf"^\s*- name:\s*{re.escape(name)}\s*$", text, re.MULTILINE):
-        continue
-    if re.search(rf"^{re.escape(name)}:", text, re.MULTILINE):
-        continue
-    # v2.0 list entries may put "fields:" before "name:" (same layout as lib.sh secret_block).
-    if re.search(rf"^\s*name:\s*{re.escape(name)}\s*$", text, re.MULTILINE):
-        continue
-    print(name)
+    if not has_secret(text, name):
+        print(name)
 PY
 )
     if [[ -n "${missing_windows_secrets:-}" ]]; then

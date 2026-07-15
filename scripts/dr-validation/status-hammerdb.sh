@@ -81,7 +81,7 @@ if last_ts:
     else:
         ref_dt = datetime.now(timezone.utc)
     age = (ref_dt - last_dt).total_seconds()
-    age_ok = 1 if age <= max_age else 0
+    age_ok = 1 if 0 <= age <= max_age else 0
 tpcc = snap.get("tpcc") or {}
 tpcc_errors = validate_tpcc_populated(tpcc)
 tpcc_ok = 0 if tpcc_errors else 1

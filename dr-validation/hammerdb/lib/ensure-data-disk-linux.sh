@@ -26,19 +26,38 @@ prepare_dr_validation_data_disk_mount_for_fsfreeze() {
 
   if command -v semanage >/dev/null 2>&1; then
     if ! sudo semanage fcontext -l 2>/dev/null | grep -qF "${mount_point} "; then
-      sudo semanage fcontext -a -t mnt_t "${mount_point}" 2>/dev/null || true
+      sudo semanage fcontext -a -t mnt_t "${mount_point}"
     fi
+  else
+    echo "ERROR: semanage is required while SELinux is enabled" >&2
+    return 1
   fi
 
-  if command -v restorecon >/dev/null 2>&1; then
-    sudo restorecon -v "$mount_point" >/dev/null 2>&1 || true
+  if ! command -v restorecon >/dev/null 2>&1; then
+    echo "ERROR: restorecon is required while SELinux is enabled" >&2
+    return 1
+  fi
+  sudo restorecon -v "$mount_point"
+
+  local mount_ctx
+  mount_ctx="$(ls -Zd "$mount_point" 2>/dev/null | awk '{print $4}' || true)"
+  if [[ -z "$mount_ctx" || "$mount_ctx" == "unlabeled_t" ]]; then
+    echo "ERROR: ${mount_point} SELinux context is not labeled (got: ${mount_ctx:-unknown})" >&2
+    return 1
   fi
 
   if command -v getsebool >/dev/null 2>&1 && command -v setsebool >/dev/null 2>&1; then
     if ! getsebool virt_qemu_ga_read_nonsecurity_files 2>/dev/null | grep -Eq ' on$'; then
       echo "Enabling virt_qemu_ga_read_nonsecurity_files for KubeVirt fsfreeze on ${mount_point}..."
-      sudo setsebool -P virt_qemu_ga_read_nonsecurity_files 1 || true
+      sudo setsebool -P virt_qemu_ga_read_nonsecurity_files 1
     fi
+    if ! getsebool virt_qemu_ga_read_nonsecurity_files 2>/dev/null | grep -Eq ' on$'; then
+      echo "ERROR: virt_qemu_ga_read_nonsecurity_files is not enabled" >&2
+      return 1
+    fi
+  else
+    echo "ERROR: getsebool/setsebool are required while SELinux is enabled" >&2
+    return 1
   fi
 }
 

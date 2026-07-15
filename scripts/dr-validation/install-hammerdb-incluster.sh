@@ -247,6 +247,8 @@ spec:
                 echo "FAILED \${name}: missing MSSQL credentials in install secret"
                 return 1
               fi
+              install -m 0600 /dev/null "\$mssql_env_file"
+              trap 'rm -f "\$mssql_env_file"' RETURN
               printf 'DR_VALIDATION_MSSQL_SA_PASSWORD=%s\nDR_VALIDATION_MSSQL_USER=%s\nDR_VALIDATION_MSSQL_PASSWORD=%s\n' \
                 "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" > "\$mssql_env_file"
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
@@ -255,7 +257,9 @@ spec:
               sshpass -p "\$WINDOWS_PASS" scp \$scp_opts /payload/payload.tgz /payload/install-remote-windows.cmd \
                 "\${ssh_user}@\${host}:C:/Temp/" && \
               sshpass -p "\$WINDOWS_PASS" scp \$scp_opts "\$mssql_env_file" \
-                "\${ssh_user}@\${host}:C:/Temp/mssql-install.env" && \
+                "\${ssh_user}@\${host}:C:/Temp/mssql-install.env" || return 1
+              rm -f "\$mssql_env_file"
+              trap - RETURN
               { [[ ! -s "/tmp/windows-staging/\${sql_installer}" ]] || \
                 sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
                   "/tmp/windows-staging/\${sql_installer}" "\${ssh_user}@\${host}:C:/Temp/\${sql_installer}"; } && \

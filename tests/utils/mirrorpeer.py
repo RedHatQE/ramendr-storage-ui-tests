@@ -6,16 +6,17 @@ from __future__ import annotations
 _SETUP_COMPLETE_MESSAGE = "setup is completed"
 
 
-def mirrorpeer_setup_complete(status: dict) -> tuple[bool, str]:
+def mirrorpeer_setup_complete(status: dict | None) -> tuple[bool, str]:
     """Return whether MirrorPeer peering/setup finished across ODF operator versions.
 
     Newer operators expose ``status.conditions[Completed=True]``. ODF 4.22 reports
     ``phase=Ready`` with message ``Setup is completed`` without conditions. Legacy
     operators stop at ``phase=ExchangedSecret`` after secret exchange.
     """
+    status = status or {}
     conditions = {
         entry["type"]: entry
-        for entry in status.get("conditions", [])
+        for entry in (status.get("conditions") or [])
         if isinstance(entry, dict) and entry.get("type")
     }
     completed = conditions.get("Completed")

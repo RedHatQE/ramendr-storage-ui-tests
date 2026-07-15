@@ -464,7 +464,7 @@ for _ in $(seq 1 36); do
   audit_age="$(sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
     'SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(committed_at)))::int, 9999) FROM dr_validation_audit;' \
     2>/dev/null || echo 9999)"
-  if [[ "${audit_count:-0}" -ge 1 && "${audit_age:-9999}" -le 30 ]]; then
+  if [[ "${audit_count:-0}" -ge 1 && "${audit_age:-9999}" -ge 0 && "${audit_age:-9999}" -le 30 ]]; then
     audit_ready=1
     break
   fi
