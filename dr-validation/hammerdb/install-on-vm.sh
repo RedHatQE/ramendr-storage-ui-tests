@@ -482,6 +482,7 @@ if [[ "$audit_ready" -ne 1 ]]; then
 fi
 
 warehouse_rows="$(tpcc_warehouse_row_count)"
+prepare_dr_validation_data_disk_mount_for_fsfreeze "$DATA_DISK_MOUNT"
 echo "HammerDB install OK: audit_rows=${audit_count} tpcc_core_tables=${tpcc_tables} warehouse_rows=${warehouse_rows}"
 set +o pipefail
 sudo /usr/local/bin/ramendr-dr-db-snapshot | head -n 20

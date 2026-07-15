@@ -2,6 +2,46 @@
 # Format and mount the DR-protected block data disk on Linux edge VMs.
 # Sourced by hammerdb/install-on-vm.sh (not executed directly).
 
+# KubeVirt/Velero backups run virt-freezer pre-hooks that call guest-fsfreeze on
+# every mounted filesystem. A freshly formatted XFS root is unlabeled_t under
+# SELinux, so qemu-guest-agent cannot open the mount point (Permission denied).
+# Label only the mount-point inode (non-recursive) so PGDATA labels are untouched.
+prepare_dr_validation_data_disk_mount_for_fsfreeze() {
+  local mount_point="$1"
+
+  [[ -n "$mount_point" ]] || return 0
+  if ! mountpoint -q "$mount_point"; then
+    return 0
+  fi
+
+  sudo chown root:root "$mount_point"
+  sudo chmod 0755 "$mount_point"
+
+  if ! command -v getenforce >/dev/null 2>&1; then
+    return 0
+  fi
+  local selinux_state
+  selinux_state="$(getenforce 2>/dev/null || echo Disabled)"
+  [[ "$selinux_state" == "Disabled" ]] && return 0
+
+  if command -v semanage >/dev/null 2>&1; then
+    if ! sudo semanage fcontext -l 2>/dev/null | grep -qF "${mount_point} "; then
+      sudo semanage fcontext -a -t mnt_t "${mount_point}" 2>/dev/null || true
+    fi
+  fi
+
+  if command -v restorecon >/dev/null 2>&1; then
+    sudo restorecon -v "$mount_point" >/dev/null 2>&1 || true
+  fi
+
+  if command -v getsebool >/dev/null 2>&1 && command -v setsebool >/dev/null 2>&1; then
+    if ! getsebool virt_qemu_ga_read_nonsecurity_files 2>/dev/null | grep -Eq ' on$'; then
+      echo "Enabling virt_qemu_ga_read_nonsecurity_files for KubeVirt fsfreeze on ${mount_point}..."
+      sudo setsebool -P virt_qemu_ga_read_nonsecurity_files 1 || true
+    fi
+  fi
+}
+
 ensure_dr_validation_data_disk() {
   local mount_point="${DR_VALIDATION_DATA_DISK_MOUNT:-/mnt/ramendr-data}"
   local fs_label="${DR_VALIDATION_DATA_DISK_LABEL:-RAMENDR-DATA}"
@@ -9,6 +49,7 @@ ensure_dr_validation_data_disk() {
 
   if mountpoint -q "$mount_point"; then
     echo "Data disk already mounted at ${mount_point}"
+    prepare_dr_validation_data_disk_mount_for_fsfreeze "$mount_point"
     return 0
   fi
 
@@ -57,6 +98,8 @@ ensure_dr_validation_data_disk() {
 
   echo "Preparing HammerDB data disk ${target_dev} -> ${mount_point}..."
   sudo mkdir -p "$mount_point"
+  sudo chown root:root "$mount_point"
+  sudo chmod 0755 "$mount_point"
 
   local uuid fstype
   uuid="$(sudo blkid -s UUID -o value "$target_dev" 2>/dev/null || true)"
@@ -74,6 +117,7 @@ ensure_dr_validation_data_disk() {
     echo "UUID=${uuid} ${mount_point} xfs defaults,nofail 0 2 ${fstab_marker}" | sudo tee -a /etc/fstab >/dev/null
   fi
   sudo mount "$mount_point"
+  prepare_dr_validation_data_disk_mount_for_fsfreeze "$mount_point"
 
   echo "HammerDB data disk ready: ${target_dev} mounted at ${mount_point} (UUID=${uuid})"
 }
