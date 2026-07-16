@@ -584,9 +584,14 @@ def _run_cleanup_non_primary_cluster(*, skip_pvcs: bool = False):
 
     Pass skip_pvcs=True during failover and relocate cleanup. The non-primary
     spoke still holds VolumeGroupReplication state Ramen needs to demote/promote;
-    deleting PVCs there while replication is settling breaks lastGroupSyncTime and
-    leaves DRPC Protected=False (former primary after failover, secondary during
-    relocate).
+    deleting DV/VM-owned PVCs there while replication is settling breaks
+    lastGroupSyncTime and leaves DRPC Protected=False (former primary after
+    failover, secondary during relocate).
+
+    With --skip-pvcs the cleanup script still removes standalone
+    additionalPvcDisks leftovers (PVCs not owned by a DataVolume/VirtualMachine
+    and not VGR/Ramen/CDI-protected). Those orphans block WaitOnUserToCleanUp
+    after failover once VMs are gone.
     """
     repo_root = _repo_root()
     script_path = repo_root / "scripts" / "cleanup-gitops-vms-non-primary.sh"
@@ -880,9 +885,10 @@ def _wait_for_drpc_healthy_with_recovery(
     conflicting workload data on the non-primary cluster until that spoke is
     cleaned and reconciliation completes.
 
-    cleanup_skip_pvcs: when True, PVC/PV deletion is skipped during any recovery
-    cleanup triggered inside this wait.  Must be True after failover (former primary)
-    and during relocate (secondary) so Ramen can finish VGR demotion/promotion.
+    cleanup_skip_pvcs: when True, DV/VM-owned and VGR-protected PVC/PV deletion is
+    skipped during recovery cleanup, but standalone additionalPvcDisks leftovers are
+    still removed. Must be True after failover (former primary) and during relocate
+    (secondary) so Ramen can finish VGR demotion/promotion.
     """
     poll_interval_ms = 30_000
     deadline = time.monotonic() + (timeout_ms / 1000)

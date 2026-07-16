@@ -12,10 +12,14 @@ set -euo pipefail
 # 1. Determine the non-primary cluster (discovered from DR policy; override with PRIMARY_CLUSTER/SECONDARY_CLUSTER env if needed)
 # 2. List VM-related resources directly from the non-primary cluster
 # 3. Delete them from the gitops-vms namespace
-# 4. Delete all PVCs in gitops-vms (including stuck Terminating PVCs held by Ramen DR finalizers)
-#    Skipped when --skip-pvcs is passed (use during relocate to preserve RBD mirror source images)
+# 4. Delete PVCs in gitops-vms:
+#    - Default: all PVCs (including stuck Terminating ones held by Ramen DR finalizers)
+#    - With --skip-pvcs: only standalone leftover PVCs (additionalPvcDisks) that are not
+#      owned by a DataVolume/VirtualMachine and not VGR/Ramen/CDI-protected. Those orphans
+#      block WaitOnUserToCleanUp after failover; DV-backed OS/data disks are preserved so
+#      VolumeGroupReplication demotion/promotion can finish.
 # 5. Remove orphan PVs that were bound to gitops-vms (Retain reclaim policy)
-#    Skipped when --skip-pvcs is passed
+#    With --skip-pvcs: only PVs for standalone PVCs deleted in step 4
 
 # Configuration
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -403,18 +407,53 @@ cleanup_virt_launcher_pods() {
   fi
 }
 
-# Delete all PVCs in gitops-vms. Ramen DR finalizers often leave PVCs stuck in Terminating
-# after VM/DataVolume deletion on the non-primary spoke; clear finalizers when needed.
-cleanup_pvcs() {
-  echo ""
-  echo "Step 4: Deleting all PVCs in namespace $VM_NAMESPACE..."
+# Print PVC names that are safe standalone leftovers (additionalPvcDisks).
+# Skips PVCs owned by DataVolume/VirtualMachine or still protected by VGR/Ramen/CDI.
+list_standalone_orphan_pvcs() {
+  oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" -o json 2>/dev/null \
+    | python3 -c '
+import json, sys
 
-  local pvcs deleted_count=0 error_count=0
-  pvcs=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+OWNED_KINDS = {"DataVolume", "VirtualMachine"}
+# Finalizer substrings that mark DV-backed / replicated disks still needed by Ramen.
+PROTECTED_FINALIZER_MARKERS = (
+    "volumereplication",
+    "vgr-protection",
+    "ramendr",
+    "cdi.kubevirt.io",
+)
 
-  if [[ -z "$pvcs" ]]; then
-    echo " No PVCs found"
+data = json.load(sys.stdin)
+for item in data.get("items", []):
+    md = item.get("metadata") or {}
+    name = md.get("name") or ""
+    if not name:
+        continue
+    refs = md.get("ownerReferences") or []
+    if any((ref or {}).get("kind") in OWNED_KINDS for ref in refs):
+        continue
+    finals = md.get("finalizers") or []
+    if any(any(marker in f for marker in PROTECTED_FINALIZER_MARKERS) for f in finals):
+        continue
+    print(name)
+' 2>/dev/null || true
+}
+
+# Delete a specific set of PVC names; clear finalizers when stuck Terminating.
+# Args: descriptive label, then PVC names (one per line via stdin or as "$@" after label).
+delete_named_pvcs() {
+  local label="$1"
+  shift
+  local pvcs="" pvc
+  if [[ $# -gt 0 ]]; then
+    pvcs=$(printf '%s\n' "$@")
+  else
+    pvcs=$(cat)
+  fi
+
+  local deleted_count=0 error_count=0
+  if [[ -z "${pvcs//[$'\n']/}" ]]; then
+    echo " No ${label} PVCs found"
     return 0
   fi
 
@@ -432,20 +471,24 @@ cleanup_pvcs() {
     fi
   done <<< "$pvcs"
 
-  local pass stuck
+  local pass stuck expected
+  expected="$pvcs"
   for pass in 1 2 3 4 5 6; do
     stuck=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" -o json 2>/dev/null \
       | python3 -c "
 import json, sys
+want = {n for n in sys.argv[1].splitlines() if n.strip()}
 data = json.load(sys.stdin)
 for item in data.get('items', []):
-    print(item['metadata']['name'])
-" 2>/dev/null || true)
+    name = item['metadata']['name']
+    if name in want:
+        print(name)
+" "$expected" 2>/dev/null || true)
     if [[ -z "$stuck" ]]; then
       break
     fi
     if [[ $pass -gt 1 ]]; then
-      echo " Pass $pass — $(echo "$stuck" | grep -c .) PVC(s) still present"
+      echo " Pass $pass — $(echo "$stuck" | grep -c .) ${label} PVC(s) still present"
     fi
     while IFS= read -r pvc; do
       [[ -z "$pvc" ]] && continue
@@ -462,16 +505,125 @@ for item in data.get('items', []):
   done
 
   local remaining
-  remaining=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  remaining=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" -o json 2>/dev/null \
+    | python3 -c "
+import json, sys
+want = {n for n in sys.argv[1].splitlines() if n.strip()}
+data = json.load(sys.stdin)
+print(sum(1 for i in data.get('items', []) if i['metadata']['name'] in want))
+" "$expected" 2>/dev/null || echo 0)
   remaining=${remaining:-0}
   if [[ "$remaining" -gt 0 ]]; then
-    echo -e "${RED} ❌ $remaining PVC(s) still remain in $VM_NAMESPACE${NC}"
+    echo -e "${RED} ❌ $remaining ${label} PVC(s) still remain in $VM_NAMESPACE${NC}"
     oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" 2>/dev/null || true
     return 1
   fi
 
-  echo -e "${GREEN} ✅ All PVCs removed from $VM_NAMESPACE ($deleted_count delete requests)${NC}"
+  echo -e "${GREEN} ✅ ${label} PVCs removed from $VM_NAMESPACE ($deleted_count delete requests)${NC}"
   [[ $error_count -eq 0 ]]
+}
+
+# Delete all PVCs in gitops-vms. Ramen DR finalizers often leave PVCs stuck in Terminating
+# after VM/DataVolume deletion on the non-primary spoke; clear finalizers when needed.
+cleanup_pvcs() {
+  echo ""
+  echo "Step 4: Deleting all PVCs in namespace $VM_NAMESPACE..."
+
+  local pvcs
+  pvcs=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  delete_named_pvcs "all" <<< "$pvcs"
+}
+
+# Delete only standalone additionalPvcDisks leftovers (not owned by VM/DV, not VGR-protected).
+# Used with --skip-pvcs so failover cleanup unblocks WaitOnUserToCleanUp without breaking
+# RBD mirror demotion on DV-backed disks.
+cleanup_standalone_pvcs() {
+  echo ""
+  echo "Step 4: Deleting standalone (non-VM/DV-owned) leftover PVCs in $VM_NAMESPACE..."
+  echo " (preserves DataVolume/VirtualMachine-owned and VGR/Ramen/CDI-protected PVCs)"
+
+  local pvcs
+  pvcs=$(list_standalone_orphan_pvcs)
+  if [[ -z "${pvcs//[$'\n']/}" ]]; then
+    echo " No standalone leftover PVCs found"
+    return 0
+  fi
+  echo " Standalone orphan PVC(s):"
+  while IFS= read -r pvc; do
+    [[ -z "$pvc" ]] && continue
+    echo "  - $pvc"
+  done <<< "$pvcs"
+
+  delete_named_pvcs "standalone" <<< "$pvcs"
+}
+
+# Remove PVs that were bound to specific PVC claim names in gitops-vms.
+cleanup_pvs_for_claims() {
+  local claims="$1"
+  echo ""
+  echo "Step 5: Removing orphan PVs for deleted standalone PVC claim(s)..."
+
+  if [[ -z "${claims//[$'\n']/}" ]]; then
+    echo " No claim names to match"
+    return 0
+  fi
+
+  local pvs deleted_count=0
+  pvs=$(oc --kubeconfig="$KUBECONFIG" get pv -o json 2>/dev/null \
+    | python3 -c "
+import json, sys
+ns = sys.argv[1]
+want = {n for n in sys.argv[2].splitlines() if n.strip()}
+data = json.load(sys.stdin)
+for item in data.get('items', []):
+    ref = item.get('spec', {}).get('claimRef') or {}
+    if ref.get('namespace') == ns and ref.get('name') in want:
+        print(item['metadata']['name'])
+" "$VM_NAMESPACE" "$claims" 2>/dev/null || true)
+
+  if [[ -z "$pvs" ]]; then
+    echo " No PVs bound to deleted standalone claims"
+    return 0
+  fi
+
+  while IFS= read -r pv; do
+    [[ -z "$pv" ]] && continue
+    echo " Deleting PV: $pv"
+    if oc --kubeconfig="$KUBECONFIG" delete pv "$pv" --ignore-not-found --wait=false &>/dev/null; then
+      if oc --kubeconfig="$KUBECONFIG" get pv "$pv" &>/dev/null; then
+        echo " Clearing finalizers on stuck PV: $pv"
+        oc --kubeconfig="$KUBECONFIG" patch pv "$pv" \
+          --type=merge -p '{"metadata":{"finalizers":null}}' &>/dev/null || true
+      fi
+      deleted_count=$((deleted_count + 1))
+    else
+      echo -e " ${YELLOW} ⚠️ Failed to delete PV: $pv${NC}"
+    fi
+  done <<< "$pvs"
+
+  local remaining=0 try
+  for try in 1 2 3 4 5 6; do
+    remaining=$(oc --kubeconfig="$KUBECONFIG" get pv -o json 2>/dev/null \
+      | python3 -c "
+import json, sys
+ns = sys.argv[1]
+want = {n for n in sys.argv[2].splitlines() if n.strip()}
+data = json.load(sys.stdin)
+print(sum(1 for i in data.get('items', [])
+    if (i.get('spec', {}).get('claimRef') or {}).get('namespace') == ns
+    and (i.get('spec', {}).get('claimRef') or {}).get('name') in want))
+" "$VM_NAMESPACE" "$claims" 2>/dev/null || echo 0)
+    remaining=${remaining:-0}
+    [[ "$remaining" -eq 0 ]] && break
+    [[ "$try" -lt 6 ]] && sleep 5
+  done
+  if [[ "$remaining" -gt 0 ]]; then
+    echo -e "${YELLOW} ⚠️ $remaining PV(s) for standalone claims still remain${NC}"
+    return 1
+  fi
+  echo -e "${GREEN} ✅ Removed $deleted_count orphan PV(s) for standalone claims${NC}"
+  return 0
 }
 
 # Remove cluster-scoped PVs that were bound to gitops-vms (common with Retain reclaim policy).
@@ -598,14 +750,18 @@ main() {
   cleanup_virt_launcher_pods
 
   # Remove PVCs and gitops-vms PVs on the non-primary spoke.
-  # Skipped with --skip-pvcs: during a relocate the non-primary holds the active RBD
-  # mirror source images; deleting them breaks VolumeGroupReplication promotion on the
-  # returning primary. RamenDR demotes and cleans those PVCs itself once promotion
-  # completes.
+  # --skip-pvcs: preserve DV/VM-owned and VGR-protected PVCs (needed for relocate /
+  # demotion), but still delete standalone additionalPvcDisks leftovers that block
+  # WaitOnUserToCleanUp after failover.
   if [[ "$SKIP_PVCS" -eq 1 ]]; then
-    echo ""
-    echo "Step 4: Skipping PVC deletion (--skip-pvcs). RamenDR will manage PVC cleanup."
-    echo "Step 5: Skipping PV deletion (--skip-pvcs)."
+    local standalone_pvcs
+    standalone_pvcs=$(list_standalone_orphan_pvcs)
+    if ! cleanup_standalone_pvcs; then
+      echo -e "${RED}Error: standalone PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
+      exit 1
+    fi
+    cleanup_pvs_for_claims "$standalone_pvcs" || \
+      echo -e "${YELLOW}Warning: Some orphan PVs for standalone claims may remain${NC}"
   else
     if ! cleanup_pvcs; then
       echo -e "${RED}Error: PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
@@ -625,7 +781,8 @@ main() {
   echo " - Cluster: $NON_PRIMARY_CLUSTER"
   echo " - Namespace: $VM_NAMESPACE"
   if [[ "$SKIP_PVCS" -eq 1 ]]; then
-    echo " (VMs/VMIs/Services/ExternalSecrets/DataVolumes only — PVCs/PVs preserved)"
+    echo " (VMs/VMIs/Services/ExternalSecrets/DataVolumes + standalone leftover PVCs;"
+    echo "  DV/VM-owned and VGR-protected PVCs preserved)"
   else
     echo " (includes all PVCs and gitops-vms-bound PVs)"
   fi
