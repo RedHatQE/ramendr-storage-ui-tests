@@ -194,6 +194,9 @@ function Enable-SqlPrerequisites {
     $source = $env:DR_VALIDATION_NETFX35_SOURCE
     if ($source) {
         $source = $source.Trim().TrimEnd('\')
+        if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+            throw "DR_VALIDATION_NETFX35_SOURCE is set but is not a valid directory: '$source'"
+        }
     }
     $maxAttempts = 5
     $lastError = $null
