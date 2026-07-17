@@ -5,7 +5,7 @@
 This repository (`ramendr-storage-ui-tests`) provides:
 
 - A reproducible way to deploy the fork of the upstream validated pattern
-  `elsapassaro/ramendr-starter-kit` (branch `ocp-4.22`, pinned locally by commit SHA)
+  `elsapassaro/ramendr-starter-kit` (branch `ocp-4.22-rhdr-ramen`, pinned locally by commit SHA)
 - A home for UI tests (Playwright + Python) to validate RamenDR workflows
 
 ## Non-goals
@@ -21,19 +21,20 @@ The entrypoint is `scripts/redeploy.sh`.
 
 - **Local checkout** (`pattern.sh`, utility container): cloned into
   `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`
-  (default `d9dcdc4c24b8a868c62d528ee74e6e2becf4fc9f` from fork branch `ocp-4.22`).
+  (default `7def11014af236a160f904091106cbbc33add9b3` from fork branch `ocp-4.22-rhdr-ramen`).
   Override with `UPSTREAM_REPO` / `UPSTREAM_REF`.
 - **Hub Argo CD** (ongoing GitOps sync): reads values from the fork on GitHub at
-  branch `ocp-4.22` (branch tip unless Applications pin a specific revision).
+  branch `ocp-4.22-rhdr-ramen` (branch tip unless Applications pin a specific revision).
 
 Customizations (Windows edge VMs, additionalPvcDisks, byoc cluster names, ODF channel pins,
-cost-optimized values) live in the fork's `ocp-4.22` branch under `overrides/` and
-values files. Local edits next to the checkout do not affect Argo CD.
+cost-optimized values, RHDR Quay IDMS) live in the fork's `ocp-4.22-rhdr-ramen` branch under
+`overrides/` and values files. Local edits next to the checkout do not affect Argo CD.
 
-- It runs the deployment via upstream `pattern.sh make install-byoc` (utility-container).
-- After hub + spoke `openshift-install`, `redeploy.sh` copies `VALUES_SECRET` to
-  `.work/values-secret.yaml`, merges spoke kubeconfig file paths, and passes that file to
-  `install-byoc`. Vault + ExternalSecrets deliver kubeconfigs to ACM (no manual `oc create secret`).
+- After hub + spoke `openshift-install`, `redeploy.sh` applies upstream
+  `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR images) to hub + both
+  spokes, then copies `VALUES_SECRET` to `.work/values-secret.yaml`, merges spoke kubeconfig
+  file paths, and runs `pattern.sh make install-byoc`. Vault + ExternalSecrets deliver
+  kubeconfigs to ACM (no manual `oc create secret`).
 
 **Mixed edge VM fleet (`gitops-vms`):**
 
