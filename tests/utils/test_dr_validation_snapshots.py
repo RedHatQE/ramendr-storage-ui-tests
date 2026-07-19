@@ -29,8 +29,14 @@ def _snapshot(
     *, backend: str, tpcc: dict | None = None, storage: dict | None = None
 ) -> dict:
     payload = {
+        "snapshot_mode": "status-only",
         "database_backend": backend,
-        "audit": {"records": [{"seq": 1, "committed_at": "2026-01-01T00:00:00Z"}]},
+        "audit": {
+            "record_count": 1,
+            "last_seq": 1,
+            "last_committed_at": "2026-01-01T00:00:00Z",
+            "records": [],
+        },
         "tpcc": tpcc if tpcc is not None else dict(_POPULATED_TPCC),
     }
     if storage is not None:
@@ -44,7 +50,16 @@ def test_assert_hammerdb_snapshot_ready_enforces_tpcc_thresholds() -> None:
 
     with pytest.raises(AssertionError, match="customer"):
         assert_hammerdb_snapshot_ready(
-            _snapshot(backend="mssql", tpcc={**_POPULATED_TPCC, "customer": 10})
+            _snapshot(
+                backend="mssql",
+                tpcc={
+                    "warehouse": 1,
+                    "district": 10,
+                    "customer": 10,
+                    "stock": 100_000,
+                    "item": 100_000,
+                },
+            )
         )
 
 

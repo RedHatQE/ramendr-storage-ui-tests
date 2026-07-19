@@ -34,6 +34,15 @@ TPCC_MIN_ROW_COUNTS: dict[str, int] = {
     "history": 0,
 }
 
+# Fixed buildschema tables (exact COUNT(*) is cheap). Mutable OLTP tables grow under
+# autopilot and are counted via planner statistics during DR snapshots.
+TPCC_STATIC_TABLES: tuple[str, ...] = tuple(
+    name for name, minimum in TPCC_MIN_ROW_COUNTS.items() if minimum > 0
+)
+TPCC_MUTABLE_TABLES: tuple[str, ...] = tuple(
+    name for name, minimum in TPCC_MIN_ROW_COUNTS.items() if minimum == 0
+)
+
 AUDIT_TABLE = "dr_validation_audit"
 AUDIT_TABLE_DESCRIPTION = (
     "DR validation audit trail (seq primary key, committed_at UTC, hostname, source)"

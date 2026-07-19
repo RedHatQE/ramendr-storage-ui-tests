@@ -609,8 +609,9 @@ class TestInfraSmoke:
     def test_hammerdb_tables_populated_on_all_vms(self, hub_kubeconfig, tmp_path):
         """HammerDB TPC-C databases are deployed on every edge VM after redeploy.
 
-        Linux VMs use PostgreSQL; Windows VMs use SQL Server. Validates populated
-        TPC-C tables and the dr_validation_audit trail on each target.
+        Linux VMs use PostgreSQL; Windows VMs use SQL Server. Uses fast status-only
+        snapshots (static TPC-C table counts + audit summary) so tests stay reliable
+        after long HammerDB autopilot runs without scanning millions of OLTP rows.
         """
         if not hammerdb_mode_active():
             pytest.skip("HammerDB DR validation is disabled")
@@ -626,6 +627,7 @@ class TestInfraSmoke:
         collected = collect_db_snapshot(
             kubeconfig=hub_kubeconfig,
             out_dir=snapshot_dir,
+            status_only=True,
         )
         assert collected.returncode == 0, (
             "Could not collect HammerDB DB snapshot(s) during smoke test.\n"

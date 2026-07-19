@@ -51,7 +51,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+
 from ramendr_dr_validation.tpcc_schema import validate_tpcc_populated
+from ramendr_dr_validation.tpcc_counts import validate_tpcc_static_only
 
 snap = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 max_age = float(sys.argv[2])
@@ -92,7 +94,11 @@ if last_ts:
     # Permit small negative age when the VM clock is ahead of the collector.
     age_ok = 1 if -clock_skew <= age_val <= max_age else 0
 tpcc = snap.get("tpcc") or {}
-tpcc_errors = validate_tpcc_populated(tpcc)
+mode = snap.get("snapshot_mode", "dr")
+if mode == "status-only":
+    tpcc_errors = validate_tpcc_static_only(tpcc)
+else:
+    tpcc_errors = validate_tpcc_populated(tpcc)
 tpcc_ok = 0 if tpcc_errors else 1
 # Keep tokens single-field for bash read (timestamps are ISO-8601 without spaces).
 print(
@@ -116,8 +122,15 @@ PY
 import json, sys
 from pathlib import Path
 from ramendr_dr_validation.tpcc_schema import validate_tpcc_populated
+from ramendr_dr_validation.tpcc_counts import validate_tpcc_static_only
 snap = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-for err in validate_tpcc_populated(snap.get("tpcc") or {}):
+mode = snap.get("snapshot_mode", "dr")
+errors = (
+    validate_tpcc_static_only(snap.get("tpcc") or {})
+    if mode == "status-only"
+    else validate_tpcc_populated(snap.get("tpcc") or {})
+)
+for err in errors:
     print(f"    {err}")
 PY
     fi

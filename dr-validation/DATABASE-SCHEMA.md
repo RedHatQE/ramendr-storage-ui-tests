@@ -43,6 +43,14 @@ transactions.
 |-------|------|---------|
 | `dr_validation_audit` | Continuous DR audit trail (OS disk in dual-disk mode) | `seq`, `committed_at`, `hostname`, `source` |
 
+Snapshot exporters support two modes:
+
+- **status-only** — audit summary + exact counts on fixed buildschema tables only
+  (`warehouse`, `customer`, `item`, …). Used by health checks after long runs when
+  `orders` / `order_line` are too large for timely `COUNT(*)`.
+- **dr** — audit tail (default last 5000 rows via `DR_VALIDATION_AUDIT_TAIL_ROWS`) plus
+  planner/partition estimates for mutable OLTP tables. Used for pre/post-DR baselines.
+
 Post-DR checks validate audit sequence continuity, TPC-C row-count regression vs the
 automatic baseline, cross-disk coherence between audit and TPC-C growth, and RPO relative
 to the DR initiation timestamp.
