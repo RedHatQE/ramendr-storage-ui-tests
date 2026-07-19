@@ -42,6 +42,25 @@ pg_quote_literal() {
   printf "'%s'" "$s"
 }
 
+tpcc_core_table_count() {
+  sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
+    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('customer','orders','warehouse');" \
+    2>/dev/null || echo 0
+}
+
+tpcc_warehouse_row_count() {
+  sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
+    "SELECT COUNT(*) FROM warehouse;" 2>/dev/null || echo 0
+}
+
+tpcc_schema_populated() {
+  local tables warehouse_rows
+  tables="$(tpcc_core_table_count)"
+  [[ "${tables:-0}" -ge 3 ]] || return 1
+  warehouse_rows="$(tpcc_warehouse_row_count)"
+  [[ "${warehouse_rows:-0}" -ge 1 ]]
+}
+
 echo "=== RamenDR HammerDB install (PostgreSQL) ==="
 
 ensure_dr_validation_data_disk
@@ -390,10 +409,8 @@ RestartSec=15
 WantedBy=multi-user.target
 EOF
 
-tpcc_tables="$(sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
-  "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('customer','orders','warehouse');" \
-  2>/dev/null || echo 0)"
-if [[ "${tpcc_tables:-0}" -lt 3 ]]; then
+if ! tpcc_schema_populated; then
+  echo "Resetting HammerDB TPC-C database (missing or empty schema)..."
   sudo rm -f "${DATA_ROOT}/hammerdb/schema-built"
   sudo systemctl stop ramendr-dr-hammerdb.service ramendr-dr-db-audit.service 2>/dev/null || true
   sudo -u postgres "$PSQL" -v ON_ERROR_STOP=1 <<SQL
@@ -408,25 +425,26 @@ sudo systemctl daemon-reload
 sudo systemctl enable ramendr-dr-hammerdb.service ramendr-dr-db-audit.service
 sudo systemctl restart ramendr-dr-hammerdb.service
 
-echo "Waiting for HammerDB TPC-C schema (up to 10 min)..."
+echo "Waiting for HammerDB TPC-C schema build to finish (up to 10 min)..."
 schema_ready=0
 for _ in $(seq 1 60); do
-  tpcc_tables="$(sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
-    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('customer','orders','warehouse');" \
-    2>/dev/null || echo 0)"
-  if [[ "${tpcc_tables:-0}" -ge 3 ]]; then
+  if tpcc_schema_populated; then
     schema_ready=1
     break
   fi
   sleep 10
 done
 if [[ "$schema_ready" -ne 1 ]]; then
-  echo "ERROR: HammerDB TPC-C schema not ready (found ${tpcc_tables:-0}/3 core tables)"
+  tpcc_tables="$(tpcc_core_table_count)"
+  warehouse_rows="$(tpcc_warehouse_row_count)"
+  echo "ERROR: HammerDB TPC-C schema not populated (tables=${tpcc_tables:-0}/3, warehouse_rows=${warehouse_rows:-0})"
   sudo journalctl -u ramendr-dr-hammerdb.service --no-pager -n 40 || true
   exit 1
 fi
+tpcc_tables="$(tpcc_core_table_count)"
 
-audit_sql="$(mktemp)"
+audit_sql="$(mktemp /var/tmp/ramendr-audit.XXXXXX)"
+chmod 0644 "$audit_sql"
 sed "s/__DR_VALIDATION_OS_TABLESPACE__/${OS_TABLESPACE_NAME}/g" \
   "${REPO_ROOT}/hammerdb/sql/init-audit.sql" > "$audit_sql"
 sudo -u postgres "$PSQL" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 -f "$audit_sql"
@@ -438,11 +456,16 @@ sudo -u postgres "$PSQL" -d "$PG_DATABASE" -c \
 
 sudo systemctl restart ramendr-dr-db-audit.service
 
-echo "Waiting for audit writer (up to 2 min)..."
+echo "Waiting for continuous audit writer (up to 3 min)..."
 audit_count=0
-for _ in $(seq 1 24); do
+audit_ready=0
+for _ in $(seq 1 36); do
   audit_count="$(sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc 'SELECT COUNT(*) FROM dr_validation_audit;' 2>/dev/null || echo 0)"
-  if [[ "${audit_count:-0}" -ge 1 ]]; then
+  audit_age="$(sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
+    'SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(committed_at)))::int, 9999) FROM dr_validation_audit;' \
+    2>/dev/null || echo 9999)"
+  if [[ "${audit_count:-0}" -ge 1 && "${audit_age:-9999}" -ge 0 && "${audit_age:-9999}" -le 30 ]]; then
+    audit_ready=1
     break
   fi
   sleep 5
@@ -452,12 +475,15 @@ sudo systemctl is-active --quiet ramendr-postgresql.service
 sudo systemctl is-active --quiet ramendr-dr-hammerdb.service
 sudo systemctl is-active --quiet ramendr-dr-db-audit.service
 
-if [[ "${audit_count:-0}" -lt 1 ]]; then
-  echo "ERROR: dr_validation_audit has no rows after install"
+if [[ "$audit_ready" -ne 1 ]]; then
+  echo "ERROR: dr_validation_audit is not recording fresh rows (rows=${audit_count:-0}, last_write_age_sec=${audit_age:-unknown})"
+  sudo journalctl -u ramendr-dr-db-audit.service --no-pager -n 20 || true
   exit 1
 fi
 
-echo "HammerDB install OK: audit_rows=${audit_count} tpcc_core_tables=${tpcc_tables}"
+warehouse_rows="$(tpcc_warehouse_row_count)"
+prepare_dr_validation_data_disk_mount_for_fsfreeze "$DATA_DISK_MOUNT"
+echo "HammerDB install OK: audit_rows=${audit_count} tpcc_core_tables=${tpcc_tables} warehouse_rows=${warehouse_rows}"
 set +o pipefail
 sudo /usr/local/bin/ramendr-dr-db-snapshot | head -n 20
 set -o pipefail

@@ -76,6 +76,9 @@ spec:
       containers:
       - name: collect
         image: ${DR_VALIDATION_UTILITY_CONTAINER_IMAGE}
+        env:
+        - name: DR_VALIDATION_SNAPSHOT_STATUS_ONLY
+          value: "${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}"
         volumeMounts:
         - name: ssh
           mountPath: /ssh
@@ -89,10 +92,42 @@ spec:
             WINDOWS_PASS="\$(tr -d '\n' < /ssh/windows-password 2>/dev/null || true)"
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
             cp /ssh/hosts.tsv /tmp/hosts.tsv
+            refresh_linux_audit() {
+              local host="\$1" port="\$2" ssh_user="\$3"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local cmd="sudo systemctl restart ramendr-dr-db-audit.service"
+              if [[ -f /tmp/ssh-privatekey ]]; then
+                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$cmd" || return 1
+                return 0
+              fi
+              if [[ -n "\$LINUX_PASS" ]]; then
+                sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
+                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                  "\${ssh_user}@\${host}" "\$cmd" || return 1
+                return 0
+              fi
+              return 1
+            }
+            refresh_windows_audit() {
+              local host="\$1" port="\$2" ssh_user="\$3"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local cmd='powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-ScheduledTask -TaskName ramendr-dr-db-audit -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName ramendr-dr-db-audit"'
+              if [[ -z "\$WINDOWS_PASS" ]]; then
+                return 1
+              fi
+              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                "\${ssh_user}@\${host}" "\$cmd" || return 1
+            }
             collect_linux() {
               local name="\$1" host="\$2" port="\$3" ssh_user="\$4"
               local remote_cmd="sudo /usr/local/bin/ramendr-dr-db-snapshot --vm-name \${name}"
+              if [[ "\${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}" == "1" ]]; then
+                remote_cmd="\${remote_cmd} --status-only"
+              fi
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
+              sleep 15
               if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null; then
                 return 0
               fi
@@ -106,11 +141,16 @@ spec:
             collect_windows() {
               local name="\$1" host="\$2" port="\$3" ssh_user="\$4"
               local remote_cmd="powershell -NoProfile -ExecutionPolicy Bypass -File C:\\ProgramData\\ramendr-dr-validation\\bin\\ramendr-dr-db-snapshot.ps1 --vm-name \${name}"
+              if [[ "\${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}" == "1" ]]; then
+                remote_cmd="\${remote_cmd} --status-only"
+              fi
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               if [[ -z "\$WINDOWS_PASS" ]]; then
                 echo "WARN: skipping \$name (no windows-password)" >&2
                 return 1
               fi
+              refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
+              sleep 15
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1

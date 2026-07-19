@@ -27,6 +27,7 @@ from tests.utils.dr_validation import (
     hammerdb_mode_active,
     run_status_hammerdb,
 )
+from tests.utils.mirrorpeer import mirrorpeer_setup_complete
 from tests.utils.vrg import (
     active_cluster_from_drpc,
     load_drpc,
@@ -672,8 +673,8 @@ class TestInfraSmoke:
     # MirrorPeer
     # ------------------------------------------------------------------
 
-    def test_mirrorpeer_exchanged_secret(self, hub_kubeconfig):
-        """MirrorPeer mirrorpeer-resilient has phase ExchangedSecret."""
+    def test_mirrorpeer_setup_complete(self, hub_kubeconfig):
+        """MirrorPeer mirrorpeer-resilient has completed peering/setup."""
         raw = run_oc(
             [
                 "get",
@@ -684,11 +685,8 @@ class TestInfraSmoke:
             hub_kubeconfig,
         )
         peer = json.loads(raw)
-        phase = peer.get("status", {}).get("phase", "")
-        assert phase == "ExchangedSecret", (
-            f"MirrorPeer mirrorpeer-resilient phase is '{phase}', "
-            "expected 'ExchangedSecret'"
-        )
+        ok, detail = mirrorpeer_setup_complete(peer.get("status", {}))
+        assert ok, f"MirrorPeer mirrorpeer-resilient setup is not complete ({detail})"
 
     # ------------------------------------------------------------------
     # DRPlacementControl

@@ -12,8 +12,21 @@ wait_for_bootstrap_ssh_endpoints
 "$SCRIPT_DIR/install-hammerdb-incluster.sh"
 
 log "Verifying HammerDB workload is recording on all target edge VMs..."
-if ! "$SCRIPT_DIR/status-hammerdb.sh"; then
-  err "HammerDB status check failed immediately after install."
+status_attempts="${DR_VALIDATION_STATUS_ATTEMPTS:-6}"
+status_sleep="${DR_VALIDATION_STATUS_RETRY_SLEEP_SEC:-30}"
+status_ok=0
+for attempt in $(seq 1 "$status_attempts"); do
+  if "$SCRIPT_DIR/status-hammerdb.sh"; then
+    status_ok=1
+    break
+  fi
+  if [[ "$attempt" -lt "$status_attempts" ]]; then
+    warn "HammerDB status check not ready (attempt ${attempt}/${status_attempts}); retrying in ${status_sleep}s..."
+    sleep "$status_sleep"
+  fi
+done
+if [[ "$status_ok" -ne 1 ]]; then
+  err "HammerDB status check failed after ${status_attempts} attempt(s)."
   exit 1
 fi
 

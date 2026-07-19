@@ -56,6 +56,9 @@ def build_snapshot_payload(
             "record_count": len(audit_records),
             "first_seq": audit_records[0]["seq"] if audit_records else None,
             "last_seq": audit_records[-1]["seq"] if audit_records else None,
+            "last_committed_at": (
+                audit_records[-1]["committed_at"] if audit_records else None
+            ),
             "records": audit_records,
         },
         "tpcc": tpcc_counts,
@@ -89,6 +92,7 @@ def run_snapshot_cli(
     fetch_audit_records: Callable[[Any, SnapshotBackend], list[dict]],
     fetch_tpcc_counts: Callable[[Any, SnapshotBackend], dict[str, int]],
     fetch_storage_layout: Callable[[Any, SnapshotBackend], dict] | None = None,
+    fetch_audit_summary: Callable[[Any, SnapshotBackend], dict] | None = None,
 ) -> int:
     """Shared CLI entrypoint for backend-specific snapshot exporters."""
     parser = argparse.ArgumentParser(description=description)
@@ -99,15 +103,47 @@ def run_snapshot_cli(
     parser.add_argument(
         "--vm-name", default=os.environ.get("DR_VALIDATION_HAMMERDB_VM", "")
     )
+    parser.add_argument(
+        "--status-only",
+        action="store_true",
+        default=os.environ.get("DR_VALIDATION_SNAPSHOT_STATUS_ONLY", "") == "1",
+        help="Export audit summary + TPC-C counts only (no full audit history)",
+    )
     parser.add_argument("-o", "--output", type=Path)
     args = parser.parse_args(argv)
     load_env_file(Path(args.env_file))
     backend = backend_factory()
     conn = backend.connect()
     try:
-        audit_records = fetch_audit_records(conn, backend)
         tpcc_counts = fetch_tpcc_counts(conn, backend)
         storage = fetch_storage_layout(conn, backend) if fetch_storage_layout else None
+        if args.status_only:
+            if fetch_audit_summary is None:
+                print(
+                    "status-only snapshot not supported for this backend",
+                    file=sys.stderr,
+                )
+                return 1
+            summary = fetch_audit_summary(conn, backend)
+            payload = build_snapshot_payload(
+                database_backend=database_backend,
+                database=backend.database,
+                audit_records=[],
+                tpcc_counts=tpcc_counts,
+                vm_name=args.vm_name or None,
+                storage=storage,
+            )
+            payload["audit"].update(
+                {
+                    "record_count": summary["record_count"],
+                    "first_seq": summary.get("first_seq"),
+                    "last_seq": summary.get("last_seq"),
+                    "last_committed_at": summary.get("last_committed_at"),
+                    "records": [],
+                }
+            )
+            return emit_snapshot_payload(payload, args.output)
+        audit_records = fetch_audit_records(conn, backend)
     finally:
         conn.close()
     payload = build_snapshot_payload(

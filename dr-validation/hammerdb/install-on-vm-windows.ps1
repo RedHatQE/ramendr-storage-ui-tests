@@ -174,29 +174,98 @@ Write-Host '=== RamenDR HammerDB install (SQL Server / Windows) ==='
 Ensure-DataDisk
 New-Item -ItemType Directory -Force -Path $DataRoot, $BinDir, $LibDir, (Join-Path $LibDir 'backends'), $OsDbDir, "$DataDiskRoot\DATA", "$DataDiskRoot\LOG" | Out-Null
 
+function Test-NetFx35Installed {
+    $feature = Get-WindowsFeature -Name NET-Framework-Core -ErrorAction SilentlyContinue
+    return [bool]($feature -and $feature.InstallState -eq 'Installed')
+}
+
 function Enable-SqlPrerequisites {
-    if (Get-WindowsFeature -Name NET-Framework-Core -ErrorAction SilentlyContinue |
-        Where-Object { $_.InstallState -eq 'Installed' }) {
+    # SQL Server Express requires .NET Framework 3.5 (NET-Framework-Core / NetFx3).
+    # On Server 2025 this often times out when Install-WindowsFeature must pull
+    # payloads from Windows Update (slow/blocked egress). Prefer baking the
+    # feature into the golden image; otherwise retry Install-WindowsFeature and
+    # fall back to DISM. Optional offline source:
+    #   $env:DR_VALIDATION_NETFX35_SOURCE = path to SxS / feature cab directory
+    if (Test-NetFx35Installed) {
+        Write-Host '.NET Framework 3.5 already installed.'
         return
     }
+
+    $source = $env:DR_VALIDATION_NETFX35_SOURCE
+    if ($source) {
+        $source = $source.Trim().TrimEnd('\')
+        if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+            throw "DR_VALIDATION_NETFX35_SOURCE is set but is not a valid directory: '$source'"
+        }
+    }
+    $maxAttempts = 5
+    $lastError = $null
+
     Write-Host 'Enabling .NET Framework 3.5 (SQL Server prerequisite)...'
-    $result = Install-WindowsFeature -Name NET-Framework-Core
-    if (-not $result.Success) {
-        throw (
-            ".NET Framework 3.5 installation failed: exit code $($result.ExitCode), " +
-            "restart needed: $($result.RestartNeeded)"
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if (Test-NetFx35Installed) {
+            Write-Host ".NET Framework 3.5 installed (attempt $attempt)."
+            return
+        }
+
+        Write-Host "  Install-WindowsFeature NET-Framework-Core (attempt $attempt/$maxAttempts)..."
+        try {
+            $installArgs = @{
+                Name             = 'NET-Framework-Core'
+                ErrorAction      = 'Stop'
+                WarningAction    = 'SilentlyContinue'
+            }
+            if ($source -and (Test-Path -LiteralPath $source)) {
+                $installArgs['Source'] = $source
+            }
+            $result = Install-WindowsFeature @installArgs
+            if ($result.Success -and (Test-NetFx35Installed)) {
+                if ($result.RestartNeeded -eq 'Yes') {
+                    Write-Host 'Warning: .NET Framework 3.5 install requested a reboot before SQL Server setup.'
+                }
+                return
+            }
+            $lastError = (
+                "Install-WindowsFeature Success=$($result.Success) " +
+                "ExitCode=$($result.ExitCode) RestartNeeded=$($result.RestartNeeded)"
+            )
+        } catch {
+            $lastError = "$_"
+            Write-Host "  Install-WindowsFeature failed: $lastError"
+        }
+
+        Write-Host "  DISM NetFx3 fallback (attempt $attempt/$maxAttempts)..."
+        $dismArgs = @(
+            '/Online',
+            '/Enable-Feature',
+            '/FeatureName:NetFx3',
+            '/All',
+            '/NoRestart'
         )
+        if ($source -and (Test-Path -LiteralPath $source)) {
+            $dismArgs += "/Source:$source"
+            $dismArgs += '/LimitAccess'
+        }
+        & dism.exe @dismArgs
+        $dismRc = $LASTEXITCODE
+        if (($dismRc -eq 0 -or $dismRc -eq 3010) -and (Test-NetFx35Installed)) {
+            if ($dismRc -eq 3010) {
+                Write-Host 'Warning: DISM NetFx3 requested a reboot before SQL Server setup.'
+            }
+            return
+        }
+        $lastError = "DISM NetFx3 exit code $dismRc; $($lastError)"
+        if ($attempt -lt $maxAttempts) {
+            Start-Sleep -Seconds ([Math]::Min(30 * $attempt, 120))
+        }
     }
-    $feature = Get-WindowsFeature -Name NET-Framework-Core -ErrorAction SilentlyContinue
-    if (-not $feature -or $feature.InstallState -ne 'Installed') {
-        throw (
-            ".NET Framework 3.5 is not installed after Install-WindowsFeature " +
-            "(exit code $($result.ExitCode), restart needed: $($result.RestartNeeded))"
-        )
-    }
-    if ($result.RestartNeeded -eq 'Yes') {
-        Write-Host 'Warning: .NET Framework 3.5 install requested a reboot before SQL Server setup.'
-    }
+
+    throw (
+        ".NET Framework 3.5 (NET-Framework-Core / NetFx3) is not installed after " +
+        "$maxAttempts attempts. Last error: $lastError. " +
+        "Bake NetFx3 into the windows2k25 golden image, or set " +
+        "DR_VALIDATION_NETFX35_SOURCE to an offline SxS/cab path."
+    )
 }
 
 function Grant-SqlDataDiskAccess {
