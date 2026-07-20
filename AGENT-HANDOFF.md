@@ -4,7 +4,7 @@ This document summarizes decisions and context from prior work so another agent 
 
 ## What this repository is
 
-- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to commit **`7def11014af236a160f904091106cbbc33add9b3`** (fork branch **`ocp-4.22-rhdr-ramen`**). Hub Argo CD also tracks **`ocp-4.22-rhdr-ramen`** on the same fork.
+- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to commit **`473df8c18ebf228cd890d9c02e3d234d9955d426`** (fork branch **`ocp-4.22-rhdr-ramen`**). Hub Argo CD also tracks **`ocp-4.22-rhdr-ramen`** on the same fork.
 - **Does not** long-term fork upstream. Environment customizations (Windows edge VMs, BYOC, ODF pins, cost profiles) live in the **fork** on GitHub; this repo only patches upstream `pattern.sh` locally (non-TTY podman).
 - **Future:** Playwright + Python UI tests (partially implemented). **Today:** deployment scripts, install-config examples, DR validation.
 
@@ -16,7 +16,7 @@ This document summarizes decisions and context from prior work so another agent 
 ## Key entrypoint: `scripts/redeploy.sh`
 
 1. Clones/fetches upstream into `**.work/upstream/ramendr-starter-kit`** (see `.gitignore`; not committed).
-2. Checks out `**UPSTREAM_REF`** (default `7def11014af236a160f904091106cbbc33add9b3` from fork `ocp-4.22-rhdr-ramen`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `WORK_DIR`, `UPSTREAM_DIR`.
+2. Checks out `**UPSTREAM_REF`** (default `473df8c18ebf228cd890d9c02e3d234d9955d426` from fork `ocp-4.22-rhdr-ramen`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `WORK_DIR`, `UPSTREAM_DIR`.
 3. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal) and so Darwin arm64 runs the amd64 utility container under emulation.
 4. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
 5. Applies upstream `**APPLY_ME_FIRST.idms.yaml**` (Quay ImageDigestMirrorSet for RHDR images) to hub + both spokes.

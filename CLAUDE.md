@@ -21,7 +21,7 @@ The entrypoint is `scripts/redeploy.sh`.
 
 - **Local checkout** (`pattern.sh`, utility container): cloned into
   `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`
-  (default `7def11014af236a160f904091106cbbc33add9b3` from fork branch `ocp-4.22-rhdr-ramen`).
+  (default `473df8c18ebf228cd890d9c02e3d234d9955d426` from fork branch `ocp-4.22-rhdr-ramen`).
   Override with `UPSTREAM_REPO` / `UPSTREAM_REF`.
 - **Hub Argo CD** (ongoing GitOps sync): reads values from the fork on GitHub at
   branch `ocp-4.22-rhdr-ramen` (branch tip unless Applications pin a specific revision).

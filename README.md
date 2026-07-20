@@ -18,7 +18,7 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `7def11014af236a160f904091106cbbc33add9b3` (tip of fork branch `ocp-4.22-rhdr-ramen`) into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `473df8c18ebf228cd890d9c02e3d234d9955d426` (tip of fork branch `ocp-4.22-rhdr-ramen`) into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
 4. Apply upstream `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR operator images) to hub + both spokes.
@@ -40,7 +40,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `7def11014af236a160f904091106cbbc33add9b3` (fork `ocp-4.22-rhdr-ramen`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `473df8c18ebf228cd890d9c02e3d234d9955d426` (fork `ocp-4.22-rhdr-ramen`) |
 | Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22-rhdr-ramen` (tip unless an Application pins `targetRevision`) |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
