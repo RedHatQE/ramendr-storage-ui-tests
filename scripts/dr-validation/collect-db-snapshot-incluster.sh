@@ -79,6 +79,8 @@ spec:
         env:
         - name: DR_VALIDATION_SNAPSHOT_STATUS_ONLY
           value: "${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}"
+        - name: DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC
+          value: "${DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC:-}"
         volumeMounts:
         - name: ssh
           mountPath: /ssh
@@ -126,8 +128,16 @@ spec:
                 remote_cmd="\${remote_cmd} --status-only"
               fi
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local refresh_sleep="\${DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC:-}"
+              if [[ -z "\$refresh_sleep" ]]; then
+                if [[ "\${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}" == "1" ]]; then
+                  refresh_sleep=5
+                else
+                  refresh_sleep=15
+                fi
+              fi
               refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
-              sleep 15
+              sleep "\$refresh_sleep"
               if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null; then
                 return 0
               fi
@@ -145,26 +155,53 @@ spec:
                 remote_cmd="\${remote_cmd} --status-only"
               fi
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local refresh_sleep="\${DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC:-}"
+              if [[ -z "\$refresh_sleep" ]]; then
+                if [[ "\${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}" == "1" ]]; then
+                  refresh_sleep=5
+                else
+                  refresh_sleep=15
+                fi
+              fi
               if [[ -z "\$WINDOWS_PASS" ]]; then
                 echo "WARN: skipping \$name (no windows-password)" >&2
                 return 1
               fi
               refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
-              sleep 15
+              sleep "\$refresh_sleep"
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
             }
+            collect_vm() {
+              local name="\$1" host="\$2" port="\$3" platform="\$4" ssh_user="\$5" out_file="\$6"
+              {
+                echo "===SNAPSHOT:\${name}==="
+                if [[ "\$platform" == windows ]]; then
+                  collect_windows "\$name" "\$host" "\$port" "\$ssh_user" || true
+                else
+                  collect_linux "\$name" "\$host" "\$port" "\$ssh_user" || true
+                fi
+              } >"\$out_file" 2>&1
+            }
+            COLLECT_PIDS=()
+            COLLECT_IDX=0
             while IFS=\$'\t' read -r name host port platform ssh_user; do
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
-              echo "===SNAPSHOT:\${name}==="
-              if [[ "\$platform" == windows ]]; then
-                collect_windows "\$name" "\$host" "\$port" "\$ssh_user" || true
-              else
-                collect_linux "\$name" "\$host" "\$port" "\$ssh_user" || true
-              fi
+              out_file="/tmp/collect-snapshot-\${COLLECT_IDX}.out"
+              COLLECT_IDX=\$((COLLECT_IDX + 1))
+              collect_vm "\$name" "\$host" "\$port" "\$platform" "\$ssh_user" "\$out_file" &
+              COLLECT_PIDS+=("\$!")
             done < /tmp/hosts.tsv
+            for pid in "\${COLLECT_PIDS[@]}"; do
+              wait "\$pid" || true
+            done
+            for out_file in /tmp/collect-snapshot-*.out; do
+              [[ -f "\$out_file" ]] || continue
+              cat "\$out_file"
+              rm -f "\$out_file"
+            done
       volumes:
       - name: ssh
         secret:

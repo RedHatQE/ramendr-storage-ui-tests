@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from ramendr_dr_validation.tpcc_schema import validate_tpcc_populated
+from ramendr_dr_validation.tpcc_counts import validate_tpcc_static_only
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _STATUS_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_DR_STATUS_TIMEOUT_SECONDS", "600"))
@@ -59,16 +60,19 @@ def run_status_hammerdb(*, kubeconfig: str) -> subprocess.CompletedProcess[str]:
 
 
 def collect_db_snapshot(
-    *, kubeconfig: str, out_dir: Path
+    *, kubeconfig: str, out_dir: Path, status_only: bool = False
 ) -> subprocess.CompletedProcess[str]:
     script = (
         repo_root() / "scripts" / "dr-validation" / "collect-db-snapshot-incluster.sh"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
+    env = hub_env(kubeconfig)
+    if status_only:
+        env["DR_VALIDATION_SNAPSHOT_STATUS_ONLY"] = "1"
     return subprocess.run(  # noqa: S603
         ["bash", str(script), str(out_dir)],  # noqa: S607
         cwd=repo_root(),
-        env=hub_env(kubeconfig),
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -114,10 +118,21 @@ def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
     """Require audit rows and HammerDB TPC-C minimum row counts on one VM snapshot."""
     audit = snapshot.get("audit") or {}
     records = audit.get("records") or []
-    assert records, "dr_validation_audit has no rows — workload not recording"
+    record_count = audit.get("record_count")
+    if records:
+        assert records, "dr_validation_audit has no rows — workload not recording"
+    else:
+        assert record_count and int(record_count) >= 1, (
+            "dr_validation_audit has no rows — workload not recording "
+            f"(record_count={record_count!r})"
+        )
 
     tpcc = snapshot.get("tpcc") or {}
-    tpcc_errors = validate_tpcc_populated(tpcc)
+    mode = snapshot.get("snapshot_mode", "dr")
+    if mode == "status-only":
+        tpcc_errors = validate_tpcc_static_only(tpcc)
+    else:
+        tpcc_errors = validate_tpcc_populated(tpcc)
     assert not tpcc_errors, "TPC-C tables not populated after deploy:\n" + "\n".join(
         f"  - {err}" for err in tpcc_errors
     )
