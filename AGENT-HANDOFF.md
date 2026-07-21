@@ -4,7 +4,7 @@ This document summarizes decisions and context from prior work so another agent 
 
 ## What this repository is
 
-- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to commit **`d9dcdc4c24b8a868c62d528ee74e6e2becf4fc9f`** (fork branch **`ocp-4.22`**, pin ODF 4.22 version). Hub Argo CD also tracks **`ocp-4.22`** on the same fork.
+- **Consumer / test harness** for upstream [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned by default to commit **`473df8c18ebf228cd890d9c02e3d234d9955d426`** (fork branch **`ocp-4.22-rhdr-ramen`**). Hub Argo CD also tracks **`ocp-4.22-rhdr-ramen`** on the same fork.
 - **Does not** long-term fork upstream. Environment customizations (Windows edge VMs, BYOC, ODF pins, cost profiles) live in the **fork** on GitHub; this repo only patches upstream `pattern.sh` locally (non-TTY podman).
 - **Future:** Playwright + Python UI tests (partially implemented). **Today:** deployment scripts, install-config examples, DR validation.
 
@@ -16,17 +16,18 @@ This document summarizes decisions and context from prior work so another agent 
 ## Key entrypoint: `scripts/redeploy.sh`
 
 1. Clones/fetches upstream into `**.work/upstream/ramendr-starter-kit`** (see `.gitignore`; not committed).
-2. Checks out `**UPSTREAM_REF`** (default `d9dcdc4c24b8a868c62d528ee74e6e2becf4fc9f` from fork `ocp-4.22`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `WORK_DIR`, `UPSTREAM_DIR`.
+2. Checks out `**UPSTREAM_REF`** (default `473df8c18ebf228cd890d9c02e3d234d9955d426` from fork `ocp-4.22-rhdr-ramen`). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `WORK_DIR`, `UPSTREAM_DIR`.
 3. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal) and so Darwin arm64 runs the amd64 utility container under emulation.
 4. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
-5. Merges spoke kubeconfig paths into `**.work/values-secret.yaml**` (copy of `VALUES_SECRET`; source file never modified) and runs `**./pattern.sh make install-byoc**` from the upstream checkout.
-6. Waits for BYOC spoke import (ExternalSecrets + `ManagedCluster` Joined), spoke resilient GitOps / ODF, golden-image fix-up, hub convergence, **Windows VM stabilization** (`REQUIRE_WINDOWS_VMS=1` by default), then DR validation bootstrap.
+5. Applies upstream `**APPLY_ME_FIRST.idms.yaml**` (Quay ImageDigestMirrorSet for RHDR images) to hub + both spokes.
+6. Merges spoke kubeconfig paths into `**.work/values-secret.yaml**` (copy of `VALUES_SECRET`; source file never modified) and runs `**./pattern.sh make install-byoc**` from the upstream checkout.
+7. Waits for BYOC spoke import (ExternalSecrets + `ManagedCluster` Joined), spoke resilient GitOps / ODF, golden-image fix-up, hub convergence, **Windows VM stabilization** (`REQUIRE_WINDOWS_VMS=1` by default), then DR validation bootstrap.
 
 **Important bug fix:** any edit to upstream `pattern.sh` must run with `cd "$UPSTREAM_DIR"` so the correct file is patched.
 
 ## BYOC and fork customizations
 
-Customizations are **not** copied from this repo into the upstream checkout. They live in the fork (`elsapassaro/ramendr-starter-kit`, branch `ocp-4.22`) under `overrides/` and values files; **hub Argo CD** reconciles from that remote branch.
+Customizations are **not** copied from this repo into the upstream checkout. They live in the fork (`elsapassaro/ramendr-starter-kit`, branch `ocp-4.22-rhdr-ramen`) under `overrides/` and values files; **hub Argo CD** reconciles from that remote branch.
 
 - **`byoc: true`** — set in fork `overrides/values-cluster-names.yaml`; spokes are pre-provisioned with `openshift-install`.
 - **`values-secret.yaml`** — user file (default `~/values-secret.yaml`); redeploy copies to `.work/values-secret.yaml` and merges fresh spoke kubeconfig paths before `install-byoc`.

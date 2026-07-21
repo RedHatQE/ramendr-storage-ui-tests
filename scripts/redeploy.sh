@@ -35,10 +35,12 @@ source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-UPSTREAM_REF="${UPSTREAM_REF:-d9dcdc4c24b8a868c62d528ee74e6e2becf4fc9f}"  # fork ocp-4.22 (pin ODF 4.22 version)
+# Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
+UPSTREAM_REF="${UPSTREAM_REF:-473df8c18ebf228cd890d9c02e3d234d9955d426}"
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22}"
+# Hub Argo CD also tracks this branch name on the fork.
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22-rhdr-ramen}"
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
@@ -298,6 +300,10 @@ prepare_upstream() {
   (
     cd "$UPSTREAM_DIR"
     git fetch --tags --force origin
+    # Ensure the tracked fork branch (and pinned SHA) are present locally.
+    git fetch --force origin \
+      "refs/heads/${UPSTREAM_BRANCH}:refs/remotes/origin/${UPSTREAM_BRANCH}" || true
+    git fetch --force origin "$UPSTREAM_REF" || true
     # Use `checkout -B` so HEAD lands on a named local branch even when UPSTREAM_REF
     # is a bare commit SHA. Without a branch name the upstream pattern's Makefile
     # cannot derive target_branch and aborts with "Could not determine target branch".
@@ -613,11 +619,44 @@ scale_hub_workers() {
   done
 }
 
+apply_rhdr_idms() {
+  # Quay ImageDigestMirrorSet for RHDR operator images (APPLY_ME_FIRST.idms.yaml in the
+  # upstream checkout). Must land on hub + spokes after openshift-install and before
+  # pattern.sh make install-byoc so OLM can pull mirrored bundles promptly.
+  local idms_file="${UPSTREAM_DIR}/APPLY_ME_FIRST.idms.yaml"
+  if [[ ! -f "$idms_file" ]]; then
+    warn "No APPLY_ME_FIRST.idms.yaml in upstream checkout (${idms_file}); skipping IDMS."
+    return 0
+  fi
+
+  log "Applying RHDR Quay ImageDigestMirrorSet to hub + spokes (before install-byoc)..."
+  local name dir kc
+  for name in hub ocp-primary ocp-secondary; do
+    case "$name" in
+      hub) dir="$HUB_INSTALL_DIR" ;;
+      ocp-primary) dir="$PRIMARY_INSTALL_DIR" ;;
+      ocp-secondary) dir="$SECONDARY_INSTALL_DIR" ;;
+    esac
+    kc="${dir}/auth/kubeconfig"
+    if [[ ! -f "$kc" ]]; then
+      err "Missing kubeconfig for ${name} (${kc}); cannot apply IDMS."
+      return 1
+    fi
+    log " Applying IDMS on ${name}..."
+    if ! KUBECONFIG="$kc" oc apply -f "$idms_file"; then
+      err "Failed to apply ${idms_file} on ${name}."
+      return 1
+    fi
+  done
+  log "RHDR IDMS applied on hub, ocp-primary, and ocp-secondary."
+}
+
 deploy_pattern() {
   ensure_podman_ready || exit 1
   log "Deploying RamenDR pattern (BYOC: install-byoc with spoke kubeconfigs in values-secret)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
+  apply_rhdr_idms || exit 1
   prepare_byoc_values_secret || exit 1
 
   log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."

@@ -2,9 +2,9 @@
 
 This repository is a **test harness** for the RamenDR validated pattern.
 It deploys from a maintained fork of the upstream starter kit —
-[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22`) —
+[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22-rhdr-ramen`) —
 which carries all environment-specific customizations (Windows edge VMs, additional VM disks, BYOC cluster names,
-ODF channel pins, cost-optimized instance profiles). **`redeploy.sh` pins a fixed commit SHA**
+ODF channel pins, cost-optimized instance profiles, RHDR Quay IDMS). **`redeploy.sh` pins a fixed commit SHA**
 for the local pattern install; **hub Argo CD** reconciles from the fork's remote branch on GitHub
 (see [Upstream pinning](#upstream-pinning) below).
 
@@ -18,20 +18,21 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `d9dcdc4c24b8a868c62d528ee74e6e2becf4fc9f` (tip of fork branch `ocp-4.22`) into `.work/upstream/ramendr-starter-kit`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `473df8c18ebf228cd890d9c02e3d234d9955d426` (tip of fork branch `ocp-4.22-rhdr-ramen`) into `.work/upstream/ramendr-starter-kit`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
-4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
+4. Apply upstream `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR operator images) to hub + both spokes.
+5. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
    paths (`ocp-primary_cluster_kubeconfig`, `ocp-secondary_cluster_kubeconfig`), and run
    upstream `pattern.sh make install-byoc` (loads secrets to Vault, validates BYOC, deploys pattern).
-5. Wait for ExternalSecrets to create `auto-import-secret` and `admin-kubeconfig` on the hub; ACM
+6. Wait for ExternalSecrets to create `auto-import-secret` and `admin-kubeconfig` on the hub; ACM
    imports the spokes.
 
 > **BYOC:** The fork sets `byoc: true`. Your `~/values-secret.yaml` may omit spoke kubeconfigs or
 > contain stale paths from a previous deploy — `redeploy.sh` always refreshes them in
 > `.work/values-secret.yaml` (gitignored) before `install-byoc`. Your source file is never modified.
 >
-> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository — local copies placed next to the checkout are invisible to it. Both `redeploy.sh` and hub Applications should track fork branch `ocp-4.22` so GitOps matches the local pin.
+> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository — local copies placed next to the checkout are invisible to it. Both `redeploy.sh` and hub Applications should track fork branch `ocp-4.22-rhdr-ramen` so GitOps matches the local pin.
 
 ### Upstream pinning
 
@@ -39,8 +40,8 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `d9dcdc4c24b8a868c62d528ee74e6e2becf4fc9f` (fork `ocp-4.22`) |
-| Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22` (tip unless an Application pins `targetRevision`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `473df8c18ebf228cd890d9c02e3d234d9955d426` (fork `ocp-4.22-rhdr-ramen`) |
+| Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22-rhdr-ramen` (tip unless an Application pins `targetRevision`) |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
 `redeploy.sh`. For Argo CD to match that commit, push it to the tracked branch or pin
@@ -115,7 +116,7 @@ Do not commit secrets to this repository.
 
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
-- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/ocp-4.22/values-secret.yaml.template)
+- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/ocp-4.22-rhdr-ramen/values-secret.yaml.template)
 - For regional-dr cluster private-key ExternalSecrets, ensure `~/values-secret.yaml` includes hub `privatekey` paths (compare with your team's file via private DM), for example:
 
 ```yaml
@@ -137,7 +138,7 @@ Do not commit secrets to this repository.
 ## Customizing the deployment
 
 All environment-specific values (additional VM disks, BYOC cluster names, ODF channel pins,
-cost-optimized instance profiles) live in the fork's `ocp-4.22` branch under `overrides/` and
+cost-optimized instance profiles) live in the fork's `ocp-4.22-rhdr-ramen` branch under `overrides/` and
 `values-hub.yaml`. To adapt the deployment for a different AWS account or region:
 
 1. Fork `elsapassaro/ramendr-starter-kit` (or push a new branch on the existing fork).
