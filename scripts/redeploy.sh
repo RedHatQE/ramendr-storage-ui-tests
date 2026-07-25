@@ -36,7 +36,7 @@ source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
 # Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
-UPSTREAM_REF="${UPSTREAM_REF:-473df8c18ebf228cd890d9c02e3d234d9955d426}"
+UPSTREAM_REF="${UPSTREAM_REF:-d6c21253595ea809c779279e20bcc3e990420781}"
 # Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
 # The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
 # Hub Argo CD also tracks this branch name on the fork.
