@@ -199,6 +199,16 @@ function Enable-SqlPrerequisites {
         }
     }
     $maxAttempts = 5
+    $dismTimeoutSeconds = 900
+    if ($env:DR_VALIDATION_NETFX35_DISM_TIMEOUT_SECONDS) {
+        $parsedTimeout = 0
+        if (
+            [int]::TryParse($env:DR_VALIDATION_NETFX35_DISM_TIMEOUT_SECONDS, [ref]$parsedTimeout) `
+            -and $parsedTimeout -ge 60
+        ) {
+            $dismTimeoutSeconds = $parsedTimeout
+        }
+    }
     $lastError = $null
 
     Write-Host 'Enabling .NET Framework 3.5 (SQL Server prerequisite)...'
@@ -246,8 +256,21 @@ function Enable-SqlPrerequisites {
             $dismArgs += "/Source:$source"
             $dismArgs += '/LimitAccess'
         }
-        & dism.exe @dismArgs
-        $dismRc = $LASTEXITCODE
+        $argString = $dismArgs -join ' '
+        $dismProc = Start-Process -FilePath 'dism.exe' -ArgumentList $argString -PassThru
+        if (-not $dismProc.WaitForExit($dismTimeoutSeconds * 1000)) {
+            try {
+                Stop-Process -Id $dismProc.Id -Force -ErrorAction SilentlyContinue
+            } catch {
+                # best effort
+            }
+            $lastError = "DISM NetFx3 timed out after ${dismTimeoutSeconds}s"
+            if ($attempt -lt $maxAttempts) {
+                Start-Sleep -Seconds ([Math]::Min(30 * $attempt, 120))
+            }
+            continue
+        }
+        $dismRc = $dismProc.ExitCode
         if (($dismRc -eq 0 -or $dismRc -eq 3010) -and (Test-NetFx35Installed)) {
             if ($dismRc -eq 3010) {
                 Write-Host 'Warning: DISM NetFx3 requested a reboot before SQL Server setup.'
@@ -634,10 +657,19 @@ if ($LASTEXITCODE -ne 0) {
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\db_audit_mssql.py') (Join-Path $LibDir 'db_audit_mssql.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\db_snapshot_common.py') (Join-Path $LibDir 'db_snapshot_common.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\db_snapshot_mssql.py') (Join-Path $LibDir 'db_snapshot_mssql.py')
+Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\tpcc_counts.py') (Join-Path $LibDir 'tpcc_counts.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\tpcc_schema.py') (Join-Path $LibDir 'tpcc_schema.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\backends\mssql.py') (Join-Path $LibDir 'backends\mssql.py')
 Copy-Item -Force (Join-Path $RepoRoot 'ramendr_dr_validation\backends\__init__.py') (Join-Path $LibDir 'backends\__init__.py')
 New-Item -ItemType File -Force -Path (Join-Path $LibDir '__init__.py') | Out-Null
+if (-not (Test-Path (Join-Path $LibDir 'tpcc_counts.py'))) {
+    throw "tpcc_counts.py missing from $LibDir after copy step"
+}
+$env:PYTHONPATH = $PyLibDir
+& $python -c "import ramendr_dr_validation.tpcc_counts"
+if ($LASTEXITCODE -ne 0) {
+    throw "Python import check failed for ramendr_dr_validation.tpcc_counts"
+}
 
 @"
 DR_VALIDATION_DB_BACKEND=mssql

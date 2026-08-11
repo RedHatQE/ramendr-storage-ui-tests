@@ -379,6 +379,8 @@ sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/db_snapshot_common.py" 
   /usr/local/lib/ramendr_dr_validation/db_snapshot_common.py
 sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/db_snapshot.py" \
   /usr/local/lib/ramendr_dr_validation/db_snapshot.py
+sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/tpcc_counts.py" \
+  /usr/local/lib/ramendr_dr_validation/tpcc_counts.py
 sudo install -m 0644 "${REPO_ROOT}/ramendr_dr_validation/tpcc_schema.py" \
   /usr/local/lib/ramendr_dr_validation/tpcc_schema.py
 sudo chmod 0755 /usr/local/bin/ramendr-dr-db-audit /usr/local/bin/ramendr-dr-db-snapshot

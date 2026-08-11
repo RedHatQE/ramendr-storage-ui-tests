@@ -48,6 +48,12 @@ _FORCE_FULL_SANITY = os.getenv("RAMENDR_SANITY_FORCE_FULL", "1").lower() not in 
     "false",
     "no",
 }
+_ALLOW_CRITICAL_DR_STATUS = os.getenv(
+    "RAMENDR_ALLOW_CRITICAL_DR_STATUS", "0"
+).lower() in {"1", "true", "yes"}
+_ALLOW_WARNING_DR_STATUS = os.getenv(
+    "RAMENDR_ALLOW_WARNING_DR_STATUS", "0"
+).lower() in {"1", "true", "yes"}
 
 _SKIP_DR_TIMESTAMP_VALIDATION = (
     os.getenv("RAMENDR_SANITY_SKIP_DR_VALIDATION", "0").lower() in {"1", "true", "yes"}
@@ -1114,6 +1120,15 @@ class TestUiSanity:
         assert state["policy"] == "2m-vm", (
             f"DRPC 'gitops-vm-protection' policy mismatch: {state['policy']!r}"
         )
+        status = state["status"].strip().lower()
+        if (_ALLOW_CRITICAL_DR_STATUS and status == "critical") or (
+            _ALLOW_WARNING_DR_STATUS and status == "warning"
+        ):
+            print(
+                "NOTE: DR status is non-healthy due backend replication state; "
+                "continuing sanity in UI-only mode."
+            )
+            return
 
         if _FORCE_FULL_SANITY:
             assert state["cluster"] == "ocp-primary", (

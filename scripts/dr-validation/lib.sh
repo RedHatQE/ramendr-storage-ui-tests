@@ -659,11 +659,9 @@ load_mssql_credentials() {
     && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
     return 0
   fi
-  if [[ ! -f "$VALUES_SECRET" ]]; then
-    return 1
-  fi
-  local parsed
-  parsed="$(python3 - "$VALUES_SECRET" <<'PY'
+  local parsed=""
+  if [[ -f "$VALUES_SECRET" ]]; then
+    parsed="$(python3 - "$VALUES_SECRET" <<'PY'
 import re, sys
 
 text = open(sys.argv[1]).read()
@@ -716,13 +714,21 @@ if len(values) == 3:
     print(values["user"])
     print(values["password"])
 PY
-)" || return 1
-  if [[ -z "$parsed" ]]; then
-    return 1
+)" || true
   fi
-  DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(sed -n '1p' <<<"$parsed")}"
-  DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(sed -n '2p' <<<"$parsed")}"
-  DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(sed -n '3p' <<<"$parsed")}"
+  if [[ -n "$parsed" ]]; then
+    DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(sed -n '1p' <<<"$parsed")}"
+    DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(sed -n '2p' <<<"$parsed")}"
+    DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(sed -n '3p' <<<"$parsed")}"
+  fi
+  if [[ -z "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    || -z "${DR_VALIDATION_MSSQL_USER:-}" \
+    || -z "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
+    ensure_hub_kubeconfig
+    DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(oc exec -n vault vault-0 -- vault kv get -field=sa_password secret/global/mssql-hammerdb 2>/dev/null || true)}"
+    DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(oc exec -n vault vault-0 -- vault kv get -field=user secret/global/mssql-hammerdb 2>/dev/null || true)}"
+    DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(oc exec -n vault vault-0 -- vault kv get -field=password secret/global/mssql-hammerdb 2>/dev/null || true)}"
+  fi
   [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
     && -n "${DR_VALIDATION_MSSQL_USER:-}" \
     && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]

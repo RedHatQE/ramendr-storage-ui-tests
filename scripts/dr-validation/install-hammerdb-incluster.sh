@@ -78,6 +78,7 @@ install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_audit_mssql.py" "$T
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot_common.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot_common.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/db_snapshot_mssql.py" "$TMP_DIR/ramendr_dr_validation/db_snapshot_mssql.py"
+install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/tpcc_counts.py" "$TMP_DIR/ramendr_dr_validation/tpcc_counts.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/tpcc_schema.py" "$TMP_DIR/ramendr_dr_validation/tpcc_schema.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/backends/postgres.py" "$TMP_DIR/ramendr_dr_validation/backends/postgres.py"
 install -m 0644 "$DR_VALIDATION_DIR/ramendr_dr_validation/backends/mssql.py" "$TMP_DIR/ramendr_dr_validation/backends/mssql.py"
@@ -99,11 +100,9 @@ SECRET_CREATE=(oc create secret generic ramendr-dr-hammerdb-ssh
   -n "$VM_NAMESPACE" --dry-run=client -o yaml)
 SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS:-}")
 SECRET_CREATE+=(--from-literal=windows-password="${WINDOWS_PASS:-}")
-if [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" ]]; then
-  SECRET_CREATE+=(--from-literal=mssql-sa-password="${DR_VALIDATION_MSSQL_SA_PASSWORD}")
-  SECRET_CREATE+=(--from-literal=mssql-user="${DR_VALIDATION_MSSQL_USER}")
-  SECRET_CREATE+=(--from-literal=mssql-password="${DR_VALIDATION_MSSQL_PASSWORD}")
-fi
+SECRET_CREATE+=(--from-literal=mssql-sa-password="${DR_VALIDATION_MSSQL_SA_PASSWORD:-}")
+SECRET_CREATE+=(--from-literal=mssql-user="${DR_VALIDATION_MSSQL_USER:-}")
+SECRET_CREATE+=(--from-literal=mssql-password="${DR_VALIDATION_MSSQL_PASSWORD:-}")
 if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
   SECRET_CREATE+=(--from-file=ssh-privatekey="$SSH_KEY_FILE")
 fi
@@ -232,7 +231,9 @@ spec:
               local scp_opts="-P \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local prep='if not exist C:\\Temp mkdir C:\\Temp'
-              local remote='cmd.exe /c C:\\Temp\\install-remote-windows.cmd'
+              local run_token
+              run_token="$(date +%s)-\$RANDOM"
+              local remote="cmd.exe /c \"set RAMENDR_INSTALL_TOKEN=\${run_token}&& C:\\Temp\\install-remote-windows.cmd\""
               local hammer_version="\${HAMMERDB_VERSION:-5.0}"
               local hammer_zip="HammerDB-\${hammer_version}-Prod-Win.tar.gz"
               local sql_installer="SQL2022-SSEI-Expr.exe"
@@ -276,16 +277,39 @@ spec:
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote" || return 1
               local poll_tries=0 poll_max=240 poll_sleep=60
+              local done_without_marker_tries=0 done_without_marker_max=10
               while [[ \$poll_tries -lt \$poll_max ]]; do
                 if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "if exist C:\\ProgramData\\ramendr-dr-validation\\install.done (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 0) else if exist C:\\ProgramData\\ramendr-dr-validation\\install.failed (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 1) else exit 2" 2>/dev/null; then
-                  return 0
+                  "\${ssh_user}@\${host}" "findstr /C:\"\${run_token}\" C:\\ProgramData\\ramendr-dr-validation\\install.done >nul 2>&1" 2>/dev/null; then
+                  sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                    "\${ssh_user}@\${host}" "type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul" 2>/dev/null || true
+                  # Require an explicit installer success marker before accepting done.
+                  if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                    "\${ssh_user}@\${host}" "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if(-not (Test-Path 'C:\\ProgramData\\ramendr-dr-validation\\install.log')){exit 1}; if((Select-String -Path 'C:\\ProgramData\\ramendr-dr-validation\\install.log' -Pattern 'HammerDB install OK:' -Quiet) -and (Select-String -Path 'C:\\ProgramData\\ramendr-dr-validation\\install.log' -Pattern '\\[ramendr\\] install complete' -Quiet)){exit 0}; exit 1\"" >/dev/null 2>&1; then
+                    return 0
+                  fi
+                  done_without_marker_tries=\$((done_without_marker_tries + 1))
+                  echo "  install.done seen on \${name}, but success marker not present yet; continuing to wait..."
+                  if [[ \$done_without_marker_tries -ge \$done_without_marker_max ]]; then
+                    echo "FAILED \${name}: install.done persisted without success marker after \${done_without_marker_tries} checks"
+                    return 1
+                  fi
+                  sleep "\$poll_sleep"
+                  poll_tries=\$((poll_tries + 1))
+                  continue
                 fi
-                local poll_rc=\$?
-                if [[ \$poll_rc -eq 1 ]]; then
+                if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                  "\${ssh_user}@\${host}" "findstr /C:\"\${run_token}\" C:\\ProgramData\\ramendr-dr-validation\\install.failed >nul 2>&1" 2>/dev/null; then
+                  sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                    "\${ssh_user}@\${host}" "type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul" 2>/dev/null || true
                   return 1
                 fi
+                done_without_marker_tries=0
                 echo "  Waiting for detached Windows HammerDB install on \${name} (attempt \$((poll_tries + 1))/\$poll_max)..."
                 sleep "\$poll_sleep"
                 poll_tries=\$((poll_tries + 1))
