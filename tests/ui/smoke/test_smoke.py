@@ -108,10 +108,13 @@ class TestInfraSmoke:
                 failures.append(f"{name}: health={health} sync={sync}")
                 continue
 
-            if sync != "Synced" and name not in _KNOWN_OUTOFSYNC_APPS:
-                failures.append(
-                    f"{name}: health={health} sync={sync} (unexpected OutOfSync)"
-                )
+            if sync == "Synced":
+                continue
+            if name in _KNOWN_OUTOFSYNC_APPS and sync == "OutOfSync":
+                continue
+            failures.append(
+                f"{name}: health={health} sync={sync} (unexpected sync state)"
+            )
 
         assert not failures, (
             "ArgoCD application(s) not in expected state:\n"
@@ -556,6 +559,22 @@ class TestInfraSmoke:
         vms = json.loads(raw_vms)["items"]
         assert vms, f"No VirtualMachines found in gitops-vms on {active_cluster}"
 
+        vm_disk_pvcs: list[tuple[str, str, str]] = []
+        failures: list[str] = []
+        for vm in vms:
+            name = vm["metadata"]["name"]
+            try:
+                os_pvc, data_pvc = vm_os_and_data_pvc_names(vm)
+            except ValueError as exc:
+                failures.append(str(exc))
+                continue
+            vm_disk_pvcs.append((name, os_pvc, data_pvc))
+
+        expected_pvcs = {
+            pvc_name
+            for _, os_pvc, data_pvc in vm_disk_pvcs
+            for pvc_name in (os_pvc, data_pvc)
+        }
         vrg = load_vrg(kubeconfig)
         protected = protected_pvc_index(vrg)
         raw_volreps = run_oc(
@@ -568,20 +587,31 @@ class TestInfraSmoke:
             kubeconfig,
         )
         volrep_items = json.loads(raw_volreps).get("items", [])
+        relevant_volreps = []
+        for item in volrep_items:
+            metadata = item.get("metadata", {})
+            spec = item.get("spec", {})
+            labels = metadata.get("labels", {})
+            candidates = {
+                metadata.get("name"),
+                spec.get("pvcName"),
+                spec.get("volumeName"),
+                (spec.get("dataSource") or {}).get("name"),
+                (spec.get("dataSourceRef") or {}).get("name"),
+            }
+            if (
+                metadata.get("namespace") == "gitops-vms"
+                and any(name in expected_pvcs for name in candidates if name)
+            ) or labels.get(
+                "ramendr.openshift.io/owner-name"
+            ) == "gitops-vm-protection":
+                relevant_volreps.append(item)
         # Some RHDR builds currently use VGR-only progression and do not materialize
         # per-PVC VolumeReplication CRs. In that mode we still validate that every VM
         # PVC is tracked by VRG, but we do not require per-PVC replication conditions.
-        enforce_replication_conditions = len(volrep_items) > 0
+        enforce_replication_conditions = len(relevant_volreps) > 0
 
-        failures: list[str] = []
-        for vm in vms:
-            name = vm["metadata"]["name"]
-            try:
-                os_pvc, data_pvc = vm_os_and_data_pvc_names(vm)
-            except ValueError as exc:
-                failures.append(str(exc))
-                continue
-
+        for name, os_pvc, data_pvc in vm_disk_pvcs:
             for pvc_name in (os_pvc, data_pvc):
                 entry = protected.get(pvc_name)
                 if entry is None:
@@ -746,6 +776,11 @@ class TestInfraSmoke:
         if _ALLOW_UNPROTECTED_DRPC_AVAILABLE and available != "True":
             msg = condition_messages.get("Available", "")
             if "workload is not protected" in msg.lower():
+                print(
+                    "WARNING: DRPC Available tolerated by "
+                    "RAMENDR_ALLOW_UNPROTECTED_DRPC_AVAILABLE: "
+                    f"{msg or 'workload is not protected'}"
+                )
                 return
         assert available == "True", (
             f"DRPlacementControl gitops-vm-protection condition Available={available}"

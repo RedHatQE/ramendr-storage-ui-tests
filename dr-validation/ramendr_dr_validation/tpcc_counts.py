@@ -8,6 +8,7 @@ mutable tables instead of full table scans.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 from ramendr_dr_validation.tpcc_schema import (
@@ -15,6 +16,8 @@ from ramendr_dr_validation.tpcc_schema import (
     TPCC_MUTABLE_TABLES,
     TPCC_STATIC_TABLES,
 )
+
+_VALID_MSSQL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 class TpccCountBackend(Protocol):
@@ -108,7 +111,16 @@ def _mssql_table_exists(cur, schema: str, table: str) -> bool:
     return bool(int(cur.fetchone()[0]))
 
 
+def _validate_mssql_identifier(name: str, kind: str) -> str:
+    """Return ``name`` when it is a safe MSSQL identifier."""
+    if not _VALID_MSSQL_IDENTIFIER.match(name):
+        raise ValueError(f"Invalid MSSQL {kind}: {name!r}")
+    return name
+
+
 def _mssql_qualified(schema: str, table: str) -> str:
+    schema = _validate_mssql_identifier(schema, "schema")
+    table = _validate_mssql_identifier(table, "table")
     return f"[{schema}].[{table}]"
 
 

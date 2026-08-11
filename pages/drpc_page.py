@@ -180,6 +180,10 @@ class DRPCPage(BasePage):
         status_span = row.locator(
             "td[data-label='DR Status'] [data-test='status-text']"
         )
+        expect(
+            status_span,
+            f"DRPC '{drpc_name}': DR Status text did not render",
+        ).not_to_have_text(re.compile(r"^\s*$"), timeout=10_000)
         status_text = (status_span.inner_text() or "").strip()
         if _is_tolerated_nonhealthy_status(status_text):
             pass
@@ -239,7 +243,8 @@ class DRPCPage(BasePage):
             row_text = (row.inner_text() or "").strip()
             status_match = re.search(
                 r"Healthy|Failing\s*over|FailedOver|Relocated|Relocat|"
-                r"WaitOnUserToCleanUp|Action\s*needed|Protection\s*error",
+                r"WaitOnUserToCleanUp|Action\s*needed|Protection\s*error|"
+                r"Critical|Warning",
                 row_text,
                 re.IGNORECASE,
             )

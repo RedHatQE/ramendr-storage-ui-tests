@@ -282,9 +282,7 @@ spec:
                 if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   "\${ssh_user}@\${host}" "findstr /C:\"\${run_token}\" C:\\ProgramData\\ramendr-dr-validation\\install.done >nul 2>&1" 2>/dev/null; then
-                  sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
-                    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                    "\${ssh_user}@\${host}" "type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul" 2>/dev/null || true
+                  echo "  install.done marker found on \${name} for token \${run_token}"
                   # Require an explicit installer success marker before accepting done.
                   if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                     -o PreferredAuthentications=password -o PubkeyAuthentication=no \
@@ -304,9 +302,7 @@ spec:
                 if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   "\${ssh_user}@\${host}" "findstr /C:\"\${run_token}\" C:\\ProgramData\\ramendr-dr-validation\\install.failed >nul 2>&1" 2>/dev/null; then
-                  sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
-                    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                    "\${ssh_user}@\${host}" "type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul" 2>/dev/null || true
+                  echo "  install.failed marker found on \${name} for token \${run_token}"
                   return 1
                 fi
                 done_without_marker_tries=0

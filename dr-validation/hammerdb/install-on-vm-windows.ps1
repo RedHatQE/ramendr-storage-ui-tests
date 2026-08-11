@@ -253,11 +253,10 @@ function Enable-SqlPrerequisites {
             '/NoRestart'
         )
         if ($source -and (Test-Path -LiteralPath $source)) {
-            $dismArgs += "/Source:$source"
+            $dismArgs += "/Source:`"$source`""
             $dismArgs += '/LimitAccess'
         }
-        $argString = $dismArgs -join ' '
-        $dismProc = Start-Process -FilePath 'dism.exe' -ArgumentList $argString -PassThru
+        $dismProc = Start-Process -FilePath 'dism.exe' -ArgumentList $dismArgs -PassThru
         if (-not $dismProc.WaitForExit($dismTimeoutSeconds * 1000)) {
             try {
                 Stop-Process -Id $dismProc.Id -Force -ErrorAction SilentlyContinue
@@ -547,7 +546,9 @@ function Invoke-SqlCmd {
     if (-not $sqlcmd) { throw 'sqlcmd not found after SQL Server install' }
 
     & $sqlcmd -S "(local)\$Instance" -U sa -P $SaPassword -d $Database -b -Q $Query
-    if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed: $Query" }
+    if ($LASTEXITCODE -ne 0) {
+        throw "sqlcmd failed for database '$Database' (exit code $LASTEXITCODE)"
+    }
 }
 
 function Ensure-OdbcDriver {

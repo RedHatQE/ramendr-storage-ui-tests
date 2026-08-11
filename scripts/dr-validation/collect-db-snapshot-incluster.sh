@@ -189,7 +189,8 @@ spec:
             while IFS=\$'\t' read -r name host port platform ssh_user; do
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
-              out_file="/tmp/collect-snapshot-\${COLLECT_IDX}.out"
+              printf -v idx_padded "%03d" "\$COLLECT_IDX"
+              out_file="/tmp/collect-snapshot-\${idx_padded}.out"
               COLLECT_IDX=\$((COLLECT_IDX + 1))
               collect_vm "\$name" "\$host" "\$port" "\$platform" "\$ssh_user" "\$out_file" &
               COLLECT_PIDS+=("\$!")

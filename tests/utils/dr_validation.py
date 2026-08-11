@@ -119,13 +119,10 @@ def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
     audit = snapshot.get("audit") or {}
     records = audit.get("records") or []
     record_count = audit.get("record_count")
-    if records:
-        assert records, "dr_validation_audit has no rows — workload not recording"
-    else:
-        assert record_count and int(record_count) >= 1, (
-            "dr_validation_audit has no rows — workload not recording "
-            f"(record_count={record_count!r})"
-        )
+    assert records or (record_count and int(record_count) >= 1), (
+        "dr_validation_audit has no rows — workload not recording "
+        f"(record_count={record_count!r})"
+    )
 
     tpcc = snapshot.get("tpcc") or {}
     mode = snapshot.get("snapshot_mode", "dr")

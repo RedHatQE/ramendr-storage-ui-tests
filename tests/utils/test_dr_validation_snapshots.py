@@ -26,16 +26,31 @@ _POPULATED_TPCC = {
 
 
 def _snapshot(
-    *, backend: str, tpcc: dict | None = None, storage: dict | None = None
+    *,
+    backend: str,
+    tpcc: dict | None = None,
+    storage: dict | None = None,
+    snapshot_mode: str = "dr",
+    records: list[dict] | None = None,
 ) -> dict:
+    snapshot_records = records
+    if snapshot_records is None:
+        snapshot_records = [
+            {
+                "seq": 1,
+                "committed_at": "2026-01-01T00:00:00Z",
+                "hostname": "vm-1",
+                "source": "db_audit",
+            }
+        ]
     payload = {
-        "snapshot_mode": "status-only",
+        "snapshot_mode": snapshot_mode,
         "database_backend": backend,
         "audit": {
             "record_count": 1,
             "last_seq": 1,
             "last_committed_at": "2026-01-01T00:00:00Z",
-            "records": [],
+            "records": snapshot_records,
         },
         "tpcc": tpcc if tpcc is not None else dict(_POPULATED_TPCC),
     }
@@ -45,8 +60,12 @@ def _snapshot(
 
 
 def test_assert_hammerdb_snapshot_ready_enforces_tpcc_thresholds() -> None:
-    assert_hammerdb_snapshot_ready(_snapshot(backend="postgres"))
-    assert_hammerdb_snapshot_ready(_snapshot(backend="mssql"))
+    assert_hammerdb_snapshot_ready(
+        _snapshot(backend="postgres", snapshot_mode="status-only", records=[])
+    )
+    assert_hammerdb_snapshot_ready(
+        _snapshot(backend="mssql", snapshot_mode="status-only", records=[])
+    )
 
     with pytest.raises(AssertionError, match="customer"):
         assert_hammerdb_snapshot_ready(
@@ -61,6 +80,10 @@ def test_assert_hammerdb_snapshot_ready_enforces_tpcc_thresholds() -> None:
                 },
             )
         )
+
+
+def test_assert_hammerdb_snapshot_ready_dr_mode_uses_audit_records_branch() -> None:
+    assert_hammerdb_snapshot_ready(_snapshot(backend="postgres"))
 
 
 def test_assert_hammerdb_snapshot_ready_checks_dual_disk_layout() -> None:
