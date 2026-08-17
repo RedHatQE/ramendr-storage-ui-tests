@@ -28,6 +28,14 @@ from tests.utils.dr_validation import (
     run_status_hammerdb,
 )
 from tests.utils.mirrorpeer import mirrorpeer_setup_complete
+from tests.utils.pattern_variant import (
+    has_edge_vms,
+    has_odf_mirrorpeer,
+    has_s4_storage,
+    has_vm_drpc,
+    is_minimal_variant,
+    is_qe_mixed_fleet,
+)
 from tests.utils.vrg import (
     active_cluster_from_drpc,
     load_drpc,
@@ -47,6 +55,31 @@ HUB_NAMESPACE = "ramendr-starter-kit-hub"
 # Minimum VMs in gitops-vms after a full deployment (2 Linux + 1 Windows 2022 + 1 Windows 2025).
 # Override with RAMENDR_MIN_VM_COUNT or RAMENDR_EXPECTED_VMS.
 _MIN_VM_COUNT = int(os.getenv("RAMENDR_MIN_VM_COUNT", str(EXPECTED_EDGE_VM_COUNT)))
+
+_skip_without_odf = pytest.mark.skipif(
+    not has_odf_mirrorpeer(),
+    reason="Requires ODF / MirrorPeer (QE fork or PATTERN_VARIANT=odf)",
+)
+_skip_without_edge_vms = pytest.mark.skipif(
+    not has_edge_vms(),
+    reason="Partner variants disable edge GitOps VMs",
+)
+_skip_without_qe_fleet = pytest.mark.skipif(
+    not is_qe_mixed_fleet(),
+    reason="Requires QE mixed Windows/Linux gitops-vms fleet (unset PATTERN_VARIANT)",
+)
+_skip_without_vm_drpc = pytest.mark.skipif(
+    not has_vm_drpc(),
+    reason="Partner variants do not deploy 2m-vm / gitops-vm-protection",
+)
+_skip_without_s4 = pytest.mark.skipif(
+    not has_s4_storage(),
+    reason="Requires PATTERN_VARIANT=drpartner-s4",
+)
+_skip_without_minimal = pytest.mark.skipif(
+    not is_minimal_variant(),
+    reason="Requires PATTERN_VARIANT=drpartner-minimal",
+)
 
 
 def _vm_references_pvc(vm: dict, pvc_name: str) -> bool:
@@ -153,6 +186,7 @@ class TestInfraSmoke:
     # ODF StorageCluster
     # ------------------------------------------------------------------
 
+    @_skip_without_odf
     def test_odf_storagecluster_ready(self, hub_kubeconfig):
         """ocs-storagecluster in openshift-storage on the hub is Ready."""
         raw = run_oc(
@@ -176,6 +210,7 @@ class TestInfraSmoke:
     # VirtualMachines on primary spoke
     # ------------------------------------------------------------------
 
+    @_skip_without_edge_vms
     def test_vms_running_on_primary(self, primary_kubeconfig):
         """All VMs in gitops-vms on ocp-primary are Running and ready."""
         raw = run_oc(
@@ -208,6 +243,7 @@ class TestInfraSmoke:
             + "\n".join(f"  - {f}" for f in failures)
         )
 
+    @_skip_without_qe_fleet
     def test_mixed_vm_fleet_composition(self, primary_kubeconfig):
         """gitops-vms has 2 Linux + 1 Windows 2022 + 1 Windows 2025 edge VMs.
 
@@ -256,6 +292,7 @@ class TestInfraSmoke:
             f"Expected at least {_MIN_VM_COUNT} VMs total, found {len(names)}: {sorted(names)}"
         )
 
+    @_skip_without_qe_fleet
     def test_windows_vms_have_minimum_os_disk(self, primary_kubeconfig):
         """Windows VM OS disks are at least 45 Gi (fork chart default)."""
         raw = run_oc(
@@ -316,6 +353,7 @@ class TestInfraSmoke:
             f"  - {f}" for f in failures
         )
 
+    @_skip_without_qe_fleet
     def test_vms_have_two_data_disks(
         self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
     ):
@@ -518,6 +556,7 @@ class TestInfraSmoke:
             + "\n".join(f"  - {f}" for f in pvc_failures)
         )
 
+    @_skip_without_vm_drpc
     def test_vm_disks_dr_protected_in_vrg(
         self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
     ):
@@ -580,6 +619,7 @@ class TestInfraSmoke:
     # ExternalSecrets on primary spoke
     # ------------------------------------------------------------------
 
+    @_skip_without_edge_vms
     def test_vm_external_secrets_present(self, primary_kubeconfig):
         """At least one ExternalSecret exists in gitops-vms on ocp-primary.
 
@@ -606,6 +646,7 @@ class TestInfraSmoke:
     # HammerDB DR validation workload (PostgreSQL + SQL Server)
     # ------------------------------------------------------------------
 
+    @_skip_without_qe_fleet
     def test_hammerdb_tables_populated_on_all_vms(self, hub_kubeconfig, tmp_path):
         """HammerDB TPC-C databases are deployed on every edge VM after redeploy.
 
@@ -639,6 +680,7 @@ class TestInfraSmoke:
     # DRPolicy
     # ------------------------------------------------------------------
 
+    @_skip_without_vm_drpc
     def test_drpolicy_validated(self, hub_kubeconfig):
         """Both DRPolicies (2m-novm, 2m-vm) have Validated=True."""
         expected = {"2m-novm", "2m-vm"}
@@ -673,6 +715,7 @@ class TestInfraSmoke:
     # MirrorPeer
     # ------------------------------------------------------------------
 
+    @_skip_without_odf
     def test_mirrorpeer_setup_complete(self, hub_kubeconfig):
         """MirrorPeer mirrorpeer-resilient has completed peering/setup."""
         raw = run_oc(
@@ -692,6 +735,7 @@ class TestInfraSmoke:
     # DRPlacementControl
     # ------------------------------------------------------------------
 
+    @_skip_without_vm_drpc
     def test_drpc_deployed_available(self, hub_kubeconfig):
         """DRPlacementControl gitops-vm-protection is Deployed (or Relocated) and Available."""
         raw = run_oc(
@@ -718,6 +762,41 @@ class TestInfraSmoke:
         available = conditions.get("Available", "False")
         assert available == "True", (
             f"DRPlacementControl gitops-vm-protection condition Available={available}"
+        )
+
+    # ------------------------------------------------------------------
+    # v1.3 partner variants (PATTERN_VARIANT)
+    # ------------------------------------------------------------------
+
+    @_skip_without_s4
+    def test_drpartner_s4_storage_namespace(self, hub_kubeconfig):
+        """Dell drpartner-s4 deploys hub vp-s4-storage for S3 buckets/profiles."""
+        run_oc(["get", "namespace", "vp-s4-storage"], hub_kubeconfig)
+
+    @_skip_without_s4
+    def test_drpartner_s4_drpolicy_2m_novm(self, hub_kubeconfig):
+        """drpartner-s4 creates infrastructure DRPolicy 2m-novm (no 2m-vm / DRPC)."""
+        raw = run_oc(["get", "drpolicies", "--output=json"], hub_kubeconfig)
+        policies = {item["metadata"]["name"]: item for item in json.loads(raw)["items"]}
+        assert "2m-novm" in policies, f"DRPolicy 2m-novm not found: {sorted(policies)}"
+        assert "2m-vm" not in policies, (
+            "drpartner-s4 must not deploy 2m-vm (VM DRPC is disabled); "
+            f"found: {sorted(policies)}"
+        )
+        conditions = {
+            c["type"]: c["status"]
+            for c in policies["2m-novm"].get("status", {}).get("conditions", [])
+        }
+        validated = conditions.get("Validated", "False")
+        assert validated == "True", f"2m-novm Validated={validated}"
+
+    @_skip_without_minimal
+    def test_drpartner_minimal_has_no_s4_storage(self, hub_kubeconfig):
+        """Infinidat drpartner-minimal does not deploy vp-s4-storage."""
+        raw = run_oc(["get", "namespace", "--output=json"], hub_kubeconfig)
+        names = {item["metadata"]["name"] for item in json.loads(raw)["items"]}
+        assert "vp-s4-storage" not in names, (
+            "drpartner-minimal must not deploy namespace vp-s4-storage"
         )
 
     # ------------------------------------------------------------------
@@ -805,6 +884,7 @@ def _require_ui_credentials():
 class TestUiSmoke:
     """Verify the RamenDR ACM hub console UI after deployment."""
 
+    @_skip_without_vm_drpc
     def test_disaster_recovery_ui(self, page):
         """Full DR UI walkthrough: login → policy validated → DRPC healthy.
 

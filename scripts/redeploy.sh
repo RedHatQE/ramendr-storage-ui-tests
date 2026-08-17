@@ -33,16 +33,29 @@ source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
 source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 # shellcheck source=lib/byoc-import-wait.sh
 source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
+# shellcheck source=lib/pattern-variant.sh
+source "$REPO_ROOT/scripts/lib/pattern-variant.sh"
 
-UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-# Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
-UPSTREAM_REF="${UPSTREAM_REF:-d6c21253595ea809c779279e20bcc3e990420781}"
-# Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
-# The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-# Hub Argo CD also tracks this branch name on the fork.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22-rhdr-ramen}"
+# PATTERN_VARIANT selects starter-kit v1.3 install BOMs (main.variant).
+# Empty keeps the QE mixed-fleet fork (main.clusterGroupName: hub).
+# v1.3 values: odf | drpartner-s4 | drpartner-minimal
+PATTERN_VARIANT="${PATTERN_VARIANT:-}"
+
+if [[ -n "$PATTERN_VARIANT" ]]; then
+  UPSTREAM_REPO="${UPSTREAM_REPO:-$V13_UPSTREAM_REPO}"
+  UPSTREAM_REF="${UPSTREAM_REF:-$V13_UPSTREAM_REF}"
+  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-$V13_UPSTREAM_BRANCH}"
+else
+  # Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
+  UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
+  UPSTREAM_REF="${UPSTREAM_REF:-d6c21253595ea809c779279e20bcc3e990420781}"
+  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22-rhdr-ramen}"
+fi
+# Named local branch even when UPSTREAM_REF is a SHA (pattern Makefile + hub Argo CD).
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
+
+configure_variant_defaults
 
 HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
 PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
@@ -146,6 +159,34 @@ PY
     if [[ -n "${missing_windows_secrets:-}" ]]; then
       warn "VALUES_SECRET missing Windows VM secrets: $(tr '\n' ' ' <<<"$missing_windows_secrets")"
       warn "Add privatevm-credentials and windows-admin before redeploy (see dr-validation/examples/values-secret-v2-windows.fragment.yaml)."
+    fi
+  fi
+  if [[ "${PATTERN_VARIANT:-}" == "drpartner-s4" ]]; then
+    local missing_s4_secrets
+    missing_s4_secrets=$(python3 - "$VALUES_SECRET" <<'PY'
+import re, sys
+
+text = open(sys.argv[1]).read()
+
+def has_secret(text: str, secret: str) -> bool:
+    if re.search(rf"^{re.escape(secret)}:", text, re.MULTILINE):
+        return True
+    if re.search(
+        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+        text,
+        re.MULTILINE,
+    ):
+        return True
+    return False
+
+for name in ("s4-ui-credentials", "s4-api-credentials"):
+    if not has_secret(text, name):
+        print(name)
+PY
+)
+    if [[ -n "${missing_s4_secrets:-}" ]]; then
+      warn "VALUES_SECRET missing Dell S4 secrets: $(tr '\n' ' ' <<<"$missing_s4_secrets")"
+      warn "Add s4-ui-credentials and s4-api-credentials (see dr-validation/examples/values-secret-v2-s4.fragment.yaml)."
     fi
   fi
   for dir_var in HUB_INSTALL_DIR PRIMARY_INSTALL_DIR SECONDARY_INSTALL_DIR; do
@@ -289,6 +330,11 @@ pattern_install_recoverable() {
 }
 
 prepare_upstream() {
+  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
+    log "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
+  else
+    log "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
+  fi
   log "Preparing upstream checkout at $UPSTREAM_REF..."
   mkdir -p "$WORK_DIR/upstream"
 
@@ -299,6 +345,7 @@ prepare_upstream() {
 
   (
     cd "$UPSTREAM_DIR"
+    git remote set-url origin "$UPSTREAM_REPO"
     git fetch --tags --force origin
     # Ensure the tracked fork branch (and pinned SHA) are present locally.
     git fetch --force origin \
@@ -314,6 +361,8 @@ prepare_upstream() {
       git branch --set-upstream-to="origin/${UPSTREAM_BRANCH}" "$UPSTREAM_BRANCH"
     fi
   )
+
+  apply_pattern_variant "$UPSTREAM_DIR" || exit 1
 
   # Patch upstream pattern.sh for automation (non-TTY) and Apple Silicon (amd64 container).
   if [[ -f "$UPSTREAM_DIR/pattern.sh" ]]; then
@@ -871,8 +920,15 @@ show_status() {
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
   echo ""
   echo "============================================"
-  echo " RamenDR Starter Kit � Environment Status"
+  echo " RamenDR Starter Kit — Environment Status"
   echo "============================================"
+  echo ""
+  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
+    echo "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
+  else
+    echo "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
+  fi
+  echo "Upstream: ${UPSTREAM_REPO} @ ${UPSTREAM_REF} (${UPSTREAM_BRANCH})"
   echo ""
   echo "--- Clusters ---"
   oc get managedclusters 2>&1 || echo "Cannot reach hub cluster"
@@ -1001,6 +1057,10 @@ case "${1:-}" in
     echo " UPSTREAM_REPO           Upstream repo URL (default: $UPSTREAM_REPO)"
     echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
     echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
+    echo " PATTERN_VARIANT         v1.3 install variant: odf | drpartner-s4 | drpartner-minimal"
+    echo "                         Unset keeps the QE mixed-fleet fork (clusterGroupName layout)."
+    echo "                         When set, defaults UPSTREAM_* to validatedpatterns ramendr-starter-kit v1.3"
+    echo "                         and writes main.variant into the local checkout values-global.yaml."
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
@@ -1035,6 +1095,8 @@ case "${1:-}" in
     echo " WINDOWS_VM_STABILIZE_WAIT_TRIES       Wait for Running/ready after restart (default 40)"
     echo " SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS    Wait for vp-gitops + AppProject/default per spoke (default 40)"
     echo " SPOKE_APPPROJECT_PREP_WAIT_SLEEP       Seconds between AppProject prep polls (default 15)"
+    echo " SPOKE_RESILIENT_READY_NAMESPACE  Spoke ns proving resilient GitOps ready"
+    echo "                         (default openshift-storage; partner variants use openshift-cnv)"
     echo " SKIP_ODF_GOLDEN_IMAGE_FIX  Set to 1 to skip post-ODF CNV golden image re-import fix"
     echo " ODF_GOLDEN_PROTECTED_DATASOURCES  Never delete these os-images DataSources/PVCs (default: windows2k22,windows2k25)"
     echo " ODF_GOLDEN_IMAGE_WAIT_ATTEMPTS  Wait for golden image re-import per spoke (default 30)"

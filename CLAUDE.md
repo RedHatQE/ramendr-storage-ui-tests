@@ -4,8 +4,11 @@
 
 This repository (`ramendr-storage-ui-tests`) provides:
 
-- A reproducible way to deploy the fork of the upstream validated pattern
-  `elsapassaro/ramendr-starter-kit` (branch `ocp-4.22-rhdr-ramen`, pinned locally by commit SHA)
+- A reproducible way to deploy either:
+  - the QE fork of the upstream validated pattern
+    `elsapassaro/ramendr-starter-kit` (branch `ocp-4.22-rhdr-ramen`, pinned locally by commit SHA), or
+  - official `validatedpatterns/ramendr-starter-kit` branch `v1.3` selected with `PATTERN_VARIANT`
+    (`odf`, `drpartner-s4`, `drpartner-minimal`) via `main.variant` / `variants/`
 - A home for UI tests (Playwright + Python) to validate RamenDR workflows
 
 ## Non-goals
@@ -20,15 +23,19 @@ The entrypoint is `scripts/redeploy.sh`.
 **Upstream pinning (two references):**
 
 - **Local checkout** (`pattern.sh`, utility container): cloned into
-  `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`
-  (default `d6c21253595ea809c779279e20bcc3e990420781` from fork branch `ocp-4.22-rhdr-ramen`).
-  Override with `UPSTREAM_REPO` / `UPSTREAM_REF`.
-- **Hub Argo CD** (ongoing GitOps sync): reads values from the fork on GitHub at
-  branch `ocp-4.22-rhdr-ramen` (branch tip unless Applications pin a specific revision).
+  `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`.
+  Default is `d6c21253595ea809c779279e20bcc3e990420781` from fork branch `ocp-4.22-rhdr-ramen`.
+  When `PATTERN_VARIANT` is set (`odf` / `drpartner-s4` / `drpartner-minimal`), default is
+  official `validatedpatterns/ramendr-starter-kit` `v1.3` at `81d9cf7f0d50ff9a056bc31303170c4c46e808f2`.
+  Override with `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
+- **Hub Argo CD** (ongoing GitOps sync): reads values from the git remote (`ocp-4.22-rhdr-ramen`
+  or `v1.3` unless Applications pin a specific revision). Local `main.variant` patches are
+  install-time only; persist partner variants by committing them on a fork.
 
 Customizations (Windows edge VMs, additionalPvcDisks, byoc cluster names, ODF channel pins,
 cost-optimized values, RHDR Quay IDMS) live in the fork's `ocp-4.22-rhdr-ramen` branch under
-`overrides/` and values files. Local edits next to the checkout do not affect Argo CD.
+`overrides/` and values files. v1.3 partner BOMs live under `variants/<name>/` on the official
+starter kit. Local edits next to the checkout do not affect Argo CD.
 
 - After hub + spoke `openshift-install`, `redeploy.sh` applies upstream
   `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR images) to hub + both
@@ -70,7 +77,9 @@ Currently implemented in `tests/ui/`:
 - `conftest.py` — session-scoped fixtures for kubeconfigs and browser context
 - `pyproject.toml` + `pytest.ini` — test runner configuration with Playwright
 
-Smoke tests expect the full mixed fleet (4 edge VMs) and validate Windows OS disk size (45 Gi).
+Smoke tests expect the full mixed fleet (4 edge VMs) and validate Windows OS disk size (45 Gi)
+when `PATTERN_VARIANT` is unset. Partner variants skip those assertions and check S4 (Dell) or
+its absence (Infinidat).
 
 ## Future
 

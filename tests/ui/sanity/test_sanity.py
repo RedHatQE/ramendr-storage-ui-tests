@@ -39,6 +39,7 @@ from config.settings import (
     PRIMARY_KUBECONFIG,
     SECONDARY_KUBECONFIG,
 )
+from tests.utils.pattern_variant import has_vm_drpc
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
@@ -1080,6 +1081,10 @@ def _require_ui_credentials():
 
 @pytest.mark.smoke
 @pytest.mark.requires_stage
+@pytest.mark.skipif(
+    not has_vm_drpc(),
+    reason="Partner variants do not deploy 2m-vm / gitops-vm-protection",
+)
 class TestUiSanity:
     """Verify the core Disaster Recovery UI flow is reachable and healthy."""
 

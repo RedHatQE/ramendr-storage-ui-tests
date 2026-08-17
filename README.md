@@ -1,12 +1,17 @@
 # ramendr-storage-ui-tests
 
 This repository is a **test harness** for the RamenDR validated pattern.
-It deploys from a maintained fork of the upstream starter kit —
+
+**Default (QE mixed fleet):** deploys from a maintained fork of the upstream starter kit —
 [elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22-rhdr-ramen`) —
 which carries all environment-specific customizations (Windows edge VMs, additional VM disks, BYOC cluster names,
 ODF channel pins, cost-optimized instance profiles, RHDR Quay IDMS). **`redeploy.sh` pins a fixed commit SHA**
 for the local pattern install; **hub Argo CD** reconciles from the fork's remote branch on GitHub
 (see [Upstream pinning](#upstream-pinning) below).
+
+**Partner / v1.3 variants:** set `PATTERN_VARIANT` (`odf`, `drpartner-s4`, or `drpartner-minimal`) to use
+[validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit) branch `v1.3`
+and `main.variant` instead of `main.clusterGroupName`. See [Pattern variants (v1.3)](#pattern-variants-v13).
 
 It contains:
 
@@ -40,8 +45,8 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | `d6c21253595ea809c779279e20bcc3e990420781` (fork `ocp-4.22-rhdr-ramen`) |
-| Hub Argo CD Applications | Remote fork on GitHub | Branch `ocp-4.22-rhdr-ramen` (tip unless an Application pins `targetRevision`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | QE fork `d6c21253595ea809c779279e20bcc3e990420781` (`ocp-4.22-rhdr-ramen`), or v1.3 `81d9cf7f0d50ff9a056bc31303170c4c46e808f2` when `PATTERN_VARIANT` is set |
+| Hub Argo CD Applications | Remote git on GitHub | QE fork branch `ocp-4.22-rhdr-ramen`, or `v1.3` when `PATTERN_VARIANT` is set |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
 `redeploy.sh`. For Argo CD to match that commit, push it to the tracked branch or pin
@@ -117,6 +122,8 @@ Do not commit secrets to this repository.
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
 - Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/ocp-4.22-rhdr-ramen/values-secret.yaml.template)
+  (v1.3 / `PATTERN_VARIANT=drpartner-s4` also needs the S4 fragment
+  [`dr-validation/examples/values-secret-v2-s4.fragment.yaml`](dr-validation/examples/values-secret-v2-s4.fragment.yaml))
 - For regional-dr cluster private-key ExternalSecrets, ensure `~/values-secret.yaml` includes hub `privatekey` paths (compare with your team's file via private DM), for example:
 
 ```yaml
@@ -150,6 +157,53 @@ export UPSTREAM_REPO=https://github.com/<your-org>/ramendr-starter-kit
 export UPSTREAM_REF=<commit-sha-or-branch>
 ./scripts/redeploy.sh --pattern-only
 ```
+
+## Pattern variants (v1.3)
+
+RamenDR starter-kit **v1.3** selects the install BOM with `main.variant` in `values-global.yaml`
+instead of `main.clusterGroupName`. Values live under `variants/<name>/`. See the
+[validated patterns variants write-up](https://validatedpatterns.io/blog/2026-08-04-variants-folder-structure/).
+
+| `PATTERN_VARIANT` | Upstream default | Purpose |
+|-------------------|------------------|---------|
+| *(unset)* | QE fork `ocp-4.22-rhdr-ramen` | Mixed 4-VM fleet (Linux + Windows), HammerDB, ODF |
+| `odf` | official `v1.3` | Baseline full ODF Regional DR + Virtualization |
+| `drpartner-s4` | official `v1.3` | Dell: partner CSI + hub S4 object storage (S3). Submariner disabled. No DRPC/VMs |
+| `drpartner-minimal` | official `v1.3` | Infinidat: partner CSI without S4, Submariner, or DRClusters |
+
+```bash
+# Dell partner BOM
+export PATTERN_VARIANT=drpartner-s4
+# Merge S4 Vault secrets into ~/values-secret.yaml first:
+#   dr-validation/examples/values-secret-v2-s4.fragment.yaml
+./scripts/redeploy.sh --pattern-only
+
+# Infinidat partner BOM (no S4 secrets)
+export PATTERN_VARIANT=drpartner-minimal
+./scripts/redeploy.sh --pattern-only
+```
+
+When `PATTERN_VARIANT` is set, `redeploy.sh`:
+
+1. Defaults `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH` to
+   [validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit)
+   at pin `81d9cf7f0d50ff9a056bc31303170c4c46e808f2` (branch `v1.3`).
+2. Writes `main.variant` in the local checkout `values-global.yaml` and removes legacy
+   `main.clusterGroupName` if present.
+3. Sets `byoc: true` in `overrides/values-cluster-names.yaml` (this harness always pre-provisions spokes).
+4. Skips Windows VM stabilize, HammerDB bootstrap, and ODF golden-image fix-up on partner BOMs
+   (override with the usual `REQUIRE_WINDOWS_VMS` / `SKIP_*` variables).
+
+**GitOps:** hub Argo CD still reads `values-global.yaml` from the **git remote**, not the local patch.
+The current `v1.3` tip has `main.variant: drpartner-s4` (Submariner disabled). For a different
+variant to persist after the first sync, fork v1.3, commit the desired `main.variant`, and point
+`UPSTREAM_REPO` at that fork.
+
+ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is
+independent of `main.variant`.
+
+Smoke tests skip VM / ODF / MirrorPeer assertions on partner variants and instead check
+`vp-s4-storage` (Dell) or its absence (Infinidat). Export the same `PATTERN_VARIANT` when you run pytest.
 
 ## Usage
 

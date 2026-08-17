@@ -5,7 +5,13 @@
 # That placement is often evaluated before BYOC spokes register, leaving an empty
 # PlacementDecision and blocking ramendr-starter-kit-resilient on the spokes.
 
+# ACM placement label on ManagedCluster objects. This is NOT values-global.yaml
+# main.clusterGroupName / main.variant. All current starter-kit BOMs (QE fork and
+# v1.3 odf / drpartner-*) still place spokes with clusterGroup=resilient.
 : "${SPOKE_CLUSTER_GROUP_LABEL:=resilient}"
+# Namespace that must exist on spokes before we treat resilient GitOps as ready.
+# ODF variants use openshift-storage; partner CSI variants use openshift-cnv.
+: "${SPOKE_RESILIENT_READY_NAMESPACE:=openshift-storage}"
 : "${ACM_PLACEMENT_NAMESPACE:=open-cluster-management}"
 : "${RESILIENT_PLACEMENT_NAME:=resilient-placement}"
 : "${SPOKE_CLUSTERS:=ocp-primary ocp-secondary}"
@@ -383,7 +389,7 @@ spoke_resilient_gitops_ready() {
 
   [[ "$sync" == "Synced" ]] || return 1
   [[ "$health" == "Healthy" || "$health" == "Progressing" ]] || return 1
-  KUBECONFIG="$kc" oc get namespace openshift-storage &>/dev/null
+  KUBECONFIG="$kc" oc get namespace "$SPOKE_RESILIENT_READY_NAMESPACE" &>/dev/null
 }
 
 spoke_resilient_gitops_all_ready() {
@@ -396,7 +402,7 @@ spoke_resilient_gitops_all_ready() {
 
 _spoke_resilient_gitops_status_line() {
   local cluster="$1"
-  local kc sync health odf_ns
+  local kc sync health ready_ns
 
   kc=$(_spoke_kubeconfig "$cluster") || return 0
   [[ -f "$kc" ]] || return 0
@@ -411,12 +417,12 @@ _spoke_resilient_gitops_status_line() {
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo unknown)
   health=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || echo unknown)
-  if KUBECONFIG="$kc" oc get namespace openshift-storage &>/dev/null; then
-    odf_ns=yes
+  if KUBECONFIG="$kc" oc get namespace "$SPOKE_RESILIENT_READY_NAMESPACE" &>/dev/null; then
+    ready_ns=yes
   else
-    odf_ns=no
+    ready_ns=no
   fi
-  echo "${cluster}: sync=${sync} health=${health} openshift-storage=${odf_ns}"
+  echo "${cluster}: sync=${sync} health=${health} ${SPOKE_RESILIENT_READY_NAMESPACE}=${ready_ns}"
 }
 
 wait_for_spoke_resilient_gitops() {
@@ -427,7 +433,7 @@ wait_for_spoke_resilient_gitops() {
 
   prepare_spoke_argo_appprojects_on_all_spokes || true
 
-  _rs_log "[spoke-gitops] Waiting for ${RESILIENT_PARENT_APP} + openshift-storage on all spokes..."
+  _rs_log "[spoke-gitops] Waiting for ${RESILIENT_PARENT_APP} + ${SPOKE_RESILIENT_READY_NAMESPACE} on all spokes..."
   while [[ $tries -lt $max_attempts ]]; do
     ready_count=0
     for cluster in $SPOKE_CLUSTERS; do
@@ -455,7 +461,7 @@ wait_for_spoke_resilient_gitops() {
     sleep "$sleep_s"
   done
 
-  _rs_warn "[spoke-gitops] Timed out waiting for spoke resilient GitOps / ODF namespace."
+  _rs_warn "[spoke-gitops] Timed out waiting for spoke resilient GitOps / ${SPOKE_RESILIENT_READY_NAMESPACE}."
   _spoke_resilient_gitops_status_line ocp-primary
   _spoke_resilient_gitops_status_line ocp-secondary
   return 1
