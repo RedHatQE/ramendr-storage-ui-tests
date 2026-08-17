@@ -81,6 +81,8 @@ spec:
           value: "${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}"
         - name: DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC
           value: "${DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC:-}"
+        - name: COLLECT_TMP_DIR
+          value: "/tmp/ramendr-db-collect-${COLLECT_RUN_ID}"
         volumeMounts:
         - name: ssh
           mountPath: /ssh
@@ -92,8 +94,10 @@ spec:
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             LINUX_PASS="\$(tr -d '\n' < /ssh/linux-password 2>/dev/null || true)"
             WINDOWS_PASS="\$(tr -d '\n' < /ssh/windows-password 2>/dev/null || true)"
+            collect_tmp_dir="\${COLLECT_TMP_DIR:-/tmp/ramendr-db-collect}"
+            mkdir -p "\$collect_tmp_dir"
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
-            cp /ssh/hosts.tsv /tmp/hosts.tsv
+            cp /ssh/hosts.tsv "\$collect_tmp_dir/hosts.tsv"
             refresh_linux_audit() {
               local host="\$1" port="\$2" ssh_user="\$3"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
@@ -193,19 +197,21 @@ spec:
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
               printf -v idx_padded "%03d" "\$COLLECT_IDX"
-              out_file="/tmp/collect-snapshot-\${idx_padded}.out"
+              out_file="\$collect_tmp_dir/collect-snapshot-\${idx_padded}.out"
               COLLECT_IDX=\$((COLLECT_IDX + 1))
               collect_vm "\$name" "\$host" "\$port" "\$platform" "\$ssh_user" "\$out_file" &
               COLLECT_PIDS+=("\$!")
-            done < /tmp/hosts.tsv
+            done < "\$collect_tmp_dir/hosts.tsv"
             for pid in "\${COLLECT_PIDS[@]}"; do
               wait "\$pid" || true
             done
-            for out_file in /tmp/collect-snapshot-*.out; do
+            for out_file in "\$collect_tmp_dir"/collect-snapshot-*.out; do
               [[ -f "\$out_file" ]] || continue
               cat "\$out_file"
               rm -f "\$out_file"
             done
+            rm -f "\$collect_tmp_dir/hosts.tsv"
+            rmdir "\$collect_tmp_dir" 2>/dev/null || true
       volumes:
       - name: ssh
         secret:
@@ -295,11 +301,10 @@ while i + 1 < len(parts):
     name, content = parts[i], parts[i + 1]
     payload = extract_snapshot_payload(content)
     if payload is None:
-        preview = content.strip().splitlines()
-        preview = "\n".join(preview[:6]) if preview else "<empty>"
+        output_length = len(content)
         print(
-            f"WARN: no JSON snapshot found for {name}. "
-            f"output preview:\n{preview}",
+            f"WARN: no JSON snapshot found for {name} "
+            f"(output_length={output_length})",
             file=sys.stderr,
         )
         i += 2

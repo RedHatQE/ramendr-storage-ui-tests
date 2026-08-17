@@ -32,6 +32,7 @@ def _snapshot(
     storage: dict | None = None,
     snapshot_mode: str = "dr",
     records: list[dict] | None = None,
+    record_count: int | None = None,
 ) -> dict:
     snapshot_records = records
     if snapshot_records is None:
@@ -47,7 +48,7 @@ def _snapshot(
         "snapshot_mode": snapshot_mode,
         "database_backend": backend,
         "audit": {
-            "record_count": 1,
+            "record_count": int(record_count) if record_count is not None else 1,
             "last_seq": 1,
             "last_committed_at": "2026-01-01T00:00:00Z",
             "records": snapshot_records,
@@ -83,7 +84,7 @@ def test_assert_hammerdb_snapshot_ready_enforces_tpcc_thresholds() -> None:
 
 
 def test_assert_hammerdb_snapshot_ready_dr_mode_uses_audit_records_branch() -> None:
-    assert_hammerdb_snapshot_ready(_snapshot(backend="postgres"))
+    assert_hammerdb_snapshot_ready(_snapshot(backend="postgres", record_count=0))
 
 
 def test_assert_hammerdb_snapshot_ready_checks_dual_disk_layout() -> None:

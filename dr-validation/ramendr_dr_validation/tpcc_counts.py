@@ -17,7 +17,7 @@ from ramendr_dr_validation.tpcc_schema import (
     TPCC_STATIC_TABLES,
 )
 
-_VALID_MSSQL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
+_VALID_MSSQL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class TpccCountBackend(Protocol):
@@ -113,7 +113,7 @@ def _mssql_table_exists(cur, schema: str, table: str) -> bool:
 
 def _validate_mssql_identifier(name: str, kind: str) -> str:
     """Return ``name`` when it is a safe MSSQL identifier."""
-    if not _VALID_MSSQL_IDENTIFIER.match(name):
+    if not _VALID_MSSQL_IDENTIFIER.fullmatch(name):
         raise ValueError(f"Invalid MSSQL {kind}: {name!r}")
     return name
 
