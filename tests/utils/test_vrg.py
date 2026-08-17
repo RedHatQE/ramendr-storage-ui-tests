@@ -6,10 +6,79 @@ import pytest
 
 from tests.utils.vrg import (
     active_cluster_from_drpc,
+    drpc_condition,
+    drpc_is_protected,
     protected_pvc_index,
     pvc_replication_issues,
     vm_os_and_data_pvc_names,
+    wait_for_drpc_protected,
 )
+
+
+def test_drpc_is_protected() -> None:
+    protected = {
+        "status": {
+            "conditions": [
+                {"type": "Protected", "status": "True", "reason": "Protected"}
+            ]
+        }
+    }
+    uploading = {
+        "status": {
+            "conditions": [
+                {
+                    "type": "Protected",
+                    "status": "False",
+                    "reason": "Uploading",
+                    "message": "ClusterDataProtected Uploading",
+                }
+            ]
+        }
+    }
+    assert drpc_is_protected(protected)
+    assert not drpc_is_protected(uploading)
+    assert drpc_condition(uploading, "Protected")["reason"] == "Uploading"
+
+
+def test_wait_for_drpc_protected_returns_when_true() -> None:
+    drpc = {
+        "status": {
+            "phase": "Deployed",
+            "conditions": [{"type": "Protected", "status": "True"}],
+        }
+    }
+    assert (
+        wait_for_drpc_protected(
+            "kc",
+            timeout_seconds=1,
+            poll_seconds=0,
+            load_fn=lambda *_args: drpc,
+        )
+        == drpc
+    )
+
+
+def test_wait_for_drpc_protected_times_out_while_uploading() -> None:
+    drpc = {
+        "status": {
+            "phase": "Deployed",
+            "conditions": [
+                {
+                    "type": "Protected",
+                    "status": "False",
+                    "reason": "Uploading",
+                    "message": "ClusterDataProtected",
+                }
+            ],
+        }
+    }
+    with pytest.raises(TimeoutError, match="Uploading"):
+        wait_for_drpc_protected(
+            "kc",
+            timeout_seconds=0.02,
+            poll_seconds=0.01,
+            load_fn=lambda *_args: drpc,
+        )
 
 
 def test_active_cluster_from_drpc_failed_over() -> None:

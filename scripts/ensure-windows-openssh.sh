@@ -3,6 +3,8 @@
 #
 # Uses virtctl ssh (KubeVirt port-forward) + optional login via windows-admin secret.
 # Runs from the host that has kubeconfig + virtctl; no in-cluster probe pod required.
+# shellcheck source=lib/gnu-bash-reexec.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/gnu-bash-reexec.sh"
 set -euo pipefail
 
 VM_NAMESPACE="${VM_NAMESPACE:-gitops-vms}"

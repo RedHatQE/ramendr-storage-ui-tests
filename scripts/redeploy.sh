@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
 # macOS ships bash 3.2 (no mapfile). Re-exec with Homebrew bash when available.
-if [[ -z "${RAMENDR_GNU_BASH_REEXECED:-}" && "${BASH_VERSINFO[0]:-0}" -lt 4 ]]; then
-  for _bash in "${GNU_BASH:-}" /opt/homebrew/bin/bash /usr/local/bin/bash; do
-    if [[ -n "${_bash:-}" && -x "$_bash" ]]; then
-      export RAMENDR_GNU_BASH_REEXECED=1
-      exec "$_bash" "$0" "$@"
-    fi
-  done
-  echo "ERROR: GNU bash 4+ is required (mapfile). On macOS: brew install bash" >&2
-  exit 1
-fi
+# shellcheck source=lib/gnu-bash-reexec.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/gnu-bash-reexec.sh"
 set -euo pipefail
 
 #
@@ -23,16 +15,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
-# shellcheck source=lib/spoke-metal.sh
-source "$REPO_ROOT/scripts/lib/spoke-metal.sh"
-# shellcheck source=lib/resilient-spokes.sh
-source "$REPO_ROOT/scripts/lib/resilient-spokes.sh"
-# shellcheck source=lib/odf-golden-images.sh
-source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
-# shellcheck source=lib/byoc-kubeconfig-secrets.sh
-source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
-# shellcheck source=lib/byoc-import-wait.sh
-source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
+# Variant defaults (including SPOKE_RESILIENT_READY_NAMESPACE) must run before
+# resilient-spokes.sh applies its openshift-storage fallback.
 # shellcheck source=lib/pattern-variant.sh
 source "$REPO_ROOT/scripts/lib/pattern-variant.sh"
 
@@ -56,6 +40,17 @@ fi
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
 configure_variant_defaults
+
+# shellcheck source=lib/spoke-metal.sh
+source "$REPO_ROOT/scripts/lib/spoke-metal.sh"
+# shellcheck source=lib/resilient-spokes.sh
+source "$REPO_ROOT/scripts/lib/resilient-spokes.sh"
+# shellcheck source=lib/odf-golden-images.sh
+source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
+# shellcheck source=lib/byoc-kubeconfig-secrets.sh
+source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
+# shellcheck source=lib/byoc-import-wait.sh
+source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
 
 HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
 PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
@@ -86,6 +81,19 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 log() { echo -e "${GREEN}[$(date +%H:%M:%S)]${NC} $*"; }
+
+# Strip https://user:token@host/... userinfo so logs never print repo credentials.
+sanitize_upstream_repo_url() {
+  local url="${1:-}"
+  case "$url" in
+    https://*@*|http://*@*)
+      sed -E 's#^(https?://)[^/@]+@#\1#' <<<"$url"
+      ;;
+    *)
+      printf '%s\n' "$url"
+      ;;
+  esac
+}
 warn() { echo -e "${YELLOW}[$(date +%H:%M:%S)] WARNING:${NC} $*"; }
 err() { echo -e "${RED}[$(date +%H:%M:%S)] ERROR:${NC} $*"; }
 
@@ -928,7 +936,7 @@ show_status() {
   else
     echo "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
   fi
-  echo "Upstream: ${UPSTREAM_REPO} @ ${UPSTREAM_REF} (${UPSTREAM_BRANCH})"
+  echo "Upstream: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}") @ ${UPSTREAM_REF} (${UPSTREAM_BRANCH})"
   echo ""
   echo "--- Clusters ---"
   oc get managedclusters 2>&1 || echo "Cannot reach hub cluster"
@@ -1054,7 +1062,7 @@ case "${1:-}" in
     echo " --status Show current environment status"
     echo ""
     echo "Pinning:"
-    echo " UPSTREAM_REPO           Upstream repo URL (default: $UPSTREAM_REPO)"
+    echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
     echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
     echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
     echo " PATTERN_VARIANT         v1.3 install variant: odf | drpartner-s4 | drpartner-minimal"

@@ -370,6 +370,32 @@ recover_all_spoke_resilient_apps() {
   [[ "$recovered" -gt 0 ]]
 }
 
+spoke_resilient_workload_ready() {
+  local kc="$1"
+  KUBECONFIG="$kc" oc get namespace "$SPOKE_RESILIENT_READY_NAMESPACE" &>/dev/null || return 1
+  if [[ "$SPOKE_RESILIENT_READY_NAMESPACE" != "openshift-storage" ]]; then
+    return 0
+  fi
+  [[ "$(KUBECONFIG="$kc" oc get storagecluster ocs-storagecluster \
+    -n openshift-storage \
+    -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true)" == "True" ]]
+}
+
+_warn_spoke_gitops_degraded() {
+  local kc="$1" cluster="$2"
+  local og_count
+  case " ${_SPOKE_GITOPS_DEGRADED_WARNED:-} " in
+    *" ${cluster} "*) return 0 ;;
+  esac
+  _SPOKE_GITOPS_DEGRADED_WARNED="${_SPOKE_GITOPS_DEGRADED_WARNED:-} ${cluster}"
+  og_count=$(KUBECONFIG="$kc" oc get operatorgroup -n openshift-operators \
+    --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  _rs_warn "[spoke-gitops] ${cluster} ${RESILIENT_PARENT_APP} is Degraded; ${SPOKE_RESILIENT_READY_NAMESPACE} is usable so DR bootstrap continues."
+  if [[ "${og_count:-0}" -gt 1 ]]; then
+    _rs_warn "[spoke-gitops] ${cluster} has ${og_count} OperatorGroups in openshift-operators (OLM allows one). rhdr-cluster-operator often stays ResolutionFailed until the extra OperatorGroup is removed by the pattern/cluster owner — this script does not delete OperatorGroups."
+  fi
+}
+
 spoke_resilient_gitops_ready() {
   local cluster="$1"
   local kc sync health
@@ -388,8 +414,15 @@ spoke_resilient_gitops_ready() {
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
 
   [[ "$sync" == "Synced" ]] || return 1
-  [[ "$health" == "Healthy" || "$health" == "Progressing" ]] || return 1
-  KUBECONFIG="$kc" oc get namespace "$SPOKE_RESILIENT_READY_NAMESPACE" &>/dev/null
+  spoke_resilient_workload_ready "$kc" || return 1
+  if [[ "$health" == "Healthy" || "$health" == "Progressing" ]]; then
+    return 0
+  fi
+  if [[ "$health" == "Degraded" ]]; then
+    _warn_spoke_gitops_degraded "$kc" "$cluster"
+    return 0
+  fi
+  return 1
 }
 
 spoke_resilient_gitops_all_ready() {

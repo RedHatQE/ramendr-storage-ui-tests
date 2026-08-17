@@ -2,9 +2,10 @@
 
 Run after scripts/redeploy.sh completes (HammerDB PostgreSQL should be populated).
 
-TestInfraSmoke — point-in-time assertions against live cluster state via oc,
-                 plus HammerDB PostgreSQL table checks after automatic redeploy bootstrap.
-                 No polling, no Playwright.
+TestInfraSmoke — assertions against live cluster state via oc, plus HammerDB
+                 PostgreSQL table checks after automatic redeploy bootstrap.
+                 DRPC Protected is polled until cluster-data upload finishes.
+                 No Playwright.
 TestUiSmoke    — Playwright tests against the ACM hub console UI.
 
 Usage:
@@ -44,6 +45,7 @@ from tests.utils.vrg import (
     pvc_replication_issues,
     spoke_kubeconfig,
     vm_os_and_data_pvc_names,
+    wait_for_drpc_protected,
 )
 
 # ArgoCD apps that are expected to be OutOfSync due to known drift.
@@ -55,6 +57,10 @@ HUB_NAMESPACE = "ramendr-starter-kit-hub"
 # Minimum VMs in gitops-vms after a full deployment (2 Linux + 1 Windows 2022 + 1 Windows 2025).
 # Override with RAMENDR_MIN_VM_COUNT or RAMENDR_EXPECTED_VMS.
 _MIN_VM_COUNT = int(os.getenv("RAMENDR_MIN_VM_COUNT", str(EXPECTED_EDGE_VM_COUNT)))
+# Fresh deploys show UI Critical while ClusterDataProtected is Uploading.
+_DRPC_PROTECTED_TIMEOUT_MS = int(
+    float(os.getenv("RAMENDR_SMOKE_DRPC_PROTECTED_TIMEOUT_SECONDS", "1800")) * 1000
+)
 
 _skip_without_odf = pytest.mark.skipif(
     not has_odf_mirrorpeer(),
@@ -588,6 +594,7 @@ class TestInfraSmoke:
         vms = json.loads(raw_vms)["items"]
         assert vms, f"No VirtualMachines found in gitops-vms on {active_cluster}"
 
+        wait_for_drpc_protected(hub_kubeconfig)
         vrg = load_vrg(kubeconfig)
         protected = protected_pvc_index(vrg)
 
@@ -738,18 +745,7 @@ class TestInfraSmoke:
     @_skip_without_vm_drpc
     def test_drpc_deployed_available(self, hub_kubeconfig):
         """DRPlacementControl gitops-vm-protection is Deployed (or Relocated) and Available."""
-        raw = run_oc(
-            [
-                "get",
-                "drplacementcontrol",
-                "gitops-vm-protection",
-                "-n",
-                "openshift-dr-ops",
-                "--output=json",
-            ],
-            hub_kubeconfig,
-        )
-        drpc = json.loads(raw)
+        drpc = wait_for_drpc_protected(hub_kubeconfig)
         status = drpc.get("status", {})
         phase = status.get("phase", "")
         # "Relocated" is a valid steady-state after a completed DR cycle.
@@ -885,7 +881,7 @@ class TestUiSmoke:
     """Verify the RamenDR ACM hub console UI after deployment."""
 
     @_skip_without_vm_drpc
-    def test_disaster_recovery_ui(self, page):
+    def test_disaster_recovery_ui(self, page, hub_kubeconfig):
         """Full DR UI walkthrough: login → policy validated → DRPC healthy.
 
         Flow:
@@ -894,10 +890,12 @@ class TestUiSmoke:
           3. Switch to Fleet Management perspective and open Data Services →
              Disaster recovery via the left nav.
           4. Policies tab: assert 2m-vm is Validated with 1 Application.
-          5. Protected applications tab: assert gitops-vm-protection is Healthy,
+          5. Protected applications tab: wait until gitops-vm-protection is
+             Healthy (cluster-data upload can take a while after deploy),
              using policy 2m-vm, placed on cluster ocp-primary.
         """
         _require_ui_credentials()
+        wait_for_drpc_protected(hub_kubeconfig)
 
         login_page = LoginPage(page)
         login_page.open(BASE_URL)
@@ -921,6 +919,11 @@ class TestUiSmoke:
 
         # --- Protected applications tab ---
         drpc_page.navigate_protected_applications_tab()
+        drpc_page.wait_for_drpc_healthy_state(
+            "gitops-vm-protection",
+            expected_cluster="ocp-primary",
+            timeout_ms=_DRPC_PROTECTED_TIMEOUT_MS,
+        )
         drpc_page.assert_drpc(
             "gitops-vm-protection",
             expected_policy="2m-vm",

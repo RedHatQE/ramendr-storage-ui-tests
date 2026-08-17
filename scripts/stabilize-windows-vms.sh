@@ -3,6 +3,8 @@
 #
 # edge-gitops-vms keeps evictionStrategy: LiveMigrate for DR. Mitigations for libvirt
 # IOError / SyncVMI stalls are virtio OS disks (fork values) and SPOKE_METAL_REPLICAS=2.
+# shellcheck source=lib/gnu-bash-reexec.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/gnu-bash-reexec.sh"
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

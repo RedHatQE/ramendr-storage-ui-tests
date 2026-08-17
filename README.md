@@ -46,11 +46,13 @@ Two different upstream references are in play:
 | Consumer | Source | Default |
 |----------|--------|---------|
 | `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | QE fork `d6c21253595ea809c779279e20bcc3e990420781` (`ocp-4.22-rhdr-ramen`), or v1.3 `81d9cf7f0d50ff9a056bc31303170c4c46e808f2` when `PATTERN_VARIANT` is set |
-| Hub Argo CD Applications | Remote git on GitHub | QE fork branch `ocp-4.22-rhdr-ramen`, or `v1.3` when `PATTERN_VARIANT` is set |
+| Hub Argo CD Applications | Remote git on GitHub | QE: fork branch `ocp-4.22-rhdr-ramen`. Partner/v1.3: the repo in `UPSTREAM_REPO` (official `v1.3`, or a fork that **commits** the desired `main.variant`). Argo does not see the local checkout patch. |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
 `redeploy.sh`. For Argo CD to match that commit, push it to the tracked branch or pin
-`targetRevision` on the hub Applications.
+`targetRevision` on the hub Applications. For `PATTERN_VARIANT`, GitOps is only stable when
+the remote `values-global.yaml` already has that `main.variant` (fork + commit, then set
+`UPSTREAM_REPO`).
 
 ## Prerequisites
 
@@ -61,7 +63,7 @@ The deployment script expects tools similar to the original flow:
 - `aws`
 - `podman` — must be **running** when the pattern deploy starts (`pattern.sh` uses a utility container). On macOS, start the VM before a long redeploy or rely on `redeploy.sh` to auto-start it: `podman machine start`
 - `git`
-- **GNU bash 4+** — `redeploy.sh` uses `mapfile` (macOS system bash 3.2 is too old). On macOS: `brew install bash` (the script re-execs via `/opt/homebrew/bin/bash` automatically when present)
+- **GNU bash 4+** — `redeploy.sh`, `stabilize-windows-vms.sh`, and `ensure-windows-openssh.sh` use `mapfile` (macOS system bash 3.2 is too old). On macOS: `brew install bash` (those scripts re-exec via `/opt/homebrew/bin/bash` automatically when present)
 - `python3` with **PyYAML** — merges spoke kubeconfig paths into `.work/values-secret.yaml` before `install-byoc` (`redeploy.sh` auto-installs via `pip install --user PyYAML` when missing; also listed in `requirements.txt`)
 - `virtctl` — Windows edge VM SSH verification during redeploy (`brew install virtctl` on macOS when `REQUIRE_WINDOWS_VMS=1`)
 - `jq` — used by the golden-image Ansible playbook and several redeploy helpers
@@ -172,14 +174,10 @@ instead of `main.clusterGroupName`. Values live under `variants/<name>/`. See th
 | `drpartner-minimal` | official `v1.3` | Infinidat: partner CSI without S4, Submariner, or DRClusters |
 
 ```bash
-# Dell partner BOM
-export PATTERN_VARIANT=drpartner-s4
-# Merge S4 Vault secrets into ~/values-secret.yaml first:
-#   dr-validation/examples/values-secret-v2-s4.fragment.yaml
-./scripts/redeploy.sh --pattern-only
-
-# Infinidat partner BOM (no S4 secrets)
-export PATTERN_VARIANT=drpartner-minimal
+# Stable GitOps: fork v1.3, commit main.variant, then:
+export UPSTREAM_REPO=https://github.com/<your-org>/ramendr-starter-kit
+export PATTERN_VARIANT=drpartner-s4   # or drpartner-minimal
+# Dell: merge dr-validation/examples/values-secret-v2-s4.fragment.yaml first
 ./scripts/redeploy.sh --pattern-only
 ```
 
@@ -194,10 +192,10 @@ When `PATTERN_VARIANT` is set, `redeploy.sh`:
 4. Skips Windows VM stabilize, HammerDB bootstrap, and ODF golden-image fix-up on partner BOMs
    (override with the usual `REQUIRE_WINDOWS_VMS` / `SKIP_*` variables).
 
-**GitOps:** hub Argo CD still reads `values-global.yaml` from the **git remote**, not the local patch.
-The current `v1.3` tip has `main.variant: drpartner-s4` (Submariner disabled). For a different
-variant to persist after the first sync, fork v1.3, commit the desired `main.variant`, and point
-`UPSTREAM_REPO` at that fork.
+**GitOps:** hub Argo CD reads `values-global.yaml` from the **git remote**, not the local
+`PATTERN_VARIANT` patch. Official `v1.3` currently commits `main.variant: drpartner-s4`.
+Treat a matching remote commit (fork + `UPSTREAM_REPO`) as the supported partner flow;
+a local-only patch is install-time and will drift on the next Argo sync.
 
 ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is
 independent of `main.variant`.
