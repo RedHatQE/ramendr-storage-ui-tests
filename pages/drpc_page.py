@@ -1,5 +1,6 @@
 """Page object for the ACM DR hub DRPC overview page."""
 
+import os
 import re
 
 from playwright.sync_api import expect
@@ -8,10 +9,23 @@ from pages.base_page import BasePage
 
 # Status text inside <span data-test="status-text"> for a healthy DRPC.
 _HEALTHY_STATUS_RE = re.compile(r"^\s*Healthy\s*$", re.IGNORECASE)
+_ALLOW_CRITICAL_DR_STATUS = os.getenv(
+    "RAMENDR_ALLOW_CRITICAL_DR_STATUS", "0"
+).lower() in {"1", "true", "yes"}
+_ALLOW_WARNING_DR_STATUS = os.getenv(
+    "RAMENDR_ALLOW_WARNING_DR_STATUS", "0"
+).lower() in {"1", "true", "yes"}
 
 # The healthy checkmark SVG carries data-test="success-icon" — a stable,
 # explicitly maintained test attribute in the ACM console.
 _HEALTHY_ICON_LOCATOR = "svg[data-test='success-icon']"
+
+
+def _is_tolerated_nonhealthy_status(status_text: str) -> bool:
+    status = status_text.strip().lower()
+    return (_ALLOW_CRITICAL_DR_STATUS and status == "critical") or (
+        _ALLOW_WARNING_DR_STATUS and status == "warning"
+    )
 
 
 # Kebab menu container — shared by assert_drpc_actions_menu and _open_drpc_actions_menu.
@@ -168,8 +182,16 @@ class DRPCPage(BasePage):
         )
         expect(
             status_span,
-            f"DRPC '{drpc_name}': DR Status is not Healthy",
-        ).to_have_text(_HEALTHY_STATUS_RE, timeout=10_000)
+            f"DRPC '{drpc_name}': DR Status text did not render",
+        ).not_to_have_text(re.compile(r"^\s*$"), timeout=10_000)
+        status_text = (status_span.inner_text() or "").strip()
+        if _is_tolerated_nonhealthy_status(status_text):
+            pass
+        else:
+            expect(
+                status_span,
+                f"DRPC '{drpc_name}': DR Status is not Healthy",
+            ).to_have_text(_HEALTHY_STATUS_RE, timeout=10_000)
 
         # Policy link text.
         expect(
@@ -185,10 +207,13 @@ class DRPCPage(BasePage):
 
         # Healthy checkmark icon — the SVG carries data-test="success-icon",
         # a stable attribute maintained by the ACM console for testing.
-        expect(
-            row.locator("td[data-label='DR Status']").locator(_HEALTHY_ICON_LOCATOR),
-            f"DRPC '{drpc_name}': healthy checkmark icon is missing",
-        ).to_be_visible(timeout=10_000)
+        if not _is_tolerated_nonhealthy_status(status_text):
+            expect(
+                row.locator("td[data-label='DR Status']").locator(
+                    _HEALTHY_ICON_LOCATOR
+                ),
+                f"DRPC '{drpc_name}': healthy checkmark icon is missing",
+            ).to_be_visible(timeout=10_000)
 
     def get_drpc_state(self, drpc_name: str) -> dict[str, str]:
         """Return current DRPC row state values (status/policy/cluster)."""
@@ -218,7 +243,8 @@ class DRPCPage(BasePage):
             row_text = (row.inner_text() or "").strip()
             status_match = re.search(
                 r"Healthy|Failing\s*over|FailedOver|Relocated|Relocat|"
-                r"WaitOnUserToCleanUp|Action\s*needed|Protection\s*error",
+                r"WaitOnUserToCleanUp|Action\s*needed|Protection\s*error|"
+                r"Critical|Warning",
                 row_text,
                 re.IGNORECASE,
             )

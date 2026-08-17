@@ -659,11 +659,9 @@ load_mssql_credentials() {
     && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
     return 0
   fi
-  if [[ ! -f "$VALUES_SECRET" ]]; then
-    return 1
-  fi
-  local parsed
-  parsed="$(python3 - "$VALUES_SECRET" <<'PY'
+  local parsed=""
+  if [[ -f "$VALUES_SECRET" ]]; then
+    parsed="$(python3 - "$VALUES_SECRET" <<'PY'
 import re, sys
 
 text = open(sys.argv[1]).read()
@@ -716,13 +714,40 @@ if len(values) == 3:
     print(values["user"])
     print(values["password"])
 PY
-)" || return 1
-  if [[ -z "$parsed" ]]; then
-    return 1
+)" || true
   fi
-  DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(sed -n '1p' <<<"$parsed")}"
-  DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(sed -n '2p' <<<"$parsed")}"
-  DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(sed -n '3p' <<<"$parsed")}"
+  local had_xtrace=0
+  if [[ "$-" == *x* ]]; then
+    had_xtrace=1
+    set +x
+  fi
+  if [[ -n "$parsed" ]]; then
+    DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(sed -n '1p' <<<"$parsed")}"
+    DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(sed -n '2p' <<<"$parsed")}"
+    DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(sed -n '3p' <<<"$parsed")}"
+  fi
+  vault_kv_field() {
+    local field="$1"
+    local timeout_s="${DR_VALIDATION_VAULT_LOOKUP_TIMEOUT_SEC:-20}"
+    if command -v timeout >/dev/null 2>&1; then
+      timeout "${timeout_s}" oc --request-timeout="${timeout_s}s" exec -n vault vault-0 -- \
+        vault kv get -field="${field}" secret/global/mssql-hammerdb 2>/dev/null || true
+      return
+    fi
+    oc --request-timeout="${timeout_s}s" exec -n vault vault-0 -- \
+      vault kv get -field="${field}" secret/global/mssql-hammerdb 2>/dev/null || true
+  }
+  if [[ -z "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
+    || -z "${DR_VALIDATION_MSSQL_USER:-}" \
+    || -z "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
+    ensure_hub_kubeconfig
+    DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(vault_kv_field sa_password)}"
+    DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(vault_kv_field user)}"
+    DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(vault_kv_field password)}"
+  fi
+  if [[ "$had_xtrace" -eq 1 ]]; then
+    set -x
+  fi
   [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
     && -n "${DR_VALIDATION_MSSQL_USER:-}" \
     && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]

@@ -10,13 +10,53 @@ from psycopg2 import sql
 from ramendr_dr_validation.backends.postgres import PostgresBackend
 from ramendr_dr_validation.db_audit import load_env_file, validate_table_name
 from ramendr_dr_validation.db_snapshot_common import (
+    audit_tail_limit,
     build_snapshot_payload,
     format_committed_at,
     run_snapshot_cli,
 )
+from ramendr_dr_validation.tpcc_counts import (
+    fetch_tpcc_counts_postgres_dr,
+    fetch_tpcc_counts_postgres_status,
+)
 
 
 def fetch_audit_records(conn, backend: PostgresBackend) -> list[dict]:
+    """Return audit rows for DR snapshots (tail window, not full history)."""
+    return fetch_audit_records_tail(conn, backend, audit_tail_limit())
+
+
+def fetch_audit_records_tail(conn, backend: PostgresBackend, limit: int) -> list[dict]:
+    """Return the most recent ``limit`` audit rows ordered by sequence."""
+    if limit <= 0:
+        return fetch_audit_records_all(conn, backend)
+
+    audit_table = validate_table_name(backend.audit_table)
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                """
+            SELECT seq, committed_at, hostname, source
+            FROM {}
+            ORDER BY seq DESC
+            LIMIT %s
+            """
+            ).format(sql.Identifier(audit_table)),
+            (limit,),
+        )
+        rows = list(reversed(cur.fetchall()))
+    return [
+        {
+            "seq": int(seq),
+            "committed_at": format_committed_at(committed_at),
+            "hostname": hostname,
+            "source": source,
+        }
+        for seq, committed_at, hostname, source in rows
+    ]
+
+
+def fetch_audit_records_all(conn, backend: PostgresBackend) -> list[dict]:
     """Return all audit rows ordered by sequence."""
     audit_table = validate_table_name(backend.audit_table)
     with conn.cursor() as cur:
@@ -65,30 +105,13 @@ def fetch_audit_summary(conn, backend: PostgresBackend) -> dict:
 
 
 def fetch_tpcc_counts(conn, backend: PostgresBackend) -> dict[str, int]:
-    """Return row counts for HammerDB TPC-C tables that exist in the schema."""
-    counts: dict[str, int] = {}
-    with conn.cursor() as cur:
-        for table in backend.tpcc_tables:
-            cur.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                )
-                """,
-                (backend.schema, table),
-            )
-            if not bool(cur.fetchone()[0]):
-                continue
-            cur.execute(
-                sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
-                    sql.Identifier(backend.schema),
-                    sql.Identifier(table),
-                )
-            )
-            counts[table] = int(cur.fetchone()[0])
-    return counts
+    """Return row counts for HammerDB TPC-C tables (DR snapshot mode)."""
+    return fetch_tpcc_counts_postgres_dr(conn, backend)
+
+
+def fetch_tpcc_counts_status(conn, backend: PostgresBackend) -> dict[str, int]:
+    """Return fast row counts for health / status snapshots."""
+    return fetch_tpcc_counts_postgres_status(conn, backend)
 
 
 def fetch_storage_layout(conn, backend: PostgresBackend) -> dict:
@@ -130,20 +153,33 @@ def collect_snapshot(
     """Build a JSON-serializable snapshot of audit + TPC-C state."""
     conn = backend.connect()
     try:
+        summary = fetch_audit_summary(conn, backend)
         audit_records = fetch_audit_records(conn, backend)
         tpcc_counts = fetch_tpcc_counts(conn, backend)
         storage = fetch_storage_layout(conn, backend)
     finally:
         conn.close()
 
-    return build_snapshot_payload(
+    payload = build_snapshot_payload(
         database_backend="postgres",
         database=backend.database,
         audit_records=audit_records,
         tpcc_counts=tpcc_counts,
         vm_name=vm_name,
         storage=storage,
+        snapshot_mode="dr",
     )
+    payload["audit"].update(
+        {
+            "record_count": summary["record_count"],
+            "first_seq": summary.get("first_seq"),
+            "last_seq": summary.get("last_seq"),
+            "last_committed_at": summary.get("last_committed_at"),
+            "tail_rows": len(audit_records),
+            "tail_limit": audit_tail_limit(),
+        }
+    )
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         fetch_audit_records=fetch_audit_records,
         fetch_audit_summary=fetch_audit_summary,
         fetch_tpcc_counts=fetch_tpcc_counts,
+        fetch_tpcc_counts_status=fetch_tpcc_counts_status,
         fetch_storage_layout=fetch_storage_layout,
     )
 

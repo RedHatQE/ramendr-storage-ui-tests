@@ -26,11 +26,33 @@ _POPULATED_TPCC = {
 
 
 def _snapshot(
-    *, backend: str, tpcc: dict | None = None, storage: dict | None = None
+    *,
+    backend: str,
+    tpcc: dict | None = None,
+    storage: dict | None = None,
+    snapshot_mode: str = "dr",
+    records: list[dict] | None = None,
+    record_count: int | None = None,
 ) -> dict:
+    snapshot_records = records
+    if snapshot_records is None:
+        snapshot_records = [
+            {
+                "seq": 1,
+                "committed_at": "2026-01-01T00:00:00Z",
+                "hostname": "vm-1",
+                "source": "db_audit",
+            }
+        ]
     payload = {
+        "snapshot_mode": snapshot_mode,
         "database_backend": backend,
-        "audit": {"records": [{"seq": 1, "committed_at": "2026-01-01T00:00:00Z"}]},
+        "audit": {
+            "record_count": int(record_count) if record_count is not None else 1,
+            "last_seq": 1,
+            "last_committed_at": "2026-01-01T00:00:00Z",
+            "records": snapshot_records,
+        },
         "tpcc": tpcc if tpcc is not None else dict(_POPULATED_TPCC),
     }
     if storage is not None:
@@ -39,13 +61,30 @@ def _snapshot(
 
 
 def test_assert_hammerdb_snapshot_ready_enforces_tpcc_thresholds() -> None:
-    assert_hammerdb_snapshot_ready(_snapshot(backend="postgres"))
-    assert_hammerdb_snapshot_ready(_snapshot(backend="mssql"))
+    assert_hammerdb_snapshot_ready(
+        _snapshot(backend="postgres", snapshot_mode="status-only", records=[])
+    )
+    assert_hammerdb_snapshot_ready(
+        _snapshot(backend="mssql", snapshot_mode="status-only", records=[])
+    )
 
     with pytest.raises(AssertionError, match="customer"):
         assert_hammerdb_snapshot_ready(
-            _snapshot(backend="mssql", tpcc={**_POPULATED_TPCC, "customer": 10})
+            _snapshot(
+                backend="mssql",
+                tpcc={
+                    "warehouse": 1,
+                    "district": 10,
+                    "customer": 10,
+                    "stock": 100_000,
+                    "item": 100_000,
+                },
+            )
         )
+
+
+def test_assert_hammerdb_snapshot_ready_dr_mode_uses_audit_records_branch() -> None:
+    assert_hammerdb_snapshot_ready(_snapshot(backend="postgres", record_count=0))
 
 
 def test_assert_hammerdb_snapshot_ready_checks_dual_disk_layout() -> None:

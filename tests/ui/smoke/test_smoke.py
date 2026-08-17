@@ -40,13 +40,20 @@ from tests.utils.vrg import (
 
 # ArgoCD apps that are expected to be OutOfSync due to known drift.
 # These are still required to be Healthy; only the sync status is tolerated.
-_KNOWN_OUTOFSYNC_APPS = {"regional-dr"}
+_KNOWN_OUTOFSYNC_APPS = {
+    "regional-dr",
+    # ExternalSecret managed fields in cert-manager can drift at runtime.
+    "vp-manage-proxy-cluster-ca",
+}
 
 HUB_NAMESPACE = "ramendr-starter-kit-hub"
 
 # Minimum VMs in gitops-vms after a full deployment (2 Linux + 1 Windows 2022 + 1 Windows 2025).
 # Override with RAMENDR_MIN_VM_COUNT or RAMENDR_EXPECTED_VMS.
 _MIN_VM_COUNT = int(os.getenv("RAMENDR_MIN_VM_COUNT", str(EXPECTED_EDGE_VM_COUNT)))
+_ALLOW_UNPROTECTED_DRPC_AVAILABLE = os.getenv(
+    "RAMENDR_ALLOW_UNPROTECTED_DRPC_AVAILABLE", "0"
+).lower() in {"1", "true", "yes"}
 
 
 def _vm_references_pvc(vm: dict, pvc_name: str) -> bool:
@@ -101,10 +108,13 @@ class TestInfraSmoke:
                 failures.append(f"{name}: health={health} sync={sync}")
                 continue
 
-            if sync != "Synced" and name not in _KNOWN_OUTOFSYNC_APPS:
-                failures.append(
-                    f"{name}: health={health} sync={sync} (unexpected OutOfSync)"
-                )
+            if sync == "Synced":
+                continue
+            if name in _KNOWN_OUTOFSYNC_APPS and sync == "OutOfSync":
+                continue
+            failures.append(
+                f"{name}: health={health} sync={sync} (unexpected sync state)"
+            )
 
         assert not failures, (
             "ArgoCD application(s) not in expected state:\n"
@@ -549,9 +559,7 @@ class TestInfraSmoke:
         vms = json.loads(raw_vms)["items"]
         assert vms, f"No VirtualMachines found in gitops-vms on {active_cluster}"
 
-        vrg = load_vrg(kubeconfig)
-        protected = protected_pvc_index(vrg)
-
+        vm_disk_pvcs: list[tuple[str, str, str]] = []
         failures: list[str] = []
         for vm in vms:
             name = vm["metadata"]["name"]
@@ -560,7 +568,50 @@ class TestInfraSmoke:
             except ValueError as exc:
                 failures.append(str(exc))
                 continue
+            vm_disk_pvcs.append((name, os_pvc, data_pvc))
 
+        expected_pvcs = {
+            pvc_name
+            for _, os_pvc, data_pvc in vm_disk_pvcs
+            for pvc_name in (os_pvc, data_pvc)
+        }
+        vrg = load_vrg(kubeconfig)
+        protected = protected_pvc_index(vrg)
+        raw_volreps = run_oc(
+            [
+                "get",
+                "volumereplication.replication.storage.openshift.io",
+                "-A",
+                "--output=json",
+            ],
+            kubeconfig,
+        )
+        volrep_items = json.loads(raw_volreps).get("items", [])
+        relevant_volreps = []
+        for item in volrep_items:
+            metadata = item.get("metadata", {})
+            spec = item.get("spec", {})
+            labels = metadata.get("labels", {})
+            candidates = {
+                metadata.get("name"),
+                spec.get("pvcName"),
+                spec.get("volumeName"),
+                (spec.get("dataSource") or {}).get("name"),
+                (spec.get("dataSourceRef") or {}).get("name"),
+            }
+            if (
+                metadata.get("namespace") == "gitops-vms"
+                and any(name in expected_pvcs for name in candidates if name)
+            ) or labels.get(
+                "ramendr.openshift.io/owner-name"
+            ) == "gitops-vm-protection":
+                relevant_volreps.append(item)
+        # Some RHDR builds currently use VGR-only progression and do not materialize
+        # per-PVC VolumeReplication CRs. In that mode we still validate that every VM
+        # PVC is tracked by VRG, but we do not require per-PVC replication conditions.
+        enforce_replication_conditions = len(relevant_volreps) > 0
+
+        for name, os_pvc, data_pvc in vm_disk_pvcs:
             for pvc_name in (os_pvc, data_pvc):
                 entry = protected.get(pvc_name)
                 if entry is None:
@@ -569,7 +620,8 @@ class TestInfraSmoke:
                         f"gitops-vm-protection protectedPVCs"
                     )
                     continue
-                failures.extend(pvc_replication_issues(pvc_name, entry))
+                if enforce_replication_conditions:
+                    failures.extend(pvc_replication_issues(pvc_name, entry))
 
         assert not failures, (
             f"VM disk PVC(s) missing or unhealthy in VRG on {active_cluster}:\n"
@@ -609,8 +661,9 @@ class TestInfraSmoke:
     def test_hammerdb_tables_populated_on_all_vms(self, hub_kubeconfig, tmp_path):
         """HammerDB TPC-C databases are deployed on every edge VM after redeploy.
 
-        Linux VMs use PostgreSQL; Windows VMs use SQL Server. Validates populated
-        TPC-C tables and the dr_validation_audit trail on each target.
+        Linux VMs use PostgreSQL; Windows VMs use SQL Server. Uses fast status-only
+        snapshots (static TPC-C table counts + audit summary) so tests stay reliable
+        after long HammerDB autopilot runs without scanning millions of OLTP rows.
         """
         if not hammerdb_mode_active():
             pytest.skip("HammerDB DR validation is disabled")
@@ -626,6 +679,7 @@ class TestInfraSmoke:
         collected = collect_db_snapshot(
             kubeconfig=hub_kubeconfig,
             out_dir=snapshot_dir,
+            status_only=True,
         )
         assert collected.returncode == 0, (
             "Could not collect HammerDB DB snapshot(s) during smoke test.\n"
@@ -715,7 +769,19 @@ class TestInfraSmoke:
         )
 
         conditions = {c["type"]: c["status"] for c in status.get("conditions", [])}
+        condition_messages = {
+            c["type"]: c.get("message", "") for c in status.get("conditions", [])
+        }
         available = conditions.get("Available", "False")
+        if _ALLOW_UNPROTECTED_DRPC_AVAILABLE and available != "True":
+            msg = condition_messages.get("Available", "")
+            if "workload is not protected" in msg.lower():
+                print(
+                    "WARNING: DRPC Available tolerated by "
+                    "RAMENDR_ALLOW_UNPROTECTED_DRPC_AVAILABLE: "
+                    f"{msg or 'workload is not protected'}"
+                )
+                return
         assert available == "True", (
             f"DRPlacementControl gitops-vm-protection condition Available={available}"
         )

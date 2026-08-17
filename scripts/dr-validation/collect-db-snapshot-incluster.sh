@@ -79,6 +79,10 @@ spec:
         env:
         - name: DR_VALIDATION_SNAPSHOT_STATUS_ONLY
           value: "${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}"
+        - name: DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC
+          value: "${DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC:-}"
+        - name: COLLECT_TMP_DIR
+          value: "/tmp/ramendr-db-collect-${COLLECT_RUN_ID}"
         volumeMounts:
         - name: ssh
           mountPath: /ssh
@@ -90,8 +94,10 @@ spec:
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             LINUX_PASS="\$(tr -d '\n' < /ssh/linux-password 2>/dev/null || true)"
             WINDOWS_PASS="\$(tr -d '\n' < /ssh/windows-password 2>/dev/null || true)"
+            collect_tmp_dir="\${COLLECT_TMP_DIR:-/tmp/ramendr-db-collect}"
+            mkdir -p "\$collect_tmp_dir"
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
-            cp /ssh/hosts.tsv /tmp/hosts.tsv
+            cp /ssh/hosts.tsv "\$collect_tmp_dir/hosts.tsv"
             refresh_linux_audit() {
               local host="\$1" port="\$2" ssh_user="\$3"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
@@ -126,16 +132,25 @@ spec:
                 remote_cmd="\${remote_cmd} --status-only"
               fi
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local refresh_sleep="\${DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC:-}"
+              if [[ -z "\$refresh_sleep" ]]; then
+                if [[ "\${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}" == "1" ]]; then
+                  refresh_sleep=5
+                else
+                  refresh_sleep=15
+                fi
+              fi
               refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
-              sleep 15
-              if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null; then
+              sleep "\$refresh_sleep"
+              if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd"; then
                 return 0
               fi
               if [[ -n "\$LINUX_PASS" ]]; then
                 sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
+                  "\${ssh_user}@\${host}" "\$remote_cmd" && return 0
               fi
+              echo "ERROR: snapshot command failed on \${name} (\${host}:\${port})" >&2
               return 1
             }
             collect_windows() {
@@ -145,26 +160,58 @@ spec:
                 remote_cmd="\${remote_cmd} --status-only"
               fi
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local refresh_sleep="\${DR_VALIDATION_AUDIT_REFRESH_SLEEP_SEC:-}"
+              if [[ -z "\$refresh_sleep" ]]; then
+                if [[ "\${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}" == "1" ]]; then
+                  refresh_sleep=5
+                else
+                  refresh_sleep=15
+                fi
+              fi
               if [[ -z "\$WINDOWS_PASS" ]]; then
                 echo "WARN: skipping \$name (no windows-password)" >&2
                 return 1
               fi
               refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
-              sleep 15
+              sleep "\$refresh_sleep"
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
+                "\${ssh_user}@\${host}" "\$remote_cmd" && return 0
+              echo "ERROR: snapshot command failed on \${name} (\${host}:\${port})" >&2
+              return 1
             }
+            collect_vm() {
+              local name="\$1" host="\$2" port="\$3" platform="\$4" ssh_user="\$5" out_file="\$6"
+              {
+                echo "===SNAPSHOT:\${name}==="
+                if [[ "\$platform" == windows ]]; then
+                  collect_windows "\$name" "\$host" "\$port" "\$ssh_user" || true
+                else
+                  collect_linux "\$name" "\$host" "\$port" "\$ssh_user" || true
+                fi
+              } >"\$out_file" 2>&1
+            }
+            COLLECT_PIDS=()
+            COLLECT_IDX=0
             while IFS=\$'\t' read -r name host port platform ssh_user; do
               [[ -z "\$name" ]] && continue
               port="\${port:-22}"
-              echo "===SNAPSHOT:\${name}==="
-              if [[ "\$platform" == windows ]]; then
-                collect_windows "\$name" "\$host" "\$port" "\$ssh_user" || true
-              else
-                collect_linux "\$name" "\$host" "\$port" "\$ssh_user" || true
-              fi
-            done < /tmp/hosts.tsv
+              printf -v idx_padded "%03d" "\$COLLECT_IDX"
+              out_file="\$collect_tmp_dir/collect-snapshot-\${idx_padded}.out"
+              COLLECT_IDX=\$((COLLECT_IDX + 1))
+              collect_vm "\$name" "\$host" "\$port" "\$platform" "\$ssh_user" "\$out_file" &
+              COLLECT_PIDS+=("\$!")
+            done < "\$collect_tmp_dir/hosts.tsv"
+            for pid in "\${COLLECT_PIDS[@]}"; do
+              wait "\$pid" || true
+            done
+            for out_file in "\$collect_tmp_dir"/collect-snapshot-*.out; do
+              [[ -f "\$out_file" ]] || continue
+              cat "\$out_file"
+              rm -f "\$out_file"
+            done
+            rm -f "\$collect_tmp_dir/hosts.tsv"
+            rmdir "\$collect_tmp_dir" 2>/dev/null || true
       volumes:
       - name: ssh
         secret:
@@ -226,20 +273,40 @@ from pathlib import Path
 raw = Path("$TMP_DIR/collect.raw").read_text()
 out = Path("$OUT_DIR")
 out.mkdir(parents=True, exist_ok=True)
-parts = re.split(r'^===SNAPSHOT:(.+?)===\n', raw, flags=re.M)
+parts = re.split(r'^===SNAPSHOT:(.+?)===\r?\n', raw, flags=re.M)
+
+decoder = json.JSONDecoder()
+
+
+def extract_snapshot_payload(text: str):
+    """Return first decodable JSON object in text, tolerating noisy logs."""
+    start = 0
+    while True:
+        idx = text.find("{", start)
+        if idx < 0:
+            return None
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            start = idx + 1
+            continue
+        if isinstance(obj, dict):
+            return obj
+        start = idx + 1
+
+
 i = 1
 count = 0
 while i + 1 < len(parts):
     name, content = parts[i], parts[i + 1]
-    start = content.find("{")
-    end = content.rfind("}")
-    if start < 0 or end < start:
-        i += 2
-        continue
-    try:
-        payload = json.loads(content[start : end + 1])
-    except json.JSONDecodeError as exc:
-        print(f"WARN: invalid JSON for snapshot {name}: {exc}", file=sys.stderr)
+    payload = extract_snapshot_payload(content)
+    if payload is None:
+        output_length = len(content)
+        print(
+            f"WARN: no JSON snapshot found for {name} "
+            f"(output_length={output_length})",
+            file=sys.stderr,
+        )
         i += 2
         continue
     (out / f"{name}.db-snapshot.json").write_text(json.dumps(payload, indent=2) + "\n")
