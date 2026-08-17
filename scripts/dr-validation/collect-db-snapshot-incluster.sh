@@ -138,14 +138,15 @@ spec:
               fi
               refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
               sleep "\$refresh_sleep"
-              if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null; then
+              if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd"; then
                 return 0
               fi
               if [[ -n "\$LINUX_PASS" ]]; then
                 sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
+                  "\${ssh_user}@\${host}" "\$remote_cmd" && return 0
               fi
+              echo "ERROR: snapshot command failed on \${name} (\${host}:\${port})" >&2
               return 1
             }
             collect_windows() {
@@ -171,7 +172,9 @@ spec:
               sleep "\$refresh_sleep"
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
+                "\${ssh_user}@\${host}" "\$remote_cmd" && return 0
+              echo "ERROR: snapshot command failed on \${name} (\${host}:\${port})" >&2
+              return 1
             }
             collect_vm() {
               local name="\$1" host="\$2" port="\$3" platform="\$4" ssh_user="\$5" out_file="\$6"
@@ -264,20 +267,41 @@ from pathlib import Path
 raw = Path("$TMP_DIR/collect.raw").read_text()
 out = Path("$OUT_DIR")
 out.mkdir(parents=True, exist_ok=True)
-parts = re.split(r'^===SNAPSHOT:(.+?)===\n', raw, flags=re.M)
+parts = re.split(r'^===SNAPSHOT:(.+?)===\r?\n', raw, flags=re.M)
+
+decoder = json.JSONDecoder()
+
+
+def extract_snapshot_payload(text: str):
+    """Return first decodable JSON object in text, tolerating noisy logs."""
+    start = 0
+    while True:
+        idx = text.find("{", start)
+        if idx < 0:
+            return None
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            start = idx + 1
+            continue
+        if isinstance(obj, dict):
+            return obj
+        start = idx + 1
+
+
 i = 1
 count = 0
 while i + 1 < len(parts):
     name, content = parts[i], parts[i + 1]
-    start = content.find("{")
-    end = content.rfind("}")
-    if start < 0 or end < start:
-        i += 2
-        continue
-    try:
-        payload = json.loads(content[start : end + 1])
-    except json.JSONDecodeError as exc:
-        print(f"WARN: invalid JSON for snapshot {name}: {exc}", file=sys.stderr)
+    payload = extract_snapshot_payload(content)
+    if payload is None:
+        preview = content.strip().splitlines()
+        preview = "\n".join(preview[:6]) if preview else "<empty>"
+        print(
+            f"WARN: no JSON snapshot found for {name}. "
+            f"output preview:\n{preview}",
+            file=sys.stderr,
+        )
         i += 2
         continue
     (out / f"{name}.db-snapshot.json").write_text(json.dumps(payload, indent=2) + "\n")
