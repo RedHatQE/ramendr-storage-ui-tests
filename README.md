@@ -45,7 +45,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | QE fork `d6c21253595ea809c779279e20bcc3e990420781` (`ocp-4.22-rhdr-ramen`), or v1.3 `81d9cf7f0d50ff9a056bc31303170c4c46e808f2` when `PATTERN_VARIANT` is set |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | QE fork `d6c21253595ea809c779279e20bcc3e990420781` (`ocp-4.22-rhdr-ramen`), or v1.3 `7451daf8cb3926f4ab7e36a29fd3ee0da91444a1` when `PATTERN_VARIANT` is set |
 | Hub Argo CD Applications | Remote git on GitHub | QE: fork branch `ocp-4.22-rhdr-ramen`. Partner/v1.3: the repo in `UPSTREAM_REPO` (official `v1.3`, or a fork that **commits** the desired `main.variant`). Argo does not see the local checkout patch. |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
@@ -170,8 +170,8 @@ instead of `main.clusterGroupName`. Values live under `variants/<name>/`. See th
 |-------------------|------------------|---------|
 | *(unset)* | QE fork `ocp-4.22-rhdr-ramen` | Mixed 4-VM fleet (Linux + Windows), HammerDB, ODF |
 | `odf` | official `v1.3` | Baseline full ODF Regional DR + Virtualization |
-| `drpartner-s4` | official `v1.3` | Dell: partner CSI + hub S4 object storage (S3). Submariner disabled. No DRPC/VMs |
-| `drpartner-minimal` | official `v1.3` | Infinidat: partner CSI without S4, Submariner, or DRClusters |
+| `drpartner-s4` | official `v1.3` | Dell: partner CSI + hub S4 object storage (S3). Submariner off. No VMs. DRPolicy `2m-drpolicy` (no flattening; not `2m-vm` / `2m-novm`) |
+| `drpartner-minimal` | official `v1.3` | Infinidat: partner CSI without S4, Submariner, VMs, or DRClusters |
 
 ```bash
 # Stable GitOps: fork v1.3, commit main.variant, then:
@@ -185,7 +185,7 @@ When `PATTERN_VARIANT` is set, `redeploy.sh`:
 
 1. Defaults `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH` to
    [validatedpatterns/ramendr-starter-kit](https://github.com/validatedpatterns/ramendr-starter-kit)
-   at pin `81d9cf7f0d50ff9a056bc31303170c4c46e808f2` (branch `v1.3`).
+   at pin `7451daf8cb3926f4ab7e36a29fd3ee0da91444a1` (branch `v1.3`).
 2. Writes `main.variant` in the local checkout `values-global.yaml` and removes legacy
    `main.clusterGroupName` if present.
 3. Sets `byoc: true` in `overrides/values-cluster-names.yaml` (this harness always pre-provisions spokes).
@@ -193,15 +193,17 @@ When `PATTERN_VARIANT` is set, `redeploy.sh`:
    (override with the usual `REQUIRE_WINDOWS_VMS` / `SKIP_*` variables).
 
 **GitOps:** hub Argo CD reads `values-global.yaml` from the **git remote**, not the local
-`PATTERN_VARIANT` patch. Official `v1.3` currently commits `main.variant: drpartner-s4`.
-Treat a matching remote commit (fork + `UPSTREAM_REPO`) as the supported partner flow;
-a local-only patch is install-time and will drift on the next Argo sync.
+`PATTERN_VARIANT` patch. Official `v1.3` default is `main.variant: odf` (PR #29). Partner
+deploys still need a fork that **commits** `drpartner-s4` or `drpartner-minimal`, then
+`UPSTREAM_REPO` pointed at that fork. A local-only patch will drift on the next Argo sync.
 
 ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is
 independent of `main.variant`.
 
 Smoke tests skip VM / ODF / MirrorPeer assertions on partner variants and instead check
-`vp-s4-storage` (Dell) or its absence (Infinidat). Export the same `PATTERN_VARIANT` when you run pytest.
+`vp-s4-storage` plus `2m-drpolicy` (Dell) or their absence (Infinidat). Export the same
+`PATTERN_VARIANT` when you run pytest. Partner CSI itself is not something the pattern
+or these tests can verify.
 
 ## Usage
 

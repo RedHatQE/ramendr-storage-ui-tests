@@ -6,7 +6,7 @@ This document summarizes decisions and context from prior work so another agent 
 
 - **Consumer / test harness** for upstream RamenDR starter-kit:
   - Default: [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit), pinned to commit **`d6c21253595ea809c779279e20bcc3e990420781`** (fork branch **`ocp-4.22-rhdr-ramen`**). Hub Argo CD also tracks **`ocp-4.22-rhdr-ramen`** on the same fork.
-  - v1.3: set `PATTERN_VARIANT` to `odf`, `drpartner-s4`, or `drpartner-minimal` to pin [`validatedpatterns/ramendr-starter-kit`](https://github.com/validatedpatterns/ramendr-starter-kit) **`v1.3`** (`81d9cf7f0d50ff9a056bc31303170c4c46e808f2`) and write `main.variant` (replaces `main.clusterGroupName`). ACM spoke label `clusterGroup=resilient` is unchanged.
+  - v1.3: set `PATTERN_VARIANT` to `odf`, `drpartner-s4`, or `drpartner-minimal` to pin [`validatedpatterns/ramendr-starter-kit`](https://github.com/validatedpatterns/ramendr-starter-kit) **`v1.3`** (`7451daf8cb3926f4ab7e36a29fd3ee0da91444a1`) and write `main.variant` (replaces `main.clusterGroupName`). ACM spoke label `clusterGroup=resilient` is unchanged.
 - **Does not** long-term fork upstream. Environment customizations (Windows edge VMs, BYOC, ODF pins, cost profiles) live in the **fork** on GitHub; this repo only patches upstream `pattern.sh` locally (non-TTY podman).
 - **Future:** Playwright + Python UI tests (partially implemented). **Today:** deployment scripts, install-config examples, DR validation.
 

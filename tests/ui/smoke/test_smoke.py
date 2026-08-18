@@ -770,21 +770,24 @@ class TestInfraSmoke:
         run_oc(["get", "namespace", "vp-s4-storage"], hub_kubeconfig)
 
     @_skip_without_s4
-    def test_drpartner_s4_drpolicy_2m_novm(self, hub_kubeconfig):
-        """drpartner-s4 creates infrastructure DRPolicy 2m-novm (no 2m-vm / DRPC)."""
+    def test_drpartner_s4_drpolicy(self, hub_kubeconfig):
+        """drpartner-s4 creates 2m-drpolicy (no flattening; no 2m-vm / 2m-novm / VMs)."""
         raw = run_oc(["get", "drpolicies", "--output=json"], hub_kubeconfig)
         policies = {item["metadata"]["name"]: item for item in json.loads(raw)["items"]}
-        assert "2m-novm" in policies, f"DRPolicy 2m-novm not found: {sorted(policies)}"
-        assert "2m-vm" not in policies, (
-            "drpartner-s4 must not deploy 2m-vm (VM DRPC is disabled); "
+        assert "2m-drpolicy" in policies, (
+            f"DRPolicy 2m-drpolicy not found: {sorted(policies)}"
+        )
+        unexpected = {"2m-vm", "2m-novm"} & policies.keys()
+        assert not unexpected, (
+            "drpartner-s4 must not deploy ODF vm/novm policy names; "
             f"found: {sorted(policies)}"
         )
         conditions = {
             c["type"]: c["status"]
-            for c in policies["2m-novm"].get("status", {}).get("conditions", [])
+            for c in policies["2m-drpolicy"].get("status", {}).get("conditions", [])
         }
         validated = conditions.get("Validated", "False")
-        assert validated == "True", f"2m-novm Validated={validated}"
+        assert validated == "True", f"2m-drpolicy Validated={validated}"
 
     @_skip_without_minimal
     def test_drpartner_minimal_has_no_s4_storage(self, hub_kubeconfig):
@@ -793,6 +796,16 @@ class TestInfraSmoke:
         names = {item["metadata"]["name"] for item in json.loads(raw)["items"]}
         assert "vp-s4-storage" not in names, (
             "drpartner-minimal must not deploy namespace vp-s4-storage"
+        )
+
+    @_skip_without_minimal
+    def test_drpartner_minimal_has_no_drpolicy(self, hub_kubeconfig):
+        """drpartner-minimal leaves Ramen infrastructure off (no DRPolicy / DRClusters)."""
+        raw = run_oc(["get", "drpolicies", "--output=json"], hub_kubeconfig)
+        names = {item["metadata"]["name"] for item in json.loads(raw)["items"]}
+        unexpected = {"2m-drpolicy", "2m-vm", "2m-novm"} & names
+        assert not unexpected, (
+            f"drpartner-minimal must not deploy DRPolicies; found: {sorted(names)}"
         )
 
     # ------------------------------------------------------------------

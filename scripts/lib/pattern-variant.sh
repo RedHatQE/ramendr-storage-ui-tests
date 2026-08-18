@@ -8,9 +8,9 @@
 #
 # shellcheck shell=bash
 
-# Official v1.3 pin (PR #28: disable Submariner on drpartner-s4 + variant docs).
+# Official v1.3 pin (PR #29: default main.variant is odf).
 : "${V13_UPSTREAM_REPO:=https://github.com/validatedpatterns/ramendr-starter-kit}"
-: "${V13_UPSTREAM_REF:=81d9cf7f0d50ff9a056bc31303170c4c46e808f2}"
+: "${V13_UPSTREAM_REF:=7451daf8cb3926f4ab7e36a29fd3ee0da91444a1}"
 : "${V13_UPSTREAM_BRANCH:=v1.3}"
 
 # Known install variants from ramendr-starter-kit pattern-metadata.yaml.

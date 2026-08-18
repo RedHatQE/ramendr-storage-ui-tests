@@ -26,7 +26,7 @@ The entrypoint is `scripts/redeploy.sh`.
   `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`.
   Default is `d6c21253595ea809c779279e20bcc3e990420781` from fork branch `ocp-4.22-rhdr-ramen`.
   When `PATTERN_VARIANT` is set (`odf` / `drpartner-s4` / `drpartner-minimal`), default is
-  official `validatedpatterns/ramendr-starter-kit` `v1.3` at `81d9cf7f0d50ff9a056bc31303170c4c46e808f2`.
+  official `validatedpatterns/ramendr-starter-kit` `v1.3` at `7451daf8cb3926f4ab7e36a29fd3ee0da91444a1`.
   Override with `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
 - **Hub Argo CD** (ongoing GitOps sync): reads values from the git remote (`ocp-4.22-rhdr-ramen`
   or `v1.3` unless Applications pin a specific revision). Local `main.variant` patches are
@@ -78,8 +78,8 @@ Currently implemented in `tests/ui/`:
 - `pyproject.toml` + `pytest.ini` — test runner configuration with Playwright
 
 Smoke tests expect the full mixed fleet (4 edge VMs) and validate Windows OS disk size (45 Gi)
-when `PATTERN_VARIANT` is unset. Partner variants skip those assertions and check S4 (Dell) or
-its absence (Infinidat).
+when `PATTERN_VARIANT` is unset. Partner variants skip those assertions and check S4 (Dell)
+`2m-drpolicy` or Infinidat's lack of S4/DRPolicy.
 
 ## Future
 
