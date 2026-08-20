@@ -315,26 +315,96 @@ ensure_podman_ready() {
 }
 
 hub_pattern_app_health() {
-  oc get application.argoproj.io ramendr-starter-kit-hub \
+  local app ns
+  app="$(hub_pattern_app_name)"
+  ns="$(hub_argocd_namespace)"
+  oc get application.argoproj.io "$app" \
     -n vp-gitops \
     -o jsonpath='{.status.health.status}' 2>/dev/null \
-    || oc get application.argoproj.io ramendr-starter-kit-hub \
-      -n ramendr-starter-kit-hub \
+    || oc get application.argoproj.io "$app" \
+      -n "$ns" \
       -o jsonpath='{.status.health.status}' 2>/dev/null || true
 }
 
 pattern_install_recoverable() {
-  local hub_health rdr_health joined acm_health
+  local hub_health rdr_health joined acm_health ns
+  ns="$(hub_argocd_namespace)"
   hub_health="$(hub_pattern_app_health)"
   rdr_health=$(oc get application.argoproj.io regional-dr \
-    -n ramendr-starter-kit-hub \
+    -n "$ns" \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
   acm_health=$(oc get application.argoproj.io acm \
-    -n ramendr-starter-kit-hub \
+    -n "$ns" \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
   joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
   [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]] \
     || [[ "$acm_health" == "Healthy" ]] || [[ "${joined:-0}" -ge 3 ]]
+}
+
+# Helm --set main.clusterGroupName=null does not drop the field on an existing
+# Pattern CR, so a QE hub clustergroup Application keeps fighting the variant.
+clear_legacy_cluster_group_name() {
+  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
+  if ! oc get pattern ramendr-starter-kit -n patterns-operator \
+    -o jsonpath='{.spec.clusterGroupName}' 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  log "Clearing leftover Pattern spec.clusterGroupName so only variant ${PATTERN_VARIANT} is reconciled..."
+  oc patch pattern ramendr-starter-kit -n patterns-operator --type=json \
+    -p '[{"op":"remove","path":"/spec/clusterGroupName"}]' \
+    || warn "Could not remove spec.clusterGroupName from Pattern ramendr-starter-kit."
+}
+
+# Remove Argo finalizers then delete so managed cluster resources are not pruned.
+_orphan_delete_application() {
+  local ns="$1" name="$2"
+  oc patch "applications.argoproj.io/${name}" -n "$ns" --type merge \
+    -p '{"metadata":{"finalizers":null}}' &>/dev/null || true
+  oc delete "applications.argoproj.io/${name}" -n "$ns" --wait=false &>/dev/null || true
+}
+
+# A previous clustergroup Application (QE hub, or another v1.3 variant) left in
+# vp-gitops keeps both parents Degraded (shared ClusterRoles) and blocks later
+# sync waves (opp-policy, regional-dr).
+retire_previous_clustergroup_apps() {
+  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
+  local keep child app
+  keep="$(hub_pattern_app_name)"
+  for app in $(oc get applications.argoproj.io -n vp-gitops \
+    -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    case "$app" in
+      ramendr-starter-kit-*)
+        [[ "$app" == "$keep" ]] && continue
+        log "Retiring leftover clustergroup ${app} (orphan delete, no prune)..."
+        for child in $(oc get applications.argoproj.io -n "$app" \
+          -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+          _orphan_delete_application "$app" "$child"
+        done
+        _orphan_delete_application vp-gitops "$app"
+        ;;
+    esac
+  done
+}
+
+# Leftover CRs from a previous BOM that GitOps may not prune (immutable DRCluster
+# s3ProfileName, partner S4 namespace). Required for variant smoke assertions.
+cleanup_variant_leftovers() {
+  case "${PATTERN_VARIANT:-}" in
+    drpartner-minimal)
+      log "Removing leftover DR / S4 objects (drpartner-minimal has none)..."
+      oc delete drplacementcontrol --all -A --wait=false &>/dev/null || true
+      oc delete drpolicy --all --wait=false &>/dev/null || true
+      oc delete drcluster --all --wait=false &>/dev/null || true
+      oc delete namespace vp-s4-storage --wait=false &>/dev/null || true
+      ;;
+    odf)
+      log "Removing leftover Dell DRPolicy 2m-drpolicy (odf uses 2m-vm / 2m-novm)..."
+      oc delete drpolicy 2m-drpolicy --wait=false &>/dev/null || true
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 prepare_upstream() {
@@ -383,6 +453,10 @@ from pathlib import Path
 path = Path("pattern.sh")
 text = path.read_text()
 
+# 0) macOS /usr/bin/bash is 3.2 (set -u + empty arrays fail). Prefer GNU bash.
+if text.startswith("#!/bin/bash"):
+    text = "#!/usr/bin/env bash" + text[len("#!/bin/bash") :]
+
 # 1) Non-TTY: replace stock podman invocation if not already patched.
 if "PODMAN_STDIO_ARGS" not in text:
     needle = "podman run -it --rm --pull=newer \\"
@@ -419,6 +493,19 @@ fi
                 run_needle,
                 platform_block + 'podman run "${PODMAN_PLATFORM_ARGS[@]}" --rm --pull=newer \\',
             )
+
+# 3) bash 3.2 `set -u` treats empty "${arr[@]}" as unbound. Guard expansions.
+for name in (
+    "PKI_HOST_MOUNT_ARGS",
+    "PODMAN_PLATFORM_ARGS",
+    "PODMAN_ARGS",
+    "EXTRA_ARGS_ARRAY",
+    "PODMAN_STDIO_ARGS",
+):
+    text = text.replace(
+        f'"${{{name}[@]}}"',
+        '${' + name + '[@]+"${' + name + '[@]}"}',
+    )
 
 path.write_text(text)
 PY
@@ -718,21 +805,35 @@ deploy_pattern() {
 
   log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."
   local pattern_exit=0
+  # pattern-install uses TARGET_VARIANT as the DNS-length clusterGroup name.
+  # Official drpartner-minimal exceeds that limit; the QE fork sets
+  # clusterGroup.name=minimal in variants/drpartner-minimal values instead.
+  local target_variant="${PATTERN_VARIANT:-}"
+  if [[ "$target_variant" == "drpartner-minimal" ]]; then
+    log "Omitting TARGET_VARIANT for drpartner-minimal (DNS length); using clusterGroup.name from variant values."
+    target_variant=""
+  fi
   ( cd "$UPSTREAM_DIR" && \
       KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig" \
       VALUES_SECRET="$BYOC_VALUES_SECRET" \
       TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" \
+      TARGET_BRANCH="${UPSTREAM_BRANCH}" \
+      TARGET_VARIANT="${target_variant}" \
       ./pattern.sh make install-byoc 2>&1 ) \
     || pattern_exit=$?
 
+  clear_legacy_cluster_group_name
+  retire_previous_clustergroup_apps
+  cleanup_variant_leftovers
+
   if [[ $pattern_exit -ne 0 ]]; then
-    # pattern.sh often times out because regional-dr and/or ramendr-starter-kit-hub
-    # are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
+    # pattern.sh often times out because regional-dr and/or the parent clustergroup
+    # Application are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
     warn "pattern.sh make install-byoc returned non-zero — checking whether this is recoverable drift..."
     local hub_health rdr_health
     hub_health="$(hub_pattern_app_health)"
     rdr_health=$(oc get application.argoproj.io regional-dr \
-      -n ramendr-starter-kit-hub \
+      -n "$(hub_argocd_namespace)" \
       -o jsonpath='{.status.health.status}' 2>/dev/null || true)
     if pattern_install_recoverable; then
       warn "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
@@ -761,10 +862,11 @@ wait_for_convergence() {
   log "Waiting for environment convergence (ArgoCD Applications)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
-  local tries=0 converged=0
+  local tries=0 converged=0 ns
+  ns="$(hub_argocd_namespace)"
   while [[ $tries -lt 120 ]]; do
     local unhealthy
-    unhealthy=$(oc get applications.argoproj.io -n ramendr-starter-kit-hub \
+    unhealthy=$(oc get applications.argoproj.io -n "$ns" \
       -o custom-columns=':.status.sync.status,:.status.health.status' --no-headers 2>/dev/null \
       | grep -Evc 'Synced.*Healthy|Synced.*Progressing' || true)
 
@@ -780,7 +882,7 @@ wait_for_convergence() {
 
     if [[ $((tries % 10)) -eq 0 ]]; then
       for app in regional-dr opp-policy; do
-        oc patch applications.argoproj.io "$app" -n ramendr-starter-kit-hub --type merge \
+        oc patch applications.argoproj.io "$app" -n "$ns" --type merge \
           -p '{"operation":{"initiatedBy":{"automated":true},"sync":{}}}' 2>/dev/null || true
       done
       if ! resilient_placement_satisfied 2; then
@@ -942,7 +1044,7 @@ show_status() {
   oc get managedclusters 2>&1 || echo "Cannot reach hub cluster"
   echo ""
   echo "--- ArgoCD Applications ---"
-  oc get applications.argoproj.io -n ramendr-starter-kit-hub \
+  oc get applications.argoproj.io -n "$(hub_argocd_namespace)" \
     -o custom-columns='NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status' 2>&1
   echo ""
   echo "--- DR Status ---"

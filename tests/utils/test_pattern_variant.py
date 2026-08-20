@@ -10,6 +10,7 @@ def test_qe_mixed_fleet_when_variant_unset(monkeypatch):
     assert pv.has_edge_vms()
     assert pv.has_vm_drpc()
     assert not pv.has_s4_storage()
+    assert pv.hub_argocd_namespace() == "ramendr-starter-kit-hub"
 
 
 def test_odf_variant_keeps_odf_without_qe_windows_fleet(monkeypatch):
@@ -21,6 +22,7 @@ def test_odf_variant_keeps_odf_without_qe_windows_fleet(monkeypatch):
     assert pv.has_edge_vms()
     assert pv.has_vm_drpc()
     assert not pv.has_s4_storage()
+    assert pv.hub_argocd_namespace() == "ramendr-starter-kit-odf"
 
 
 def test_drpartner_s4_has_s3_without_odf_or_vms(monkeypatch):
@@ -31,6 +33,7 @@ def test_drpartner_s4_has_s3_without_odf_or_vms(monkeypatch):
     assert not pv.has_edge_vms()
     assert not pv.has_vm_drpc()
     assert not pv.is_minimal_variant()
+    assert pv.hub_argocd_namespace() == "ramendr-starter-kit-drpartner-s4"
 
 
 def test_drpartner_minimal_has_neither_s4_nor_odf(monkeypatch):
@@ -41,3 +44,4 @@ def test_drpartner_minimal_has_neither_s4_nor_odf(monkeypatch):
     assert not pv.has_odf_mirrorpeer()
     assert not pv.has_edge_vms()
     assert not pv.has_vm_drpc()
+    assert pv.hub_argocd_namespace() == "ramendr-starter-kit-minimal"

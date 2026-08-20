@@ -104,19 +104,31 @@ def wait_for_drpc_protected(
     )
 
 
-def vm_os_and_data_pvc_names(vm: dict) -> tuple[str, str]:
-    """Return (os_pvc_name, data_pvc_name) for a gitops-vms VirtualMachine."""
-    name = vm["metadata"]["name"]
-    dvts = vm.get("spec", {}).get("dataVolumeTemplates", [])
-    os_dvts = [
-        d for d in dvts if not d.get("metadata", {}).get("name", "").endswith("-data")
-    ]
-    if len(os_dvts) != 1:
-        raise ValueError(
-            f"{name}: expected exactly one OS DataVolumeTemplate, got {len(os_dvts)}"
-        )
-    os_pvc = os_dvts[0]["metadata"]["name"]
-    return os_pvc, f"{name}-data"
+def vm_pvc_names(vm: dict) -> list[str]:
+    """Return PVC/DataVolume disk names actually attached to a VirtualMachine.
+
+    Discovers disks from ``dataVolumeTemplates`` and pod-template volumes
+    (``persistentVolumeClaim`` / ``dataVolume``). Does not assume a
+    ``{vm}-data`` disk exists. Cloud-init and container disks are ignored.
+    """
+    name = (vm.get("metadata") or {}).get("name", "<unknown>")
+    spec = vm.get("spec") or {}
+    names: set[str] = set()
+    for dvt in spec.get("dataVolumeTemplates") or []:
+        dvt_name = (dvt.get("metadata") or {}).get("name")
+        if dvt_name:
+            names.add(str(dvt_name))
+    template_spec = (spec.get("template") or {}).get("spec") or {}
+    for vol in template_spec.get("volumes") or []:
+        claim = (vol.get("persistentVolumeClaim") or {}).get("claimName")
+        if claim:
+            names.add(str(claim))
+        dv_name = (vol.get("dataVolume") or {}).get("name")
+        if dv_name:
+            names.add(str(dv_name))
+    if not names:
+        raise ValueError(f"{name}: no PVC or DataVolume disks found on VirtualMachine")
+    return sorted(names)
 
 
 def protected_pvc_index(vrg: dict) -> dict[str, dict[str, Any]]:

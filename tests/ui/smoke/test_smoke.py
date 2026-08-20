@@ -34,7 +34,9 @@ from tests.utils.pattern_variant import (
     has_odf_mirrorpeer,
     has_s4_storage,
     has_vm_drpc,
+    hub_argocd_namespace,
     is_minimal_variant,
+    is_partner_variant,
     is_qe_mixed_fleet,
 )
 from tests.utils.vrg import (
@@ -44,15 +46,20 @@ from tests.utils.vrg import (
     protected_pvc_index,
     pvc_replication_issues,
     spoke_kubeconfig,
-    vm_os_and_data_pvc_names,
+    vm_pvc_names,
     wait_for_drpc_protected,
 )
 
 # ArgoCD apps that are expected to be OutOfSync due to known drift.
 # These are still required to be Healthy; only the sync status is tolerated.
-_KNOWN_OUTOFSYNC_APPS = {"regional-dr"}
+# opp-policy: leftover QE ODF SSL extractor objects when overlaying a partner BOM;
+# regional-dr: PostSync disables autosync (disableExternalSecrets drift).
+# acm: shared cluster-scoped ACM objects when overlaying partner variants.
+_KNOWN_OUTOFSYNC_APPS = {"regional-dr", "opp-policy"}
+if is_partner_variant():
+    _KNOWN_OUTOFSYNC_APPS = _KNOWN_OUTOFSYNC_APPS | {"acm"}
 
-HUB_NAMESPACE = "ramendr-starter-kit-hub"
+HUB_NAMESPACE = hub_argocd_namespace()
 
 # Minimum VMs in gitops-vms after a full deployment (2 Linux + 1 Windows 2022 + 1 Windows 2025).
 # Override with RAMENDR_MIN_VM_COUNT or RAMENDR_EXPECTED_VMS.
@@ -566,12 +573,12 @@ class TestInfraSmoke:
     def test_vm_disks_dr_protected_in_vrg(
         self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
     ):
-        """OS and data PVCs for each gitops-vms VM are VRG-protected with healthy replication.
+        """Every PVC/DataVolume disk on each gitops-vms VM is VRG-protected.
 
-        Dual-disk HammerDB splits TPC-C (data disk) and dr_validation_audit (OS disk).
-        Both PVCs must be listed in the gitops-vm-protection VolumeReplicationGroup and
-        report DataReady plus active Ceph mirroring before DR — partial protection would
-        leave only one side of the database coherent after failover.
+        Discovers disks from the live VM spec (official odf: OS only; QE mixed
+        fleet: OS plus data). Dual-disk layout itself is asserted separately by
+        test_vms_have_two_data_disks on the QE fleet. Partial VRG coverage would
+        leave unprotected disks incoherent after failover.
         """
         drpc = load_drpc(hub_kubeconfig)
         active_cluster = active_cluster_from_drpc(drpc)
@@ -602,12 +609,12 @@ class TestInfraSmoke:
         for vm in vms:
             name = vm["metadata"]["name"]
             try:
-                os_pvc, data_pvc = vm_os_and_data_pvc_names(vm)
+                pvc_names = vm_pvc_names(vm)
             except ValueError as exc:
                 failures.append(str(exc))
                 continue
 
-            for pvc_name in (os_pvc, data_pvc):
+            for pvc_name in pvc_names:
                 entry = protected.get(pvc_name)
                 if entry is None:
                     failures.append(
@@ -803,8 +810,7 @@ class TestInfraSmoke:
         """drpartner-minimal leaves Ramen infrastructure off (no DRPolicy / DRClusters)."""
         raw = run_oc(["get", "drpolicies", "--output=json"], hub_kubeconfig)
         names = {item["metadata"]["name"] for item in json.loads(raw)["items"]}
-        unexpected = {"2m-drpolicy", "2m-vm", "2m-novm"} & names
-        assert not unexpected, (
+        assert not names, (
             f"drpartner-minimal must not deploy DRPolicies; found: {sorted(names)}"
         )
 

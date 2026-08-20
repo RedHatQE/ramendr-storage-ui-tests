@@ -56,6 +56,22 @@ pattern_uses_variants_dir() {
   [[ -n "$dir" && -d "$dir/variants" ]]
 }
 
+# Child Argo Applications live in this namespace (pattern name + clusterGroup).
+# QE fork sets clusterGroup.name=minimal so pattern-install DNS length passes;
+# child Applications land in ramendr-starter-kit-minimal.
+hub_argocd_namespace() {
+  case "${PATTERN_VARIANT:-}" in
+    drpartner-minimal) echo "ramendr-starter-kit-minimal" ;;
+    "") echo "ramendr-starter-kit-hub" ;;
+    *) echo "ramendr-starter-kit-${PATTERN_VARIANT}" ;;
+  esac
+}
+
+# Parent clustergroup Application name in vp-gitops (same as hub_argocd_namespace).
+hub_pattern_app_name() {
+  hub_argocd_namespace
+}
+
 # Partner / official v1.3 BOMs do not include the QE mixed Windows fleet.
 # Only set defaults when the caller has not already exported the variable.
 configure_variant_defaults() {
@@ -83,6 +99,8 @@ configure_variant_defaults() {
       : "${SKIP_DR_VALIDATION:=1}"
       ;;
   esac
+  export REQUIRE_WINDOWS_VMS SKIP_WINDOWS_VM_STABILIZE SKIP_DR_VALIDATION
+  export SKIP_ODF_GOLDEN_IMAGE_FIX SPOKE_RESILIENT_READY_NAMESPACE
 }
 
 validate_pattern_variant() {

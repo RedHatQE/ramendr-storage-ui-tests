@@ -63,7 +63,7 @@ The deployment script expects tools similar to the original flow:
 - `aws`
 - `podman` — must be **running** when the pattern deploy starts (`pattern.sh` uses a utility container). On macOS, start the VM before a long redeploy or rely on `redeploy.sh` to auto-start it: `podman machine start`
 - `git`
-- **GNU bash 4+** — `redeploy.sh`, `stabilize-windows-vms.sh`, and `ensure-windows-openssh.sh` use `mapfile` (macOS system bash 3.2 is too old). On macOS: `brew install bash` (those scripts re-exec via `/opt/homebrew/bin/bash` automatically when present)
+- **GNU bash 4+** — `redeploy.sh`, `stabilize-windows-vms.sh`, and `ensure-windows-openssh.sh` use `mapfile` (the Bash 3.2 shipped with macOS is too old). On macOS: `brew install bash` (those scripts re-exec via `/opt/homebrew/bin/bash` automatically when present)
 - `python3` with **PyYAML** — merges spoke kubeconfig paths into `.work/values-secret.yaml` before `install-byoc` (`redeploy.sh` auto-installs via `pip install --user PyYAML` when missing; also listed in `requirements.txt`)
 - `virtctl` — Windows edge VM SSH verification during redeploy (`brew install virtctl` on macOS when `REQUIRE_WINDOWS_VMS=1`)
 - `jq` — used by the golden-image Ansible playbook and several redeploy helpers

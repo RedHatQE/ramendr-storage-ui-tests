@@ -50,3 +50,13 @@ def has_edge_vms() -> bool:
 def has_vm_drpc() -> bool:
     """2m-vm DRPolicy + gitops-vm-protection DRPC exist on QE fork and odf."""
     return PATTERN_VARIANT not in PARTNER_VARIANTS
+
+
+def hub_argocd_namespace() -> str:
+    """Namespace that holds child Argo Applications for the installed BOM."""
+    # QE fork shortens clusterGroup.name to "minimal" for DNS limits.
+    if PATTERN_VARIANT == "drpartner-minimal":
+        return "ramendr-starter-kit-minimal"
+    if PATTERN_VARIANT:
+        return f"ramendr-starter-kit-{PATTERN_VARIANT}"
+    return "ramendr-starter-kit-hub"
