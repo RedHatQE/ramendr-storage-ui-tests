@@ -386,15 +386,88 @@ retire_previous_clustergroup_apps() {
   done
 }
 
+# QE fork + v1.3 odf / Dell BOM names. Never delete unlisted DR objects.
+_STARTER_KIT_DRPOLICY_NAMES="2m-vm 2m-novm 2m-drpolicy"
+_STARTER_KIT_DRPC_NAMES="gitops-vm-protection"
+
+_name_in_list() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+_argo_instance_of() {
+  local kind="$1" name="$2" ns="${3:-}"
+  if [[ -n "$ns" ]]; then
+    oc get "$kind" "$name" -n "$ns" \
+      -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/instance}' 2>/dev/null || true
+  else
+    oc get "$kind" "$name" \
+      -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/instance}' 2>/dev/null || true
+  fi
+}
+
+_is_starter_kit_argo_instance() {
+  case "${1:-}" in
+    ramendr-starter-kit-*|regional-dr) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Cluster-scoped CRs: delete only allowlisted names or starter-kit Argo instance.
+_delete_starter_kit_cluster_crs() {
+  local kind="$1"
+  shift
+  local name instance
+  for name in $(oc get "$kind" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    if _name_in_list "$name" "$@"; then
+      log " Deleting leftover ${kind}/${name}..."
+      oc delete "$kind" "$name" --wait=false &>/dev/null || true
+      continue
+    fi
+    instance="$(_argo_instance_of "$kind" "$name")"
+    if _is_starter_kit_argo_instance "$instance"; then
+      log " Deleting leftover ${kind}/${name} (Argo instance=${instance})..."
+      oc delete "$kind" "$name" --wait=false &>/dev/null || true
+    fi
+  done
+}
+
+_delete_starter_kit_drpcs() {
+  local ns name instance
+  while read -r ns name; do
+    [[ -z "${name:-}" ]] && continue
+    # shellcheck disable=SC2086
+    if _name_in_list "$name" ${_STARTER_KIT_DRPC_NAMES}; then
+      log " Deleting leftover DRPlacementControl ${ns}/${name}..."
+      oc delete drplacementcontrol "$name" -n "$ns" --wait=false &>/dev/null || true
+      continue
+    fi
+    instance="$(_argo_instance_of drplacementcontrol "$name" "$ns")"
+    if _is_starter_kit_argo_instance "$instance"; then
+      log " Deleting leftover DRPlacementControl ${ns}/${name} (Argo instance=${instance})..."
+      oc delete drplacementcontrol "$name" -n "$ns" --wait=false &>/dev/null || true
+    fi
+  done < <(oc get drplacementcontrol -A \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
+    2>/dev/null)
+}
+
 # Leftover CRs from a previous BOM that GitOps may not prune (immutable DRCluster
 # s3ProfileName, partner S4 namespace). Required for variant smoke assertions.
+# Only starter-kit allowlisted / Argo-owned objects; never oc delete --all.
 cleanup_variant_leftovers() {
   case "${PATTERN_VARIANT:-}" in
     drpartner-minimal)
-      log "Removing leftover DR / S4 objects (drpartner-minimal has none)..."
-      oc delete drplacementcontrol --all -A --wait=false &>/dev/null || true
-      oc delete drpolicy --all --wait=false &>/dev/null || true
-      oc delete drcluster --all --wait=false &>/dev/null || true
+      log "Removing leftover starter-kit DR / S4 objects (drpartner-minimal has none)..."
+      _delete_starter_kit_drpcs
+      # shellcheck disable=SC2086
+      _delete_starter_kit_cluster_crs drpolicy ${_STARTER_KIT_DRPOLICY_NAMES}
+      # shellcheck disable=SC2086
+      _delete_starter_kit_cluster_crs drcluster ${SPOKE_CLUSTERS:-ocp-primary ocp-secondary}
       oc delete namespace vp-s4-storage --wait=false &>/dev/null || true
       ;;
     odf)
@@ -824,7 +897,6 @@ deploy_pattern() {
 
   clear_legacy_cluster_group_name
   retire_previous_clustergroup_apps
-  cleanup_variant_leftovers
 
   if [[ $pattern_exit -ne 0 ]]; then
     # pattern.sh often times out because regional-dr and/or the parent clustergroup
@@ -844,6 +916,8 @@ deploy_pattern() {
       exit 1
     fi
   fi
+
+  cleanup_variant_leftovers
 
   if ! wait_for_byoc_spoke_import; then
     warn "BYOC spoke import did not complete within timeout; resilient GitOps and DR bootstrap may fail."
