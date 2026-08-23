@@ -337,8 +337,9 @@ pattern_install_recoverable() {
     -n "$ns" \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
   joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
+  [[ "${joined:-0}" -ge 3 ]] || return 1
   [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]] \
-    || [[ "$acm_health" == "Healthy" ]] || [[ "${joined:-0}" -ge 3 ]]
+    || [[ "$acm_health" == "Healthy" ]]
 }
 
 # Helm --set main.clusterGroupName=null does not drop the field on an existing

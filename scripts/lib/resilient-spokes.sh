@@ -373,12 +373,42 @@ recover_all_spoke_resilient_apps() {
 spoke_resilient_workload_ready() {
   local kc="$1"
   KUBECONFIG="$kc" oc get namespace "$SPOKE_RESILIENT_READY_NAMESPACE" &>/dev/null || return 1
-  if [[ "$SPOKE_RESILIENT_READY_NAMESPACE" != "openshift-storage" ]]; then
-    return 0
+  if [[ "$SPOKE_RESILIENT_READY_NAMESPACE" == "openshift-storage" ]]; then
+    [[ "$(KUBECONFIG="$kc" oc get storagecluster ocs-storagecluster \
+      -n openshift-storage \
+      -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true)" == "True" ]]
+    return
   fi
-  [[ "$(KUBECONFIG="$kc" oc get storagecluster ocs-storagecluster \
-    -n openshift-storage \
+  # Partner CSI BOMs: pattern-managed spoke storage/virt workload is CNV HCO.
+  [[ "$(KUBECONFIG="$kc" oc get hyperconverged kubevirt-hyperconverged \
+    -n "$SPOKE_RESILIENT_READY_NAMESPACE" \
     -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true)" == "True" ]]
+}
+
+# Documented non-blocking Degraded: leftover extra OperatorGroup in
+# openshift-operators leaves rhdr-cluster-operator ResolutionFailed.
+# Failed CSI / DR / ODF resources still block.
+_spoke_gitops_degraded_is_nonblocking() {
+  local kc="$1"
+  local og_count health_msg degraded leftover_re blocking_re
+  og_count=$(KUBECONFIG="$kc" oc get operatorgroup -n openshift-operators \
+    --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  [[ "${og_count:-0}" -gt 1 ]] || return 1
+
+  health_msg=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
+    -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.health.message}' 2>/dev/null || true)
+  degraded=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
+    -n "$SPOKE_GITOPS_NS" \
+    -o jsonpath='{range .status.resources[?(@.health.status=="Degraded")]}{.kind}/{.name}:{.health.message} {end}' \
+    2>/dev/null || true)
+
+  leftover_re='ResolutionFailed|rhdr-cluster-operator|OperatorGroup'
+  blocking_re='StorageCluster|DRCluster|DRPolicy|VolumeReplication|CSIDriver|ceph|ocs-storagecluster|odf-'
+  [[ "${health_msg} ${degraded}" =~ $leftover_re ]] || return 1
+  if [[ "$degraded" =~ $blocking_re ]]; then
+    return 1
+  fi
+  return 0
 }
 
 _warn_spoke_gitops_degraded() {
@@ -390,10 +420,8 @@ _warn_spoke_gitops_degraded() {
   _SPOKE_GITOPS_DEGRADED_WARNED="${_SPOKE_GITOPS_DEGRADED_WARNED:-} ${cluster}"
   og_count=$(KUBECONFIG="$kc" oc get operatorgroup -n openshift-operators \
     --no-headers 2>/dev/null | wc -l | tr -d ' ')
-  _rs_warn "[spoke-gitops] ${cluster} ${RESILIENT_PARENT_APP} is Degraded; ${SPOKE_RESILIENT_READY_NAMESPACE} is usable so DR bootstrap continues."
-  if [[ "${og_count:-0}" -gt 1 ]]; then
-    _rs_warn "[spoke-gitops] ${cluster} has ${og_count} OperatorGroups in openshift-operators (OLM allows one). rhdr-cluster-operator often stays ResolutionFailed until the extra OperatorGroup is removed by the pattern/cluster owner — this script does not delete OperatorGroups."
-  fi
+  _rs_warn "[spoke-gitops] ${cluster} ${RESILIENT_PARENT_APP} is Degraded from the extra OperatorGroup leftover; ${SPOKE_RESILIENT_READY_NAMESPACE} workload is ready so DR bootstrap continues."
+  _rs_warn "[spoke-gitops] ${cluster} has ${og_count} OperatorGroups in openshift-operators (OLM allows one). rhdr-cluster-operator often stays ResolutionFailed until the extra OperatorGroup is removed by the pattern/cluster owner — this script does not delete OperatorGroups."
 }
 
 spoke_resilient_gitops_ready() {
@@ -418,7 +446,7 @@ spoke_resilient_gitops_ready() {
   if [[ "$health" == "Healthy" || "$health" == "Progressing" ]]; then
     return 0
   fi
-  if [[ "$health" == "Degraded" ]]; then
+  if [[ "$health" == "Degraded" ]] && _spoke_gitops_degraded_is_nonblocking "$kc"; then
     _warn_spoke_gitops_degraded "$kc" "$cluster"
     return 0
   fi

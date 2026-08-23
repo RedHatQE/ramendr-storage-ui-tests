@@ -134,6 +134,7 @@ apply_pattern_variant() {
     return 0
   fi
   validate_pattern_variant "$dir" || return 1
+  _require_variant_gitops_match "$dir" || return 1
 
   local values_global="${dir}/values-global.yaml"
   [[ -f "$values_global" ]] || {
@@ -153,28 +154,32 @@ apply_pattern_variant() {
     python3 "$yaml_helper" byoc "$cluster_names" || return 1
     _pv_log "Ensured byoc: true in overrides/values-cluster-names.yaml (this harness is BYOC)."
   fi
-
-  _warn_variant_gitops_drift "$dir"
 }
 
-_warn_variant_gitops_drift() {
+# Hub Argo CD syncs values-global.yaml from git, not the local working-tree patch.
+# Fail unless the commit Argo will select already has main.variant=PATTERN_VARIANT.
+_require_variant_gitops_match() {
   local dir="$1"
-  local origin=""
+  local origin="" branch="" ref="HEAD" git_variant=""
   origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
-  local git_variant=""
-  git_variant=$(git -C "$dir" show "HEAD:values-global.yaml" 2>/dev/null \
+  branch="${UPSTREAM_BRANCH:-${V13_UPSTREAM_BRANCH}}"
+  if [[ -n "$branch" ]] && git -C "$dir" rev-parse --verify --quiet "origin/${branch}^{commit}" >/dev/null; then
+    ref="origin/${branch}"
+  fi
+  git_variant=$(git -C "$dir" show "${ref}:values-global.yaml" 2>/dev/null \
     | python3 -c "import sys,yaml; d=yaml.safe_load(sys.stdin) or {}; print((d.get('main') or {}).get('variant') or '')" \
     2>/dev/null || true)
 
   if [[ "$git_variant" == "$PATTERN_VARIANT" ]]; then
-    _pv_log "Remote values-global.yaml already has main.variant=${PATTERN_VARIANT}."
+    _pv_log "${ref} values-global.yaml already has main.variant=${PATTERN_VARIANT}."
     return 0
   fi
 
-  _pv_warn "Local checkout now has main.variant=${PATTERN_VARIANT}; git still has '${git_variant:-unset}'."
-  _pv_warn "Hub Argo CD reconciles values-global.yaml from the git remote, not this local patch."
-  if [[ "$origin" == *validatedpatterns/ramendr-starter-kit* && "$git_variant" != "$PATTERN_VARIANT" ]]; then
-    _pv_warn "Remote ${V13_UPSTREAM_BRANCH} currently has main.variant=${git_variant:-unset}."
-    _pv_warn "For Dell/Infinidat GitOps, fork v1.3, commit main.variant=${PATTERN_VARIANT}, and set UPSTREAM_REPO to that fork."
+  _pv_err "Git ${ref} has main.variant='${git_variant:-unset}', but PATTERN_VARIANT=${PATTERN_VARIANT}."
+  _pv_err "Hub Argo CD will not use a local-only values-global.yaml patch."
+  if [[ "$origin" == *validatedpatterns/ramendr-starter-kit* ]]; then
+    _pv_err "Official ${branch:-v1.3} stays at main.variant=${git_variant:-unset}."
   fi
+  _pv_err "Fork v1.3, commit main.variant=${PATTERN_VARIANT}, and set UPSTREAM_REPO to that fork."
+  return 1
 }
