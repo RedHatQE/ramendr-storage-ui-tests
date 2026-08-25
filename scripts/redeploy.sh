@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
 # macOS ships bash 3.2 (no mapfile). Re-exec with Homebrew bash when available.
-if [[ -z "${RAMENDR_GNU_BASH_REEXECED:-}" && "${BASH_VERSINFO[0]:-0}" -lt 4 ]]; then
-  for _bash in "${GNU_BASH:-}" /opt/homebrew/bin/bash /usr/local/bin/bash; do
-    if [[ -n "${_bash:-}" && -x "$_bash" ]]; then
-      export RAMENDR_GNU_BASH_REEXECED=1
-      exec "$_bash" "$0" "$@"
-    fi
-  done
-  echo "ERROR: GNU bash 4+ is required (mapfile). On macOS: brew install bash" >&2
-  exit 1
-fi
+# shellcheck source=lib/gnu-bash-reexec.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/gnu-bash-reexec.sh"
 set -euo pipefail
 
 #
@@ -23,6 +15,32 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
+# Variant defaults (including SPOKE_RESILIENT_READY_NAMESPACE) must run before
+# resilient-spokes.sh applies its openshift-storage fallback.
+# shellcheck source=lib/pattern-variant.sh
+source "$REPO_ROOT/scripts/lib/pattern-variant.sh"
+
+# PATTERN_VARIANT selects starter-kit v1.3 install BOMs (main.variant).
+# Empty keeps the QE mixed-fleet fork (main.clusterGroupName: hub).
+# v1.3 values: odf | drpartner-s4 | drpartner-minimal
+PATTERN_VARIANT="${PATTERN_VARIANT:-}"
+
+if [[ -n "$PATTERN_VARIANT" ]]; then
+  UPSTREAM_REPO="${UPSTREAM_REPO:-$V13_UPSTREAM_REPO}"
+  UPSTREAM_REF="${UPSTREAM_REF:-$V13_UPSTREAM_REF}"
+  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-$V13_UPSTREAM_BRANCH}"
+else
+  # Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
+  UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
+  UPSTREAM_REF="${UPSTREAM_REF:-d6c21253595ea809c779279e20bcc3e990420781}"
+  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22-rhdr-ramen}"
+fi
+# Named local branch even when UPSTREAM_REF is a SHA (pattern Makefile + hub Argo CD).
+
+UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
+
+configure_variant_defaults
+
 # shellcheck source=lib/spoke-metal.sh
 source "$REPO_ROOT/scripts/lib/spoke-metal.sh"
 # shellcheck source=lib/resilient-spokes.sh
@@ -33,16 +51,6 @@ source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
 source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 # shellcheck source=lib/byoc-import-wait.sh
 source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
-
-UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-# Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
-UPSTREAM_REF="${UPSTREAM_REF:-d6c21253595ea809c779279e20bcc3e990420781}"
-# Branch name used to avoid detached-HEAD when UPSTREAM_REF is a bare SHA.
-# The upstream pattern's Makefile derives target_branch from git and fails if HEAD is detached.
-# Hub Argo CD also tracks this branch name on the fork.
-UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22-rhdr-ramen}"
-
-UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
 HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
 PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
@@ -73,6 +81,19 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 log() { echo -e "${GREEN}[$(date +%H:%M:%S)]${NC} $*"; }
+
+# Strip https://user:token@host/... userinfo so logs never print repo credentials.
+sanitize_upstream_repo_url() {
+  local url="${1:-}"
+  case "$url" in
+    https://*@*|http://*@*)
+      sed -E 's#^(https?://)[^/@]+@#\1#' <<<"$url"
+      ;;
+    *)
+      printf '%s\n' "$url"
+      ;;
+  esac
+}
 warn() { echo -e "${YELLOW}[$(date +%H:%M:%S)] WARNING:${NC} $*"; }
 err() { echo -e "${RED}[$(date +%H:%M:%S)] ERROR:${NC} $*"; }
 
@@ -146,6 +167,34 @@ PY
     if [[ -n "${missing_windows_secrets:-}" ]]; then
       warn "VALUES_SECRET missing Windows VM secrets: $(tr '\n' ' ' <<<"$missing_windows_secrets")"
       warn "Add privatevm-credentials and windows-admin before redeploy (see dr-validation/examples/values-secret-v2-windows.fragment.yaml)."
+    fi
+  fi
+  if [[ "${PATTERN_VARIANT:-}" == "drpartner-s4" ]]; then
+    local missing_s4_secrets
+    missing_s4_secrets=$(python3 - "$VALUES_SECRET" <<'PY'
+import re, sys
+
+text = open(sys.argv[1]).read()
+
+def has_secret(text: str, secret: str) -> bool:
+    if re.search(rf"^{re.escape(secret)}:", text, re.MULTILINE):
+        return True
+    if re.search(
+        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+        text,
+        re.MULTILINE,
+    ):
+        return True
+    return False
+
+for name in ("s4-ui-credentials", "s4-api-credentials"):
+    if not has_secret(text, name):
+        print(name)
+PY
+)
+    if [[ -n "${missing_s4_secrets:-}" ]]; then
+      warn "VALUES_SECRET missing Dell S4 secrets: $(tr '\n' ' ' <<<"$missing_s4_secrets")"
+      warn "Add s4-ui-credentials and s4-api-credentials (see dr-validation/examples/values-secret-v2-s4.fragment.yaml)."
     fi
   fi
   for dir_var in HUB_INSTALL_DIR PRIMARY_INSTALL_DIR SECONDARY_INSTALL_DIR; do
@@ -266,29 +315,178 @@ ensure_podman_ready() {
 }
 
 hub_pattern_app_health() {
-  oc get application.argoproj.io ramendr-starter-kit-hub \
+  local app ns
+  app="$(hub_pattern_app_name)"
+  ns="$(hub_argocd_namespace)"
+  oc get application.argoproj.io "$app" \
     -n vp-gitops \
     -o jsonpath='{.status.health.status}' 2>/dev/null \
-    || oc get application.argoproj.io ramendr-starter-kit-hub \
-      -n ramendr-starter-kit-hub \
+    || oc get application.argoproj.io "$app" \
+      -n "$ns" \
       -o jsonpath='{.status.health.status}' 2>/dev/null || true
 }
 
 pattern_install_recoverable() {
-  local hub_health rdr_health joined acm_health
+  local hub_health rdr_health joined acm_health ns
+  ns="$(hub_argocd_namespace)"
   hub_health="$(hub_pattern_app_health)"
   rdr_health=$(oc get application.argoproj.io regional-dr \
-    -n ramendr-starter-kit-hub \
+    -n "$ns" \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
   acm_health=$(oc get application.argoproj.io acm \
-    -n ramendr-starter-kit-hub \
+    -n "$ns" \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
   joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
+  [[ "${joined:-0}" -ge 3 ]] || return 1
   [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]] \
-    || [[ "$acm_health" == "Healthy" ]] || [[ "${joined:-0}" -ge 3 ]]
+    || [[ "$acm_health" == "Healthy" ]]
+}
+
+# Helm --set main.clusterGroupName=null does not drop the field on an existing
+# Pattern CR, so a QE hub clustergroup Application keeps fighting the variant.
+clear_legacy_cluster_group_name() {
+  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
+  if ! oc get pattern ramendr-starter-kit -n patterns-operator \
+    -o jsonpath='{.spec.clusterGroupName}' 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  log "Clearing leftover Pattern spec.clusterGroupName so only variant ${PATTERN_VARIANT} is reconciled..."
+  oc patch pattern ramendr-starter-kit -n patterns-operator --type=json \
+    -p '[{"op":"remove","path":"/spec/clusterGroupName"}]' \
+    || warn "Could not remove spec.clusterGroupName from Pattern ramendr-starter-kit."
+}
+
+# Remove Argo finalizers then delete so managed cluster resources are not pruned.
+_orphan_delete_application() {
+  local ns="$1" name="$2"
+  oc patch "applications.argoproj.io/${name}" -n "$ns" --type merge \
+    -p '{"metadata":{"finalizers":null}}' &>/dev/null || true
+  oc delete "applications.argoproj.io/${name}" -n "$ns" --wait=false &>/dev/null || true
+}
+
+# A previous clustergroup Application (QE hub, or another v1.3 variant) left in
+# vp-gitops keeps both parents Degraded (shared ClusterRoles) and blocks later
+# sync waves (opp-policy, regional-dr).
+retire_previous_clustergroup_apps() {
+  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
+  local keep child app
+  keep="$(hub_pattern_app_name)"
+  for app in $(oc get applications.argoproj.io -n vp-gitops \
+    -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    case "$app" in
+      ramendr-starter-kit-*)
+        [[ "$app" == "$keep" ]] && continue
+        log "Retiring leftover clustergroup ${app} (orphan delete, no prune)..."
+        for child in $(oc get applications.argoproj.io -n "$app" \
+          -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+          _orphan_delete_application "$app" "$child"
+        done
+        _orphan_delete_application vp-gitops "$app"
+        ;;
+    esac
+  done
+}
+
+# QE fork + v1.3 odf / Dell BOM names. Never delete unlisted DR objects.
+_STARTER_KIT_DRPOLICY_NAMES="2m-vm 2m-novm 2m-drpolicy"
+_STARTER_KIT_DRPC_NAMES="gitops-vm-protection"
+
+_name_in_list() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+_argo_instance_of() {
+  local kind="$1" name="$2" ns="${3:-}"
+  if [[ -n "$ns" ]]; then
+    oc get "$kind" "$name" -n "$ns" \
+      -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/instance}' 2>/dev/null || true
+  else
+    oc get "$kind" "$name" \
+      -o jsonpath='{.metadata.labels.argocd\.argoproj\.io/instance}' 2>/dev/null || true
+  fi
+}
+
+_is_starter_kit_argo_instance() {
+  case "${1:-}" in
+    ramendr-starter-kit-*|regional-dr) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Cluster-scoped CRs: delete only allowlisted names or starter-kit Argo instance.
+_delete_starter_kit_cluster_crs() {
+  local kind="$1"
+  shift
+  local name instance
+  for name in $(oc get "$kind" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    if _name_in_list "$name" "$@"; then
+      log " Deleting leftover ${kind}/${name}..."
+      oc delete "$kind" "$name" --wait=false &>/dev/null || true
+      continue
+    fi
+    instance="$(_argo_instance_of "$kind" "$name")"
+    if _is_starter_kit_argo_instance "$instance"; then
+      log " Deleting leftover ${kind}/${name} (Argo instance=${instance})..."
+      oc delete "$kind" "$name" --wait=false &>/dev/null || true
+    fi
+  done
+}
+
+_delete_starter_kit_drpcs() {
+  local ns name instance
+  while read -r ns name; do
+    [[ -z "${name:-}" ]] && continue
+    # shellcheck disable=SC2086
+    if _name_in_list "$name" ${_STARTER_KIT_DRPC_NAMES}; then
+      log " Deleting leftover DRPlacementControl ${ns}/${name}..."
+      oc delete drplacementcontrol "$name" -n "$ns" --wait=false &>/dev/null || true
+      continue
+    fi
+    instance="$(_argo_instance_of drplacementcontrol "$name" "$ns")"
+    if _is_starter_kit_argo_instance "$instance"; then
+      log " Deleting leftover DRPlacementControl ${ns}/${name} (Argo instance=${instance})..."
+      oc delete drplacementcontrol "$name" -n "$ns" --wait=false &>/dev/null || true
+    fi
+  done < <(oc get drplacementcontrol -A \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
+    2>/dev/null)
+}
+
+# Leftover CRs from a previous BOM that GitOps may not prune (immutable DRCluster
+# s3ProfileName, partner S4 namespace). Required for variant smoke assertions.
+# Only starter-kit allowlisted / Argo-owned objects; never oc delete --all.
+cleanup_variant_leftovers() {
+  case "${PATTERN_VARIANT:-}" in
+    drpartner-minimal)
+      log "Removing leftover starter-kit DR / S4 objects (drpartner-minimal has none)..."
+      _delete_starter_kit_drpcs
+      # shellcheck disable=SC2086
+      _delete_starter_kit_cluster_crs drpolicy ${_STARTER_KIT_DRPOLICY_NAMES}
+      # shellcheck disable=SC2086
+      _delete_starter_kit_cluster_crs drcluster ${SPOKE_CLUSTERS:-ocp-primary ocp-secondary}
+      oc delete namespace vp-s4-storage --wait=false &>/dev/null || true
+      ;;
+    odf)
+      log "Removing leftover Dell DRPolicy 2m-drpolicy (odf uses 2m-vm / 2m-novm)..."
+      oc delete drpolicy 2m-drpolicy --wait=false &>/dev/null || true
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 prepare_upstream() {
+  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
+    log "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
+  else
+    log "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
+  fi
   log "Preparing upstream checkout at $UPSTREAM_REF..."
   mkdir -p "$WORK_DIR/upstream"
 
@@ -299,6 +497,7 @@ prepare_upstream() {
 
   (
     cd "$UPSTREAM_DIR"
+    git remote set-url origin "$UPSTREAM_REPO"
     git fetch --tags --force origin
     # Ensure the tracked fork branch (and pinned SHA) are present locally.
     git fetch --force origin \
@@ -315,6 +514,8 @@ prepare_upstream() {
     fi
   )
 
+  apply_pattern_variant "$UPSTREAM_DIR" || exit 1
+
   # Patch upstream pattern.sh for automation (non-TTY) and Apple Silicon (amd64 container).
   if [[ -f "$UPSTREAM_DIR/pattern.sh" ]]; then
     log "Patching upstream pattern.sh for automation and platform compatibility..."
@@ -325,6 +526,10 @@ from pathlib import Path
 
 path = Path("pattern.sh")
 text = path.read_text()
+
+# 0) macOS /usr/bin/bash is 3.2 (set -u + empty arrays fail). Prefer GNU bash.
+if text.startswith("#!/bin/bash"):
+    text = "#!/usr/bin/env bash" + text[len("#!/bin/bash") :]
 
 # 1) Non-TTY: replace stock podman invocation if not already patched.
 if "PODMAN_STDIO_ARGS" not in text:
@@ -362,6 +567,19 @@ fi
                 run_needle,
                 platform_block + 'podman run "${PODMAN_PLATFORM_ARGS[@]}" --rm --pull=newer \\',
             )
+
+# 3) bash 3.2 `set -u` treats empty "${arr[@]}" as unbound. Guard expansions.
+for name in (
+    "PKI_HOST_MOUNT_ARGS",
+    "PODMAN_PLATFORM_ARGS",
+    "PODMAN_ARGS",
+    "EXTRA_ARGS_ARRAY",
+    "PODMAN_STDIO_ARGS",
+):
+    text = text.replace(
+        f'"${{{name}[@]}}"',
+        '${' + name + '[@]+"${' + name + '[@]}"}',
+    )
 
 path.write_text(text)
 PY
@@ -661,21 +879,34 @@ deploy_pattern() {
 
   log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."
   local pattern_exit=0
+  # pattern-install uses TARGET_VARIANT as the DNS-length clusterGroup name.
+  # Official drpartner-minimal exceeds that limit; the QE fork sets
+  # clusterGroup.name=minimal in variants/drpartner-minimal values instead.
+  local target_variant="${PATTERN_VARIANT:-}"
+  if [[ "$target_variant" == "drpartner-minimal" ]]; then
+    log "Omitting TARGET_VARIANT for drpartner-minimal (DNS length); using clusterGroup.name from variant values."
+    target_variant=""
+  fi
   ( cd "$UPSTREAM_DIR" && \
       KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig" \
       VALUES_SECRET="$BYOC_VALUES_SECRET" \
       TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" \
+      TARGET_BRANCH="${UPSTREAM_BRANCH}" \
+      TARGET_VARIANT="${target_variant}" \
       ./pattern.sh make install-byoc 2>&1 ) \
     || pattern_exit=$?
 
+  clear_legacy_cluster_group_name
+  retire_previous_clustergroup_apps
+
   if [[ $pattern_exit -ne 0 ]]; then
-    # pattern.sh often times out because regional-dr and/or ramendr-starter-kit-hub
-    # are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
+    # pattern.sh often times out because regional-dr and/or the parent clustergroup
+    # Application are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
     warn "pattern.sh make install-byoc returned non-zero — checking whether this is recoverable drift..."
     local hub_health rdr_health
     hub_health="$(hub_pattern_app_health)"
     rdr_health=$(oc get application.argoproj.io regional-dr \
-      -n ramendr-starter-kit-hub \
+      -n "$(hub_argocd_namespace)" \
       -o jsonpath='{.status.health.status}' 2>/dev/null || true)
     if pattern_install_recoverable; then
       warn "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
@@ -686,6 +917,8 @@ deploy_pattern() {
       exit 1
     fi
   fi
+
+  cleanup_variant_leftovers
 
   if ! wait_for_byoc_spoke_import; then
     warn "BYOC spoke import did not complete within timeout; resilient GitOps and DR bootstrap may fail."
@@ -704,10 +937,11 @@ wait_for_convergence() {
   log "Waiting for environment convergence (ArgoCD Applications)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
-  local tries=0 converged=0
+  local tries=0 converged=0 ns
+  ns="$(hub_argocd_namespace)"
   while [[ $tries -lt 120 ]]; do
     local unhealthy
-    unhealthy=$(oc get applications.argoproj.io -n ramendr-starter-kit-hub \
+    unhealthy=$(oc get applications.argoproj.io -n "$ns" \
       -o custom-columns=':.status.sync.status,:.status.health.status' --no-headers 2>/dev/null \
       | grep -Evc 'Synced.*Healthy|Synced.*Progressing' || true)
 
@@ -723,7 +957,7 @@ wait_for_convergence() {
 
     if [[ $((tries % 10)) -eq 0 ]]; then
       for app in regional-dr opp-policy; do
-        oc patch applications.argoproj.io "$app" -n ramendr-starter-kit-hub --type merge \
+        oc patch applications.argoproj.io "$app" -n "$ns" --type merge \
           -p '{"operation":{"initiatedBy":{"automated":true},"sync":{}}}' 2>/dev/null || true
       done
       if ! resilient_placement_satisfied 2; then
@@ -871,14 +1105,21 @@ show_status() {
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
   echo ""
   echo "============================================"
-  echo " RamenDR Starter Kit � Environment Status"
+  echo " RamenDR Starter Kit — Environment Status"
   echo "============================================"
+  echo ""
+  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
+    echo "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
+  else
+    echo "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
+  fi
+  echo "Upstream: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}") @ ${UPSTREAM_REF} (${UPSTREAM_BRANCH})"
   echo ""
   echo "--- Clusters ---"
   oc get managedclusters 2>&1 || echo "Cannot reach hub cluster"
   echo ""
   echo "--- ArgoCD Applications ---"
-  oc get applications.argoproj.io -n ramendr-starter-kit-hub \
+  oc get applications.argoproj.io -n "$(hub_argocd_namespace)" \
     -o custom-columns='NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status' 2>&1
   echo ""
   echo "--- DR Status ---"
@@ -998,9 +1239,13 @@ case "${1:-}" in
     echo " --status Show current environment status"
     echo ""
     echo "Pinning:"
-    echo " UPSTREAM_REPO           Upstream repo URL (default: $UPSTREAM_REPO)"
+    echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
     echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
     echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
+    echo " PATTERN_VARIANT         v1.3 install variant: odf | drpartner-s4 | drpartner-minimal"
+    echo "                         Unset keeps the QE mixed-fleet fork (clusterGroupName layout)."
+    echo "                         When set, defaults UPSTREAM_* to validatedpatterns ramendr-starter-kit v1.3"
+    echo "                         and writes main.variant into the local checkout values-global.yaml."
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
@@ -1035,6 +1280,8 @@ case "${1:-}" in
     echo " WINDOWS_VM_STABILIZE_WAIT_TRIES       Wait for Running/ready after restart (default 40)"
     echo " SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS    Wait for vp-gitops + AppProject/default per spoke (default 40)"
     echo " SPOKE_APPPROJECT_PREP_WAIT_SLEEP       Seconds between AppProject prep polls (default 15)"
+    echo " SPOKE_RESILIENT_READY_NAMESPACE  Spoke ns proving resilient GitOps ready"
+    echo "                         (default openshift-storage; partner variants use openshift-cnv)"
     echo " SKIP_ODF_GOLDEN_IMAGE_FIX  Set to 1 to skip post-ODF CNV golden image re-import fix"
     echo " ODF_GOLDEN_PROTECTED_DATASOURCES  Never delete these os-images DataSources/PVCs (default: windows2k22,windows2k25)"
     echo " ODF_GOLDEN_IMAGE_WAIT_ATTEMPTS  Wait for golden image re-import per spoke (default 30)"

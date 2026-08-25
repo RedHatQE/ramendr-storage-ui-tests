@@ -39,6 +39,7 @@ from config.settings import (
     PRIMARY_KUBECONFIG,
     SECONDARY_KUBECONFIG,
 )
+from tests.utils.pattern_variant import has_vm_drpc
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
@@ -1080,6 +1081,10 @@ def _require_ui_credentials():
 
 @pytest.mark.smoke
 @pytest.mark.requires_stage
+@pytest.mark.skipif(
+    not has_vm_drpc(),
+    reason="Partner variants do not deploy 2m-vm / gitops-vm-protection",
+)
 class TestUiSanity:
     """Verify the core Disaster Recovery UI flow is reachable and healthy."""
 
@@ -1115,6 +1120,29 @@ class TestUiSanity:
             f"DRPC 'gitops-vm-protection' policy mismatch: {state['policy']!r}"
         )
 
+        drpc_backend = _get_drpc_protected_condition()
+        drpc_phase = (drpc_backend.get("phase") or "").strip()
+        # Fresh deploy: UI is Critical while ClusterDataProtected is Uploading.
+        if (
+            state["cluster"] == "ocp-primary"
+            and drpc_phase in {"", "Deployed"}
+            and state["status"].strip().lower() != "healthy"
+        ):
+            print(
+                "DR status is not Healthy yet; waiting for cluster-data protection "
+                f"(status={state['status']!r} protected={drpc_backend.get('protected')!r} "
+                f"reason={drpc_backend.get('protected_reason')!r})."
+            )
+            _wait_for_drpc_healthy_with_recovery(
+                drpc_page,
+                "gitops-vm-protection",
+                expected_cluster="ocp-primary",
+                timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
+            )
+            state = drpc_page.get_drpc_state("gitops-vm-protection")
+            drpc_backend = _get_drpc_protected_condition()
+            drpc_phase = (drpc_backend.get("phase") or "").strip()
+
         if _FORCE_FULL_SANITY:
             assert state["cluster"] == "ocp-primary", (
                 "RAMENDR_SANITY_FORCE_FULL requires gitops-vm-protection on "
@@ -1127,8 +1155,6 @@ class TestUiSanity:
         status_lower_initial = state["status"].strip().lower()
         on_primary = state["cluster"] == "ocp-primary"
         on_secondary = state["cluster"] == "ocp-secondary"
-        drpc_backend = _get_drpc_protected_condition()
-        drpc_phase = (drpc_backend.get("phase") or "").strip()
 
         post_relocate = on_primary and drpc_phase == "Relocated"
         post_failover = on_secondary and drpc_phase == "FailedOver"

@@ -5,7 +5,13 @@
 # That placement is often evaluated before BYOC spokes register, leaving an empty
 # PlacementDecision and blocking ramendr-starter-kit-resilient on the spokes.
 
+# ACM placement label on ManagedCluster objects. This is NOT values-global.yaml
+# main.clusterGroupName / main.variant. All current starter-kit BOMs (QE fork and
+# v1.3 odf / drpartner-*) still place spokes with clusterGroup=resilient.
 : "${SPOKE_CLUSTER_GROUP_LABEL:=resilient}"
+# Namespace that must exist on spokes before we treat resilient GitOps as ready.
+# ODF variants use openshift-storage; partner CSI variants use openshift-cnv.
+: "${SPOKE_RESILIENT_READY_NAMESPACE:=openshift-storage}"
 : "${ACM_PLACEMENT_NAMESPACE:=open-cluster-management}"
 : "${RESILIENT_PLACEMENT_NAME:=resilient-placement}"
 : "${SPOKE_CLUSTERS:=ocp-primary ocp-secondary}"
@@ -364,6 +370,60 @@ recover_all_spoke_resilient_apps() {
   [[ "$recovered" -gt 0 ]]
 }
 
+spoke_resilient_workload_ready() {
+  local kc="$1"
+  KUBECONFIG="$kc" oc get namespace "$SPOKE_RESILIENT_READY_NAMESPACE" &>/dev/null || return 1
+  if [[ "$SPOKE_RESILIENT_READY_NAMESPACE" == "openshift-storage" ]]; then
+    [[ "$(KUBECONFIG="$kc" oc get storagecluster ocs-storagecluster \
+      -n openshift-storage \
+      -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true)" == "True" ]]
+    return
+  fi
+  # Partner CSI BOMs: pattern-managed spoke storage/virt workload is CNV HCO.
+  [[ "$(KUBECONFIG="$kc" oc get hyperconverged kubevirt-hyperconverged \
+    -n "$SPOKE_RESILIENT_READY_NAMESPACE" \
+    -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true)" == "True" ]]
+}
+
+# Documented non-blocking Degraded: leftover extra OperatorGroup in
+# openshift-operators leaves rhdr-cluster-operator ResolutionFailed.
+# Failed CSI / DR / ODF resources still block.
+_spoke_gitops_degraded_is_nonblocking() {
+  local kc="$1"
+  local og_count health_msg degraded leftover_re blocking_re
+  og_count=$(KUBECONFIG="$kc" oc get operatorgroup -n openshift-operators \
+    --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  [[ "${og_count:-0}" -gt 1 ]] || return 1
+
+  health_msg=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
+    -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.health.message}' 2>/dev/null || true)
+  degraded=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
+    -n "$SPOKE_GITOPS_NS" \
+    -o jsonpath='{range .status.resources[?(@.health.status=="Degraded")]}{.kind}/{.name}:{.health.message} {end}' \
+    2>/dev/null || true)
+
+  leftover_re='ResolutionFailed|rhdr-cluster-operator|OperatorGroup'
+  blocking_re='StorageCluster|DRCluster|DRPolicy|VolumeReplication|CSIDriver|ceph|ocs-storagecluster|odf-'
+  [[ "${health_msg} ${degraded}" =~ $leftover_re ]] || return 1
+  if [[ "$degraded" =~ $blocking_re ]]; then
+    return 1
+  fi
+  return 0
+}
+
+_warn_spoke_gitops_degraded() {
+  local kc="$1" cluster="$2"
+  local og_count
+  case " ${_SPOKE_GITOPS_DEGRADED_WARNED:-} " in
+    *" ${cluster} "*) return 0 ;;
+  esac
+  _SPOKE_GITOPS_DEGRADED_WARNED="${_SPOKE_GITOPS_DEGRADED_WARNED:-} ${cluster}"
+  og_count=$(KUBECONFIG="$kc" oc get operatorgroup -n openshift-operators \
+    --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  _rs_warn "[spoke-gitops] ${cluster} ${RESILIENT_PARENT_APP} is Degraded from the extra OperatorGroup leftover; ${SPOKE_RESILIENT_READY_NAMESPACE} workload is ready so DR bootstrap continues."
+  _rs_warn "[spoke-gitops] ${cluster} has ${og_count} OperatorGroups in openshift-operators (OLM allows one). rhdr-cluster-operator often stays ResolutionFailed until the extra OperatorGroup is removed by the pattern/cluster owner — this script does not delete OperatorGroups."
+}
+
 spoke_resilient_gitops_ready() {
   local cluster="$1"
   local kc sync health
@@ -382,8 +442,15 @@ spoke_resilient_gitops_ready() {
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
 
   [[ "$sync" == "Synced" ]] || return 1
-  [[ "$health" == "Healthy" || "$health" == "Progressing" ]] || return 1
-  KUBECONFIG="$kc" oc get namespace openshift-storage &>/dev/null
+  spoke_resilient_workload_ready "$kc" || return 1
+  if [[ "$health" == "Healthy" || "$health" == "Progressing" ]]; then
+    return 0
+  fi
+  if [[ "$health" == "Degraded" ]] && _spoke_gitops_degraded_is_nonblocking "$kc"; then
+    _warn_spoke_gitops_degraded "$kc" "$cluster"
+    return 0
+  fi
+  return 1
 }
 
 spoke_resilient_gitops_all_ready() {
@@ -396,7 +463,7 @@ spoke_resilient_gitops_all_ready() {
 
 _spoke_resilient_gitops_status_line() {
   local cluster="$1"
-  local kc sync health odf_ns
+  local kc sync health ready_ns
 
   kc=$(_spoke_kubeconfig "$cluster") || return 0
   [[ -f "$kc" ]] || return 0
@@ -411,12 +478,12 @@ _spoke_resilient_gitops_status_line() {
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo unknown)
   health=$(KUBECONFIG="$kc" oc get application.argoproj.io "$RESILIENT_PARENT_APP" \
     -n "$SPOKE_GITOPS_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || echo unknown)
-  if KUBECONFIG="$kc" oc get namespace openshift-storage &>/dev/null; then
-    odf_ns=yes
+  if KUBECONFIG="$kc" oc get namespace "$SPOKE_RESILIENT_READY_NAMESPACE" &>/dev/null; then
+    ready_ns=yes
   else
-    odf_ns=no
+    ready_ns=no
   fi
-  echo "${cluster}: sync=${sync} health=${health} openshift-storage=${odf_ns}"
+  echo "${cluster}: sync=${sync} health=${health} ${SPOKE_RESILIENT_READY_NAMESPACE}=${ready_ns}"
 }
 
 wait_for_spoke_resilient_gitops() {
@@ -427,7 +494,7 @@ wait_for_spoke_resilient_gitops() {
 
   prepare_spoke_argo_appprojects_on_all_spokes || true
 
-  _rs_log "[spoke-gitops] Waiting for ${RESILIENT_PARENT_APP} + openshift-storage on all spokes..."
+  _rs_log "[spoke-gitops] Waiting for ${RESILIENT_PARENT_APP} + ${SPOKE_RESILIENT_READY_NAMESPACE} on all spokes..."
   while [[ $tries -lt $max_attempts ]]; do
     ready_count=0
     for cluster in $SPOKE_CLUSTERS; do
@@ -455,7 +522,7 @@ wait_for_spoke_resilient_gitops() {
     sleep "$sleep_s"
   done
 
-  _rs_warn "[spoke-gitops] Timed out waiting for spoke resilient GitOps / ODF namespace."
+  _rs_warn "[spoke-gitops] Timed out waiting for spoke resilient GitOps / ${SPOKE_RESILIENT_READY_NAMESPACE}."
   _spoke_resilient_gitops_status_line ocp-primary
   _spoke_resilient_gitops_status_line ocp-secondary
   return 1
