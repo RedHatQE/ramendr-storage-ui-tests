@@ -21,7 +21,7 @@ The entrypoint is `scripts/redeploy.sh`.
 **Upstream pinning (single fork, all variants):**
 
 - Local checkout and default pin: `elsapassaro/ramendr-starter-kit` branch `ocp-4.22-rhdr-ramen` at
-  `131b3f0c93af6d3c75e3ce2f3bdd52455d24726c`. Override with `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
+  `11327fb0f7e44ae34c4b8e6af7de167756684e1d`. Override with `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
 - `redeploy.sh` patches `main.variant`, enables RHDR catalog on hub + spokes (`ramen-catalog`,
   `rhdr-multicluster-operator`, `rhdr-cluster-operator`), and sets `byoc: true` in the local checkout.
 - Hub Argo CD reads git, not local patches. Tip commit has `main.variant: odf`; partner variants warn unless

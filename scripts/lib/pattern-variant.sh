@@ -10,7 +10,7 @@ DEFAULT_PATTERN_VARIANT=odf
 PATTERN_VARIANTS="odf drpartner-s4 drpartner-minimal"
 
 : "${UPSTREAM_REPO:=https://github.com/elsapassaro/ramendr-starter-kit}"
-: "${UPSTREAM_REF:=131b3f0c93af6d3c75e3ce2f3bdd52455d24726c}"
+: "${UPSTREAM_REF:=11327fb0f7e44ae34c4b8e6af7de167756684e1d}"
 : "${UPSTREAM_BRANCH:=ocp-4.22-rhdr-ramen}"
 
 _pv_log() {

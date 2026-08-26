@@ -5,7 +5,7 @@ This document summarizes decisions and context from prior work so another agent 
 ## What this repository is
 
 - **Consumer / test harness** for upstream RamenDR starter-kit with three install variants (`PATTERN_VARIANT`):
-  - All variants pin [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit) **`131b3f0c93af6d3c75e3ce2f3bdd52455d24726c`** (branch **`ocp-4.22-rhdr-ramen`**).
+  - All variants pin [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit) **`11327fb0f7e44ae34c4b8e6af7de167756684e1d`** (branch **`ocp-4.22-rhdr-ramen`**).
   - **`odf`:** mixed 4-VM fleet + HammerDB. **`drpartner-*`:** partner CSI BOMs; RHDR catalog patched at install time.
 - **Does not** long-term fork upstream. Environment customizations (Windows edge VMs, BYOC, ODF pins, cost profiles) live in the **fork** on GitHub; this repo only patches upstream `pattern.sh` locally (non-TTY podman).
 - **Future:** Playwright + Python UI tests (partially implemented). **Today:** deployment scripts, install-config examples, DR validation.
