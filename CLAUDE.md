@@ -29,8 +29,8 @@ The entrypoint is `scripts/redeploy.sh`.
 
 Customizations (Windows edge VMs, additionalPvcDisks, byoc cluster names, ODF channel pins,
 cost-optimized values, RHDR Quay IDMS) live in the fork's `ocp-4.22-rhdr-ramen` branch under
-`overrides/` and values files. Partner BOMs live under `variants/<name>/` on the official
-starter kit. Local edits next to the checkout do not affect Argo CD.
+`overrides/` and values files. Partner BOMs live under `variants/<name>/` in the configured
+fork checkout. Local edits next to the checkout do not affect Argo CD.
 
 - After hub + spoke `openshift-install`, `redeploy.sh` applies upstream
   `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR images) to hub + both

@@ -65,8 +65,9 @@ def ensure_byoc_true(path: Path | str) -> bool:
 
 def _ensure_hub_rhdr(cluster_group: dict) -> bool:
     changed = False
-    if cluster_group.get("indexImages") != RHDR_INDEX_IMAGES:
-        cluster_group["indexImages"] = dict(RHDR_INDEX_IMAGES)
+    index_images = cluster_group.setdefault("indexImages", {})
+    if index_images.get("rhdr-ramen") != RHDR_INDEX_IMAGES["rhdr-ramen"]:
+        index_images["rhdr-ramen"] = dict(RHDR_INDEX_IMAGES["rhdr-ramen"])
         changed = True
     subscriptions = cluster_group.setdefault("subscriptions", {})
     if subscriptions.get("odf-multicluster-orchestrator") != RHDR_HUB_MCO_SUBSCRIPTION:
@@ -77,8 +78,9 @@ def _ensure_hub_rhdr(cluster_group: dict) -> bool:
 
 def _ensure_spoke_rhdr(cluster_group: dict) -> bool:
     changed = False
-    if cluster_group.get("indexImages") != RHDR_INDEX_IMAGES:
-        cluster_group["indexImages"] = dict(RHDR_INDEX_IMAGES)
+    index_images = cluster_group.setdefault("indexImages", {})
+    if index_images.get("rhdr-ramen") != RHDR_INDEX_IMAGES["rhdr-ramen"]:
+        index_images["rhdr-ramen"] = dict(RHDR_INDEX_IMAGES["rhdr-ramen"])
         changed = True
     subscriptions = cluster_group.setdefault("subscriptions", {})
     if subscriptions.get("rhdr-cluster-operator") != RHDR_SPOKE_CLUSTER_SUBSCRIPTION:

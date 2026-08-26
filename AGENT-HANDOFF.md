@@ -18,7 +18,7 @@ This document summarizes decisions and context from prior work so another agent 
 ## Key entrypoint: `scripts/redeploy.sh`
 
 1. Clones/fetches upstream into `**.work/upstream/ramendr-starter-kit`** (see `.gitignore`; not committed).
-2. Checks out **`UPSTREAM_REF`** (variant-dependent; default `odf` → fork SHA above). Override: `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `PATTERN_VARIANT`, `WORK_DIR`, `UPSTREAM_DIR`. Always patches local `values-global.yaml` (`main.variant`) and `overrides/values-cluster-names.yaml` (`byoc: true`).
+2. Checks out the **shared default fork pin** (`UPSTREAM_REF` / `UPSTREAM_BRANCH` above; same for all variants). Override with `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `PATTERN_VARIANT`, `WORK_DIR`, `UPSTREAM_DIR`. Always patches local `values-global.yaml` (`main.variant`) and `overrides/values-cluster-names.yaml` (`byoc: true`).
 3. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal) and so Darwin arm64 runs the amd64 utility container under emulation.
 4. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
 5. Applies upstream `**APPLY_ME_FIRST.idms.yaml**` (Quay ImageDigestMirrorSet for RHDR images) to hub + both spokes.

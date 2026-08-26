@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import yaml
+
 _HELPER = (
     Path(__file__).resolve().parents[2] / "scripts" / "lib" / "pattern_variant_yaml.py"
 )
@@ -72,3 +74,26 @@ def test_apply_rhdr_catalog_patches_partner_hub_and_spoke(tmp_path: Path):
     spoke_data = resilient.read_text()
     assert "rhdr-cluster-operator" in spoke_data
     assert "source: ramen-catalog" in spoke_data
+
+
+def test_apply_rhdr_catalog_merges_existing_index_images(tmp_path: Path):
+    variant_dir = tmp_path / "variants" / "drpartner-s4"
+    variant_dir.mkdir(parents=True)
+    hub = variant_dir / "values-drpartner-s4.yaml"
+    hub.write_text(
+        "clusterGroup:\n"
+        "  name: drpartner-s4\n"
+        "  indexImages:\n"
+        "    partner-catalog:\n"
+        "      name: partner-catalog\n"
+        "      image: quay.io/example/partner@sha256:abc\n"
+        "      namespace: openshift-operators\n"
+    )
+
+    assert apply_rhdr_catalog(tmp_path, "drpartner-s4") is True
+
+    hub_data = yaml.safe_load(hub.read_text())
+    index_images = hub_data["clusterGroup"]["indexImages"]
+    assert "partner-catalog" in index_images
+    assert index_images["partner-catalog"]["name"] == "partner-catalog"
+    assert "rhdr-ramen" in index_images
