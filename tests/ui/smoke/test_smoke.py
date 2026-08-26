@@ -71,7 +71,7 @@ _DRPC_PROTECTED_TIMEOUT_MS = int(
 
 _skip_without_odf = pytest.mark.skipif(
     not has_odf_mirrorpeer(),
-    reason="Requires ODF / MirrorPeer (QE fork or PATTERN_VARIANT=odf)",
+    reason="Requires ODF / MirrorPeer (PATTERN_VARIANT=odf)",
 )
 _skip_without_edge_vms = pytest.mark.skipif(
     not has_edge_vms(),
@@ -79,7 +79,7 @@ _skip_without_edge_vms = pytest.mark.skipif(
 )
 _skip_without_qe_fleet = pytest.mark.skipif(
     not is_qe_mixed_fleet(),
-    reason="Requires QE mixed Windows/Linux gitops-vms fleet (unset PATTERN_VARIANT)",
+    reason="Requires QE mixed Windows/Linux gitops-vms fleet (PATTERN_VARIANT=odf)",
 )
 _skip_without_vm_drpc = pytest.mark.skipif(
     not has_vm_drpc(),

@@ -20,22 +20,9 @@ WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 # shellcheck source=lib/pattern-variant.sh
 source "$REPO_ROOT/scripts/lib/pattern-variant.sh"
 
-# PATTERN_VARIANT selects starter-kit v1.3 install BOMs (main.variant).
-# Empty keeps the QE mixed-fleet fork (main.clusterGroupName: hub).
-# v1.3 values: odf | drpartner-s4 | drpartner-minimal
-PATTERN_VARIANT="${PATTERN_VARIANT:-}"
-
-if [[ -n "$PATTERN_VARIANT" ]]; then
-  UPSTREAM_REPO="${UPSTREAM_REPO:-$V13_UPSTREAM_REPO}"
-  UPSTREAM_REF="${UPSTREAM_REF:-$V13_UPSTREAM_REF}"
-  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-$V13_UPSTREAM_BRANCH}"
-else
-  # Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
-  UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-  UPSTREAM_REF="${UPSTREAM_REF:-d6c21253595ea809c779279e20bcc3e990420781}"
-  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22-rhdr-ramen}"
-fi
-# Named local branch even when UPSTREAM_REF is a SHA (pattern Makefile + hub Argo CD).
+# PATTERN_VARIANT selects the install BOM (main.variant): odf | drpartner-s4 | drpartner-minimal.
+# Default odf uses the QE fork (RHDR catalog, mixed Windows/Linux fleet, HammerDB).
+resolve_pattern_variant || exit 1
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
@@ -345,7 +332,6 @@ pattern_install_recoverable() {
 # Helm --set main.clusterGroupName=null does not drop the field on an existing
 # Pattern CR, so a QE hub clustergroup Application keeps fighting the variant.
 clear_legacy_cluster_group_name() {
-  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
   if ! oc get pattern ramendr-starter-kit -n patterns-operator \
     -o jsonpath='{.spec.clusterGroupName}' 2>/dev/null | grep -q .; then
     return 0
@@ -368,7 +354,6 @@ _orphan_delete_application() {
 # vp-gitops keeps both parents Degraded (shared ClusterRoles) and blocks later
 # sync waves (opp-policy, regional-dr).
 retire_previous_clustergroup_apps() {
-  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
   local keep child app
   keep="$(hub_pattern_app_name)"
   for app in $(oc get applications.argoproj.io -n vp-gitops \
@@ -482,11 +467,7 @@ cleanup_variant_leftovers() {
 }
 
 prepare_upstream() {
-  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
-    log "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
-  else
-    log "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
-  fi
+  log "Pattern variant: ${PATTERN_VARIANT} (main.variant)"
   log "Preparing upstream checkout at $UPSTREAM_REF..."
   mkdir -p "$WORK_DIR/upstream"
 
@@ -882,7 +863,7 @@ deploy_pattern() {
   # pattern-install uses TARGET_VARIANT as the DNS-length clusterGroup name.
   # Official drpartner-minimal exceeds that limit; the QE fork sets
   # clusterGroup.name=minimal in variants/drpartner-minimal values instead.
-  local target_variant="${PATTERN_VARIANT:-}"
+  local target_variant="$PATTERN_VARIANT"
   if [[ "$target_variant" == "drpartner-minimal" ]]; then
     log "Omitting TARGET_VARIANT for drpartner-minimal (DNS length); using clusterGroup.name from variant values."
     target_variant=""
@@ -1108,11 +1089,7 @@ show_status() {
   echo " RamenDR Starter Kit — Environment Status"
   echo "============================================"
   echo ""
-  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
-    echo "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
-  else
-    echo "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
-  fi
+  echo "Pattern variant: ${PATTERN_VARIANT} (main.variant)"
   echo "Upstream: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}") @ ${UPSTREAM_REF} (${UPSTREAM_BRANCH})"
   echo ""
   echo "--- Clusters ---"
@@ -1242,10 +1219,9 @@ case "${1:-}" in
     echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
     echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
     echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
-    echo " PATTERN_VARIANT         v1.3 install variant: odf | drpartner-s4 | drpartner-minimal"
-    echo "                         Unset keeps the QE mixed-fleet fork (clusterGroupName layout)."
-    echo "                         When set, defaults UPSTREAM_* to validatedpatterns ramendr-starter-kit v1.3"
-    echo "                         and writes main.variant into the local checkout values-global.yaml."
+    echo " PATTERN_VARIANT         Install variant: odf (default) | drpartner-s4 | drpartner-minimal"
+    echo "                         All variants use elsapassaro fork ocp-4.22-rhdr-ramen @ ${UPSTREAM_REF}"
+    echo "                         Partner variants get RHDR catalog via local values patch at install time."
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"

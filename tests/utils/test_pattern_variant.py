@@ -1,21 +1,13 @@
 import tests.utils.pattern_variant as pv
 
 
-def test_qe_mixed_fleet_when_variant_unset(monkeypatch):
-    monkeypatch.setattr(pv, "PATTERN_VARIANT", "")
+def test_odf_variant_is_default_qe_mixed_fleet(monkeypatch):
+    monkeypatch.delenv("PATTERN_VARIANT", raising=False)
+    import importlib
+
+    importlib.reload(pv)
+    assert pv.PATTERN_VARIANT == "odf"
     assert pv.is_qe_mixed_fleet()
-    assert not pv.is_v13_variant()
-    assert not pv.is_partner_variant()
-    assert pv.has_odf_mirrorpeer()
-    assert pv.has_edge_vms()
-    assert pv.has_vm_drpc()
-    assert not pv.has_s4_storage()
-    assert pv.hub_argocd_namespace() == "ramendr-starter-kit-hub"
-
-
-def test_odf_variant_keeps_odf_without_qe_windows_fleet(monkeypatch):
-    monkeypatch.setattr(pv, "PATTERN_VARIANT", "odf")
-    assert not pv.is_qe_mixed_fleet()
     assert pv.is_v13_variant()
     assert not pv.is_partner_variant()
     assert pv.has_odf_mirrorpeer()
