@@ -39,7 +39,7 @@ export PATTERN_VARIANT
         ("Missing", "Healthy", "Progressing", "1", "0"),
         ("Missing", "Unknown", "Healthy", "1", "0"),
         ("Missing", "Unknown", "Progressing", "3", "0"),
-        ("Missing", "Unknown", "Progressing", "1", "1"),
+        ("Missing", "Unknown", "Progressing", "0", "1"),
     ],
 )
 def test_pattern_install_recoverable_or_semantics(hub, rdr, acm, joined, expected):
@@ -49,12 +49,9 @@ hub_pattern_app_health() {{ echo "{hub}"; }}
 oc() {{
   if [[ "$*" == *"regional-dr"* ]]; then echo "{rdr}"; return 0; fi
   if [[ "$*" == *"application.argoproj.io acm"* ]]; then echo "{acm}"; return 0; fi
-  if [[ "$*" == *"managedclusters --no-headers"* ]]; then
-    seq 1 {joined} | while read -r _; do echo mc; done
-    return 0
-  fi
   return 0
 }}
+pattern_install_joined_cluster_count() {{ echo "{joined}"; }}
 hub_argocd_namespace() {{ echo "{ns}"; }}
 hub_pattern_app_name() {{ echo "{ns}"; }}
 if pattern_install_recoverable; then echo 0; else echo 1; fi

@@ -870,9 +870,6 @@ deploy_pattern() {
   wait "$bootstrap_pid" 2>/dev/null || true
   bootstrap_byoc_spoke_import || warn "BYOC spoke bootstrap incomplete."
 
-  clear_legacy_cluster_group_name
-  retire_previous_clustergroup_apps
-
   if [[ $pattern_exit -ne 0 ]]; then
     warn "pattern.sh make install-byoc returned non-zero — checking recoverability..."
     if pattern_install_recoverable; then
@@ -881,6 +878,13 @@ deploy_pattern() {
       err "Pattern install failed and cluster appears non-recoverable."
       exit 1
     fi
+  fi
+
+  clear_legacy_cluster_group_name
+  if oc get application.argoproj.io "$(hub_pattern_app_name)" -n vp-gitops &>/dev/null; then
+    retire_previous_clustergroup_apps
+  else
+    warn "Skipping clustergroup retirement — parent application not present yet."
   fi
 
   cleanup_variant_leftovers

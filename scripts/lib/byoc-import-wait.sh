@@ -131,6 +131,16 @@ byoc_spokes_joined_count() {
   echo "$count"
 }
 
+pattern_install_joined_cluster_count() {
+  local status count=0
+  while read -r status; do
+    [[ "$status" == "True" ]] && count=$((count + 1))
+  done < <(oc get managedcluster \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="ManagedClusterJoined")].status}{"\n"}{end}' \
+    2>/dev/null || true)
+  echo "$count"
+}
+
 wait_for_byoc_spoke_import() {
   local cluster failed=0
   _byoc_log "Waiting for BYOC spoke import (${SPOKE_CLUSTERS})..."
@@ -159,7 +169,7 @@ pattern_install_recoverable() {
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
   acm_health=$(oc get application.argoproj.io acm -n "$ns" \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
+  joined="$(pattern_install_joined_cluster_count 2>/dev/null || echo 0)"
   [[ "$hub_health" == "Healthy" ]] \
     || [[ "$rdr_health" == "Healthy" ]] \
     || [[ "$acm_health" == "Healthy" ]] \
@@ -211,6 +221,7 @@ pattern_install_early_exit_watcher() {
     sleep "$PATTERN_INSTALL_EARLY_EXIT_SLEEP"
     [[ -n "${KUBECONFIG:-}" ]] || continue
 
+    reason=""
     hub_health="$(hub_pattern_app_health)"
     rdr_health=$(oc get application.argoproj.io regional-dr -n "$ns" \
       -o jsonpath='{.status.health.status}' 2>/dev/null || true)
