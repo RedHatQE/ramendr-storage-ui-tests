@@ -313,22 +313,6 @@ hub_pattern_app_health() {
       -o jsonpath='{.status.health.status}' 2>/dev/null || true
 }
 
-pattern_install_recoverable() {
-  local hub_health rdr_health joined acm_health ns
-  ns="$(hub_argocd_namespace)"
-  hub_health="$(hub_pattern_app_health)"
-  rdr_health=$(oc get application.argoproj.io regional-dr \
-    -n "$ns" \
-    -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  acm_health=$(oc get application.argoproj.io acm \
-    -n "$ns" \
-    -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
-  [[ "${joined:-0}" -ge 3 ]] || return 1
-  [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]] \
-    || [[ "$acm_health" == "Healthy" ]]
-}
-
 # Helm --set main.clusterGroupName=null does not drop the field on an existing
 # Pattern CR, so a QE hub clustergroup Application keeps fighting the variant.
 clear_legacy_cluster_group_name() {
@@ -859,42 +843,42 @@ deploy_pattern() {
   prepare_byoc_values_secret || exit 1
 
   log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."
-  local pattern_exit=0
-  # pattern-install uses TARGET_VARIANT as the DNS-length clusterGroup name.
-  # Official drpartner-minimal exceeds that limit; the QE fork sets
-  # clusterGroup.name=minimal in variants/drpartner-minimal values instead.
-  local target_variant="$PATTERN_VARIANT"
+  local pattern_exit=0 target_variant="$PATTERN_VARIANT"
   if [[ "$target_variant" == "drpartner-minimal" ]]; then
     log "Omitting TARGET_VARIANT for drpartner-minimal (DNS length); using clusterGroup.name from variant values."
     target_variant=""
   fi
-  ( cd "$UPSTREAM_DIR" && \
-      KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig" \
+
+  bootstrap_byoc_spoke_import &
+  local bootstrap_pid=$!
+  (
+    cd "$UPSTREAM_DIR"
+    KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig" \
       VALUES_SECRET="$BYOC_VALUES_SECRET" \
       TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" \
       TARGET_BRANCH="${UPSTREAM_BRANCH}" \
       TARGET_VARIANT="${target_variant}" \
-      ./pattern.sh make install-byoc 2>&1 ) \
-    || pattern_exit=$?
+      ./pattern.sh make install-byoc 2>&1
+  ) &
+  local pattern_pid=$!
+  pattern_install_early_exit_watcher "$pattern_pid" &
+  local watcher_pid=$!
+
+  wait "$pattern_pid" || pattern_exit=$?
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$bootstrap_pid" 2>/dev/null || true
+  bootstrap_byoc_spoke_import || warn "BYOC spoke bootstrap incomplete."
 
   clear_legacy_cluster_group_name
   retire_previous_clustergroup_apps
 
   if [[ $pattern_exit -ne 0 ]]; then
-    # pattern.sh often times out because regional-dr and/or the parent clustergroup
-    # Application are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
-    warn "pattern.sh make install-byoc returned non-zero — checking whether this is recoverable drift..."
-    local hub_health rdr_health
-    hub_health="$(hub_pattern_app_health)"
-    rdr_health=$(oc get application.argoproj.io regional-dr \
-      -n "$(hub_argocd_namespace)" \
-      -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+    warn "pattern.sh make install-byoc returned non-zero — checking recoverability..."
     if pattern_install_recoverable; then
-      warn "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
-      warn "Treating as recoverable drift — continuing with fix-up functions."
+      warn "Recoverable — continuing (hub=$(hub_pattern_app_health))."
     else
       err "Pattern install failed and cluster appears non-recoverable."
-      err "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
       exit 1
     fi
   fi
@@ -904,6 +888,7 @@ deploy_pattern() {
   if ! wait_for_byoc_spoke_import; then
     warn "BYOC spoke import did not complete within timeout; resilient GitOps and DR bootstrap may fail."
   fi
+  nudge_progressing_odf_apps
 
   prepare_spoke_argo_appprojects_on_all_spokes || \
     warn "[spoke-gitops] AppProject/default pre-create incomplete; resilient parent sync may wedge."
@@ -1266,6 +1251,9 @@ case "${1:-}" in
     echo " SPOKE_ODF_STORAGE_WAIT_SLEEP      Seconds between ODF Available polls (default 30)"
     echo " BYOC_IMPORT_WAIT_ATTEMPTS      Wait for ESO/MC spoke import per step (default 40)"
     echo " BYOC_IMPORT_WAIT_SLEEP         Seconds between BYOC import polls (default 30)"
+    echo " BYOC_BOOTSTRAP_SPOKE_IMPORT    Bootstrap spoke hub ns + import secrets (default 1)"
+    echo " PATTERN_INSTALL_EARLY_EXIT_CHECKS  Stable checks before cutting install-byoc short (default 3)"
+    echo " PATTERN_INSTALL_EARLY_EXIT_SLEEP   Seconds between early-exit polls (default 30)"
     ;;
   *)
     full_redeploy
