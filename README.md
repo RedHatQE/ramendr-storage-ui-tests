@@ -4,12 +4,13 @@ This repository is a **test harness** for the RamenDR validated pattern.
 
 **Default (`PATTERN_VARIANT=odf`):** deploys from the maintained fork
 [elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22-rhdr-ramen`) —
-RHDR operator from the custom catalog, mixed 4-VM fleet (2 Linux + 2 Windows), HammerDB, ODF.
+upstream v1.3 plus QE overrides, preview RHDR (`rhdr-catalog`) on the `odf` variant, mixed 4-VM fleet
+(2 Linux + 2 Windows), HammerDB, ODF.
 **`redeploy.sh` pins a fixed commit SHA** for the local pattern install; **hub Argo CD** reconciles
 from the fork's remote branch on GitHub (see [Upstream pinning](#upstream-pinning) below).
 
 **Partner variants:** set `PATTERN_VARIANT` to `drpartner-s4` or `drpartner-minimal`. All variants use the same
-elsapassaro fork; partner BOMs differ only in `variants/<name>/` (RHDR catalog is applied at install time).
+elsapassaro fork; partner BOMs differ only in `variants/<name>/` (preview RHDR is committed in git).
 
 It contains:
 
@@ -21,14 +22,15 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `11327fb0f7e44ae34c4b8e6af7de167756684e1d` (tip of fork branch `ocp-4.22-rhdr-ramen`) into `.work/upstream/ramendr-starter-kit` and set `main.variant: odf`.
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `59e84b5d2ce44a987859d153b0cc365033135dd5` (tip of fork branch `ocp-4.22-rhdr-ramen`) into `.work/upstream/ramendr-starter-kit` and set `main.variant: odf`.
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
-4. Apply upstream `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR operator images) to hub + both spokes.
-5. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
+4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
    paths (`ocp-primary_cluster_kubeconfig`, `ocp-secondary_cluster_kubeconfig`), and run
    upstream `pattern.sh make install-byoc` (loads secrets to Vault, validates BYOC, deploys pattern).
-6. Wait for ExternalSecrets to create `auto-import-secret` and `admin-kubeconfig` on the hub; ACM
+   Preview RHDR ImageDigestMirrorSet is applied by GitOps `extraObjects.rhdr-fbc-idms` during
+   that install (the old `APPLY_ME_FIRST.idms.yaml` was dropped on this pin).
+5. Wait for ExternalSecrets to create `auto-import-secret` and `admin-kubeconfig` on the hub; ACM
    imports the spokes.
 
 > **BYOC:** The fork sets `byoc: true`. Your `~/values-secret.yaml` may omit spoke kubeconfigs or
@@ -43,7 +45,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `11327fb0f7e44ae34c4b8e6af7de167756684e1d` (`ocp-4.22-rhdr-ramen`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `59e84b5d2ce44a987859d153b0cc365033135dd5` (`ocp-4.22-rhdr-ramen`) |
 | Hub Argo CD Applications | Remote git on GitHub | Fork branch `ocp-4.22-rhdr-ramen` (`main.variant: odf` on tip). Partner variants need a fork branch/commit with matching `main.variant` for stable GitOps. |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
@@ -166,9 +168,9 @@ Values live under `variants/<name>/`. See the
 
 | `PATTERN_VARIANT` | Upstream default | Purpose |
 |-------------------|------------------|---------|
-| `odf` *(default)* | QE fork `ocp-4.22-rhdr-ramen` | RHDR catalog, mixed 4-VM fleet (2 Linux + 2 Windows), HammerDB, ODF |
-| `drpartner-s4` | Same fork | Partner CSI + S4; RHDR catalog; DRPolicy `2m-drpolicy`; no VMs |
-| `drpartner-minimal` | Same fork | Partner CSI only; RHDR catalog; no S4 / DRPolicy / VMs |
+| `odf` *(default)* | QE fork `ocp-4.22-rhdr-ramen` | Preview RHDR (`rhdr-catalog`), mixed 4-VM fleet (2 Linux + 2 Windows), HammerDB, ODF |
+| `drpartner-s4` | Same fork | Partner CSI + S4; preview RHDR from upstream v1.3; DRPolicy `2m-drpolicy`; no VMs |
+| `drpartner-minimal` | Same fork | Partner CSI only; preview RHDR from upstream v1.3; no S4 / DRPolicy / VMs |
 
 ```bash
 # Default (odf) — no env var needed:
@@ -186,7 +188,7 @@ export PATTERN_VARIANT=drpartner-s4   # or drpartner-minimal
 and ODF golden-image fix-up (override with `REQUIRE_WINDOWS_VMS` / `SKIP_*`).
 
 **GitOps:** hub Argo CD reads `values-global.yaml` from the **git remote**, not the local patch.
-The fork at `11327fb0…` must have `main.variant: odf` committed. Partner deploys need a fork that
+The fork at `59e84b5d…` must have `main.variant: odf` committed. Partner deploys need a fork that
 **commits** `drpartner-s4` or `drpartner-minimal`, then `UPSTREAM_REPO` pointed at that fork.
 
 ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is

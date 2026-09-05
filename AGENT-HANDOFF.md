@@ -5,8 +5,8 @@ This document summarizes decisions and context from prior work so another agent 
 ## What this repository is
 
 - **Consumer / test harness** for upstream RamenDR starter-kit with three install variants (`PATTERN_VARIANT`):
-  - All variants pin [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit) **`11327fb0f7e44ae34c4b8e6af7de167756684e1d`** (branch **`ocp-4.22-rhdr-ramen`**).
-  - **`odf`:** mixed 4-VM fleet + HammerDB. **`drpartner-*`:** partner CSI BOMs; RHDR catalog patched at install time.
+  - All variants pin [`elsapassaro/ramendr-starter-kit`](https://github.com/elsapassaro/ramendr-starter-kit) **`59e84b5d2ce44a987859d153b0cc365033135dd5`** (branch **`ocp-4.22-rhdr-ramen`**, upstream v1.3 + QE odf overrides).
+  - **`odf`:** mixed 4-VM fleet + HammerDB + preview RHDR committed in git. **`drpartner-*`:** partner CSI BOMs with upstream v1.3 preview RHDR (no local catalog rewrite).
 - **Does not** long-term fork upstream. Environment customizations (Windows edge VMs, BYOC, ODF pins, cost profiles) live in the **fork** on GitHub; this repo only patches upstream `pattern.sh` locally (non-TTY podman).
 - **Future:** Playwright + Python UI tests (partially implemented). **Today:** deployment scripts, install-config examples, DR validation.
 
@@ -21,7 +21,7 @@ This document summarizes decisions and context from prior work so another agent 
 2. Checks out the **shared default fork pin** (`UPSTREAM_REF` / `UPSTREAM_BRANCH` above; same for all variants). Override with `UPSTREAM_REPO`, `UPSTREAM_REF`, `UPSTREAM_BRANCH`, `PATTERN_VARIANT`, `WORK_DIR`, `UPSTREAM_DIR`. Always patches local `values-global.yaml` (`main.variant`) and `overrides/values-cluster-names.yaml` (`byoc: true`).
 3. Patches upstream `**pattern.sh`** **from inside `$UPSTREAM_DIR`** so `podman` uses `-i` when no TTY (upstream uses `podman run -it` which fails in CI when stdin/stdout are not a terminal) and so Darwin arm64 runs the amd64 utility container under emulation.
 4. Provisions **hub + two spokes** via `openshift-install` using directories `**HUB_INSTALL_DIR`**, `**PRIMARY_INSTALL_DIR`**, `**SECONDARY_INSTALL_DIR**` (each needs `**install-config.yaml.bak**`).
-5. Applies upstream `**APPLY_ME_FIRST.idms.yaml**` (Quay ImageDigestMirrorSet for RHDR images) to hub + both spokes.
+5. Relies on GitOps `extraObjects.rhdr-fbc-idms` for RHDR ImageDigestMirrorSet (`APPLY_ME_FIRST.idms.yaml` was dropped). If an older pin still ships that file, `redeploy.sh` applies it before `install-byoc`.
 6. Merges spoke kubeconfig paths into `**.work/values-secret.yaml**` (copy of `VALUES_SECRET`; source file never modified) and runs `**./pattern.sh make install-byoc**` from the upstream checkout.
 7. Waits for BYOC spoke import (ExternalSecrets + `ManagedCluster` Joined), spoke resilient GitOps / ODF, golden-image fix-up, hub convergence, **Windows VM stabilization** (`REQUIRE_WINDOWS_VMS=1` by default), then DR validation bootstrap.
 

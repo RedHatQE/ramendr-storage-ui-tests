@@ -21,9 +21,11 @@ The entrypoint is `scripts/redeploy.sh`.
 **Upstream pinning (single fork, all variants):**
 
 - Local checkout and default pin: `elsapassaro/ramendr-starter-kit` branch `ocp-4.22-rhdr-ramen` at
-  `11327fb0f7e44ae34c4b8e6af7de167756684e1d`. Override with `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
-- `redeploy.sh` patches `main.variant`, enables RHDR catalog on hub + spokes (`ramen-catalog`,
-  `rhdr-multicluster-operator`, `rhdr-cluster-operator`), and sets `byoc: true` in the local checkout.
+  `59e84b5d2ce44a987859d153b0cc365033135dd5` (upstream v1.3 + QE odf overrides). Override with
+  `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
+- `redeploy.sh` patches `main.variant` and sets `byoc: true` in the local checkout. Preview RHDR
+  (`rhdr-catalog`, `rhdr-multicluster-operator`, GitOps `extraObjects` IDMS) is already committed
+  in the fork; do not locally rewrite catalog subscriptions.
 - Hub Argo CD reads git, not local patches. Tip commit has `main.variant: odf`; partner variants warn unless
   the fork branch commits the matching variant.
 
@@ -32,9 +34,9 @@ cost-optimized values, RHDR Quay IDMS) live in the fork's `ocp-4.22-rhdr-ramen` 
 `overrides/` and values files. Partner BOMs live under `variants/<name>/` in the configured
 fork checkout. Local edits next to the checkout do not affect Argo CD.
 
-- After hub + spoke `openshift-install`, `redeploy.sh` applies upstream
-  `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR images) to hub + both
-  spokes, then copies `VALUES_SECRET` to `.work/values-secret.yaml`, merges spoke kubeconfig
+- After hub + spoke `openshift-install`, RHDR ImageDigestMirrorSet is applied by GitOps
+  `extraObjects.rhdr-fbc-idms` (the old `APPLY_ME_FIRST.idms.yaml` was dropped). Then
+  `redeploy.sh` copies `VALUES_SECRET` to `.work/values-secret.yaml`, merges spoke kubeconfig
   file paths, and runs `pattern.sh make install-byoc`. Vault + ExternalSecrets deliver
   kubeconfigs to ACM (no manual `oc create secret`).
 

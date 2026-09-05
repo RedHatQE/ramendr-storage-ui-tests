@@ -21,7 +21,7 @@ WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 source "$REPO_ROOT/scripts/lib/pattern-variant.sh"
 
 # PATTERN_VARIANT selects the install BOM (main.variant): odf | drpartner-s4 | drpartner-minimal.
-# Default odf uses the QE fork (RHDR catalog, mixed Windows/Linux fleet, HammerDB).
+# Default odf uses the QE fork (preview RHDR in git, mixed Windows/Linux fleet, HammerDB).
 resolve_pattern_variant || exit 1
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
@@ -803,12 +803,12 @@ scale_hub_workers() {
 }
 
 apply_rhdr_idms() {
-  # Quay ImageDigestMirrorSet for RHDR operator images (APPLY_ME_FIRST.idms.yaml in the
-  # upstream checkout). Must land on hub + spokes after openshift-install and before
-  # pattern.sh make install-byoc so OLM can pull mirrored bundles promptly.
+  # Legacy early IDMS apply. Fork pin 5159788d dropped APPLY_ME_FIRST.idms.yaml;
+  # preview RHDR IDMS is GitOps extraObjects.rhdr-fbc-idms on hub + spoke BOMs.
+  # Keep this path for older UPSTREAM_REF overrides that still ship the file.
   local idms_file="${UPSTREAM_DIR}/APPLY_ME_FIRST.idms.yaml"
   if [[ ! -f "$idms_file" ]]; then
-    warn "No APPLY_ME_FIRST.idms.yaml in upstream checkout (${idms_file}); skipping IDMS."
+    log "No APPLY_ME_FIRST.idms.yaml in upstream checkout; RHDR IDMS comes from GitOps extraObjects.rhdr-fbc-idms."
     return 0
   fi
 
@@ -1210,7 +1210,7 @@ case "${1:-}" in
     echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
     echo " PATTERN_VARIANT         Install variant: odf (default) | drpartner-s4 | drpartner-minimal"
     echo "                         All variants use elsapassaro fork ocp-4.22-rhdr-ramen @ ${UPSTREAM_REF}"
-    echo "                         Partner variants get RHDR catalog via local values patch at install time."
+    echo "                         Preview RHDR (rhdr-catalog) is committed in the fork; partner BOMs differ in variants/<name>/."
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"

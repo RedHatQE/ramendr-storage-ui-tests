@@ -2,7 +2,9 @@
 # RamenDR starter-kit install variant helpers for BYOC redeploy.
 #
 # PATTERN_VARIANT selects the install BOM via main.variant in values-global.yaml.
-# All variants use the QE fork (RHDR catalog); partner BOMs differ only in variants/<name>/.
+# All variants use the QE fork (upstream v1.3 + QE odf overrides). Partner BOMs
+# differ only in variants/<name>/. Preview RHDR (rhdr-catalog, rhdr-multicluster-operator,
+# extraObjects IDMS) is committed in git — do not rewrite catalog subscriptions locally.
 #
 # shellcheck shell=bash
 
@@ -10,7 +12,7 @@ DEFAULT_PATTERN_VARIANT=odf
 PATTERN_VARIANTS="odf drpartner-s4 drpartner-minimal"
 
 : "${UPSTREAM_REPO:=https://github.com/elsapassaro/ramendr-starter-kit}"
-: "${UPSTREAM_REF:=11327fb0f7e44ae34c4b8e6af7de167756684e1d}"
+: "${UPSTREAM_REF:=59e84b5d2ce44a987859d153b0cc365033135dd5}"
 : "${UPSTREAM_BRANCH:=ocp-4.22-rhdr-ramen}"
 
 _pv_log() {
@@ -138,13 +140,6 @@ apply_pattern_variant() {
 
   _pv_log "Selecting pattern variant ${PATTERN_VARIANT} in ${values_global}..."
   python3 "$yaml_helper" apply "$values_global" "$PATTERN_VARIANT" || return 1
-
-  if python3 "$yaml_helper" rhdr "$dir" "$PATTERN_VARIANT"; then
-    :
-  else
-    return 1
-  fi
-  _pv_log "Ensured RHDR catalog (ramen-catalog / rhdr-multicluster-operator) in variant ${PATTERN_VARIANT} values."
 
   local cluster_names="${dir}/overrides/values-cluster-names.yaml"
   if [[ -f "$cluster_names" ]]; then
