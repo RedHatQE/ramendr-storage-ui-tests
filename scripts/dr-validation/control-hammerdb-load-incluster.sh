@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Start or stop HammerDB autopilot + audit writers on all edge VMs via in-cluster SSH.
+# start enables units / AtStartup for the sanity DR window; stop disables them again.
 # Usage: control-hammerdb-load-incluster.sh start|stop
 set -euo pipefail
 
@@ -109,12 +110,18 @@ spec:
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
             cp /ssh/hosts.tsv /tmp/hosts.tsv
             ACTION="\${HAMMERDB_LOAD_ACTION}"
+            # Stop restores install-time "not enabled at boot". Start enables for the
+            # sanity/DR window so both writers resume after failover reboot together.
+            LINUX_STOP="sudo systemctl stop ramendr-dr-hammerdb.service ramendr-dr-db-audit.service || true; sudo systemctl disable ramendr-dr-hammerdb.service ramendr-dr-db-audit.service || true; if sudo systemctl is-active --quiet ramendr-dr-hammerdb.service || sudo systemctl is-active --quiet ramendr-dr-db-audit.service; then exit 1; fi"
+            WINDOWS_STOP='powershell -NoProfile -ExecutionPolicy Bypass -Command "\$names = @('\''ramendr-dr-hammerdb'\'','\''ramendr-dr-db-audit'\''); foreach (\$n in \$names) { Stop-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue; Set-ScheduledTask -TaskName \$n -Trigger (New-ScheduledTaskTrigger -Once -At ([datetime]'\''2099-01-01T00:00:00'\'')) | Out-Null }; foreach (\$n in \$names) { if (((Get-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue).State) -eq '\''Running'\'') { exit 1 } }"'
+            LINUX_START="sudo systemctl enable --now ramendr-dr-hammerdb.service ramendr-dr-db-audit.service && for _i in 1 2 3 4 5 6; do sudo systemctl is-active --quiet ramendr-dr-hammerdb.service && sudo systemctl is-active --quiet ramendr-dr-db-audit.service && exit 0; sleep 1; done; exit 1"
+            WINDOWS_START='powershell -NoProfile -ExecutionPolicy Bypass -Command "\$names = @('\''ramendr-dr-hammerdb'\'','\''ramendr-dr-db-audit'\''); foreach (\$n in \$names) { \$trig = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At ([datetime]'\''2099-01-01T00:00:00'\''))); Set-ScheduledTask -TaskName \$n -Trigger \$trig | Out-Null; Start-ScheduledTask -TaskName \$n }; Start-Sleep -Seconds 2; foreach (\$n in \$names) { if (((Get-ScheduledTask -TaskName \$n).State) -ne '\''Running'\'') { exit 1 } }"'
             if [[ "\$ACTION" == "start" ]]; then
-              LINUX_CMD="sudo systemctl start ramendr-dr-hammerdb.service ramendr-dr-db-audit.service"
-              WINDOWS_CMD='powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-ScheduledTask -TaskName ramendr-dr-hammerdb; Start-ScheduledTask -TaskName ramendr-dr-db-audit"'
+              LINUX_CMD="\$LINUX_START"
+              WINDOWS_CMD="\$WINDOWS_START"
             else
-              LINUX_CMD="sudo systemctl stop ramendr-dr-hammerdb.service ramendr-dr-db-audit.service || true; sudo systemctl disable ramendr-dr-hammerdb.service ramendr-dr-db-audit.service || true; if sudo systemctl is-active --quiet ramendr-dr-hammerdb.service || sudo systemctl is-active --quiet ramendr-dr-db-audit.service; then exit 1; fi"
-              WINDOWS_CMD='powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-ScheduledTask -TaskName ramendr-dr-hammerdb -ErrorAction SilentlyContinue; Stop-ScheduledTask -TaskName ramendr-dr-db-audit -ErrorAction SilentlyContinue; if (((Get-ScheduledTask -TaskName ramendr-dr-hammerdb -ErrorAction SilentlyContinue).State) -eq '\''Running'\'') { exit 1 }; if (((Get-ScheduledTask -TaskName ramendr-dr-db-audit -ErrorAction SilentlyContinue).State) -eq '\''Running'\'') { exit 1 }"'
+              LINUX_CMD="\$LINUX_STOP"
+              WINDOWS_CMD="\$WINDOWS_STOP"
             fi
             ssh_linux() {
               local host="\$1" port="\$2" ssh_user="\$3"
@@ -161,6 +168,21 @@ spec:
                 fi
               fi
             done < /tmp/hosts.tsv
+            if [[ "\$fail" -ne 0 && "\$ACTION" == "start" ]]; then
+              echo "Rolling back HammerDB start on all targets..."
+              LINUX_CMD="\$LINUX_STOP"
+              WINDOWS_CMD="\$WINDOWS_STOP"
+              while IFS=\$'\t' read -r name host port platform ssh_user; do
+                [[ -z "\$name" ]] && continue
+                port="\${port:-22}"
+                echo "===LOAD:rollback:\${name}==="
+                if [[ "\$platform" == windows ]]; then
+                  ssh_windows "\$host" "\$port" "\$ssh_user" || true
+                else
+                  ssh_linux "\$host" "\$port" "\$ssh_user" || true
+                fi
+              done < /tmp/hosts.tsv
+            fi
             exit "\$fail"
       volumes:
       - name: ssh

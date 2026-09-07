@@ -126,6 +126,7 @@ def collect_db_snapshot(
     out_dir: Path,
     skip_audit_refresh: bool = False,
     status_only: bool = False,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     script = (
         repo_root() / "scripts" / "dr-validation" / "collect-db-snapshot-incluster.sh"
@@ -136,6 +137,7 @@ def collect_db_snapshot(
         env["DR_VALIDATION_SKIP_AUDIT_REFRESH"] = "1"
     if status_only:
         env["DR_VALIDATION_SNAPSHOT_STATUS_ONLY"] = "1"
+    collect_timeout = _COLLECT_TIMEOUT_SECONDS if timeout is None else timeout
     return subprocess.run(  # noqa: S603
         ["bash", str(script), str(out_dir)],  # noqa: S607
         cwd=repo_root(),
@@ -143,7 +145,7 @@ def collect_db_snapshot(
         text=True,
         capture_output=True,
         check=False,
-        timeout=_COLLECT_TIMEOUT_SECONDS,
+        timeout=collect_timeout,
     )
 
 

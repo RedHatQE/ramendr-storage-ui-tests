@@ -17,7 +17,8 @@ Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
    databases exist (`status-hammerdb.sh --schema-only`). Redeploy does **not** save a DR
    baseline and does **not** start OLTP.
 2. **Before DR (sanity)** — after `gitops-vm-protection` is Healthy, sanity starts
-   autopilot + audit on every VM, polls until the audit trail is live (~1 min), then
+   autopilot + audit on every VM (`systemctl enable --now` / Windows AtStartup so both
+   resume after failover reboot), polls until the audit trail is live (~1 min), then
    captures a fresh baseline immediately before Initiate. For manual DR:
    `./scripts/dr-validation/start-hammerdb-load-incluster.sh`, then
    `./scripts/dr-validation/status-hammerdb.sh` (fresh audit on every VM), then
@@ -27,8 +28,8 @@ Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
 4. **After DR** — sanity or `./scripts/dr-validation/post-dr-automation.sh` validates
    TPC-C table data on all supported platforms (PostgreSQL on Linux, SQL Server on Windows).
    Sanity **stops** the writers on teardown (pass, fail, or skip after start). Manual:
-   `./scripts/dr-validation/stop-hammerdb-load-incluster.sh` (Linux also `systemctl disable`
-   so a reboot does not resume OLTP).
+   `./scripts/dr-validation/stop-hammerdb-load-incluster.sh` (Linux `systemctl disable`
+   and Windows drop the AtStartup trigger so a reboot does not resume OLTP).
 
 Do **not** `TRUNCATE`/`DELETE` TPC-C tables to reclaim space: post-DR compare treats
 row-count drops as data loss, and live TPC-C needs FK-consistent rows.
@@ -45,7 +46,7 @@ and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 | `ramendr_dr_validation/db_snapshot.py` | Export DB snapshot JSON |
 | `ramendr_dr_validation/db_validator.py` | Gap/RPO/TPC-C validation |
 | `scripts/dr-validation/install-hammerdb-incluster.sh` | In-cluster SSH install job |
-| `scripts/dr-validation/start-hammerdb-load-incluster.sh` | Start autopilot + audit on all VMs |
+| `scripts/dr-validation/start-hammerdb-load-incluster.sh` | Start autopilot + audit; enable at boot for the DR window |
 | `scripts/dr-validation/stop-hammerdb-load-incluster.sh` | Stop writers; Linux disable on boot |
 | `scripts/dr-validation/status-hammerdb.sh` | OLTP recording check (audit freshness) |
 | `scripts/dr-validation/status-hammerdb.sh --schema-only` | Schema-present check (no audit required) |

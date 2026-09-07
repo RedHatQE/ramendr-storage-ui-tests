@@ -1107,15 +1107,32 @@ def _wait_until_hammerdb_oltp_ready(snapshot_root: Path) -> None:
     deadline = time.monotonic() + _HAMMERDB_OLTP_SETTLE_TIMEOUT_SECONDS
     last_error = "HammerDB OLTP did not become ready (no snapshot collected yet)"
     attempt = 0
-    while time.monotonic() < deadline:
+    collect_cap = float(os.getenv("RAMENDR_DR_COLLECT_TIMEOUT_SECONDS", "600"))
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            break
         attempt += 1
         snapshot_dir = snapshot_root / f"settle-{attempt}"
-        collected = collect_db_snapshot(
-            kubeconfig=HUB_KUBECONFIG,
-            out_dir=snapshot_dir,
-            skip_audit_refresh=True,
-            status_only=True,
-        )
+        collect_timeout = min(remaining, collect_cap)
+        try:
+            collected = collect_db_snapshot(
+                kubeconfig=HUB_KUBECONFIG,
+                out_dir=snapshot_dir,
+                skip_audit_refresh=True,
+                status_only=True,
+                timeout=collect_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            last_error = (
+                f"snapshot collect exceeded remaining settle time "
+                f"({collect_timeout:.0f}s)"
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_HAMMERDB_OLTP_SETTLE_POLL_SECONDS, remaining))
+            continue
         if collected.returncode == 0:
             try:
                 assert_all_hammerdb_snapshots_ready(
@@ -1239,13 +1256,13 @@ class TestUiSanity:
             timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
         )
 
+        _hammerdb_oltp_started = True
         started = start_hammerdb_load(kubeconfig=HUB_KUBECONFIG)
         assert started.returncode == 0, (
             "Failed to start HammerDB autopilot + audit on edge VMs.\n"
             f"stdout:\n{started.stdout}\n"
             f"stderr:\n{started.stderr}"
         )
-        _hammerdb_oltp_started = True
         _wait_until_hammerdb_oltp_ready(tmp_path / "hammerdb-oltp")
 
     def test_sanity_disaster_recovery_ui(self, page):
