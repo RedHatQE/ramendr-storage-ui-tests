@@ -54,12 +54,26 @@ tpcc_table_row_count() {
     "SELECT COUNT(*) FROM $(pg_quote_ident "$table");" 2>/dev/null || echo 0
 }
 
+tpcc_table_exists() {
+  local table="$1"
+  local count
+  count="$(sudo -u postgres "$PSQL" -d "$PG_DATABASE" -Atqc \
+    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name=$(pg_quote_literal "$table");" \
+    2>/dev/null || echo 0)"
+  [[ "${count:-0}" -ge 1 ]]
+}
+
 # Same min>0 thresholds as ramendr_dr_validation.tpcc_schema.TPCC_MIN_ROW_COUNTS.
 # Tables exist (and warehouse has a row) after CREATING TPCC TABLES / Loading
 # Warehouse — before customer/stock finish. Stopping autopilot on that race
 # leaves customer=0 and fails schema-only status.
+# Zero-min tables (orders/order_line/new_order/history) must still exist:
+# COUNT(*) returns 0 for a missing table, which would skip rebuild.
 tpcc_schema_populated() {
-  local warehouse district customer stock item
+  local table warehouse district customer stock item
+  for table in warehouse district customer stock item orders order_line new_order history; do
+    tpcc_table_exists "$table" || return 1
+  done
   warehouse="$(tpcc_table_row_count warehouse)"
   district="$(tpcc_table_row_count district)"
   customer="$(tpcc_table_row_count customer)"

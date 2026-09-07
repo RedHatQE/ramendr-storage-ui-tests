@@ -28,3 +28,15 @@ def test_validate_tpcc_populated_rejects_warehouse_loaded_before_customer() -> N
         }
     )
     assert any(err.startswith("customer:") for err in errors)
+
+
+def test_validate_tpcc_populated_rejects_missing_zero_min_tables() -> None:
+    # order_line/new_order/history have min 0; absence must still fail.
+    counts = {table: minimum for table, minimum in TPCC_MIN_ROW_COUNTS.items()}
+    del counts["order_line"]
+    del counts["new_order"]
+    del counts["history"]
+    errors = validate_tpcc_populated(counts)
+    assert any(err.startswith("order_line: missing") for err in errors)
+    assert any(err.startswith("new_order: missing") for err in errors)
+    assert any(err.startswith("history: missing") for err in errors)

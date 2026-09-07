@@ -104,16 +104,18 @@ spec:
         args:
           - |
             set -euo pipefail
-            dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
+            dnf install -y sshpass openssh-clients coreutils >/dev/null 2>&1 || true
+            command -v timeout >/dev/null 2>&1 || { echo "ERROR: timeout(1) is required"; exit 1; }
             LINUX_PASS="\$(tr -d '\n' < /ssh/linux-password 2>/dev/null || true)"
             WINDOWS_PASS="\$(tr -d '\n' < /ssh/windows-password 2>/dev/null || true)"
             test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
             cp /ssh/hosts.tsv /tmp/hosts.tsv
             ACTION="\${HAMMERDB_LOAD_ACTION}"
+            SSH_CMD_TIMEOUT=60
             # Stop restores install-time "not enabled at boot". Start enables for the
             # sanity/DR window so both writers resume after failover reboot together.
             LINUX_STOP="sudo systemctl stop ramendr-dr-hammerdb.service ramendr-dr-db-audit.service || true; sudo systemctl disable ramendr-dr-hammerdb.service ramendr-dr-db-audit.service || true; if sudo systemctl is-active --quiet ramendr-dr-hammerdb.service || sudo systemctl is-active --quiet ramendr-dr-db-audit.service; then exit 1; fi"
-            WINDOWS_STOP='powershell -NoProfile -ExecutionPolicy Bypass -Command "\$names = @('\''ramendr-dr-hammerdb'\'','\''ramendr-dr-db-audit'\''); foreach (\$n in \$names) { Stop-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue; Set-ScheduledTask -TaskName \$n -Trigger (New-ScheduledTaskTrigger -Once -At ([datetime]'\''2099-01-01T00:00:00'\'')) | Out-Null }; foreach (\$n in \$names) { if (((Get-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue).State) -eq '\''Running'\'') { exit 1 } }"'
+            WINDOWS_STOP='powershell -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference = '\''Stop'\''; \$names = @('\''ramendr-dr-hammerdb'\'','\''ramendr-dr-db-audit'\''); foreach (\$n in \$names) { Stop-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue; Set-ScheduledTask -TaskName \$n -Trigger (New-ScheduledTaskTrigger -Once -At ([datetime]'\''2099-01-01T00:00:00'\'')) -ErrorAction Stop | Out-Null }; foreach (\$n in \$names) { \$task = Get-ScheduledTask -TaskName \$n -ErrorAction Stop; if (\$task.State -eq '\''Running'\'') { exit 1 }; if (\$task.Triggers | Where-Object { \$_.CimClass.CimClassName -eq '\''MSFT_TaskBootTrigger'\'' }) { exit 1 } }"'
             LINUX_START="sudo systemctl enable --now ramendr-dr-hammerdb.service ramendr-dr-db-audit.service && for _i in 1 2 3 4 5 6; do sudo systemctl is-active --quiet ramendr-dr-hammerdb.service && sudo systemctl is-active --quiet ramendr-dr-db-audit.service && exit 0; sleep 1; done; exit 1"
             WINDOWS_START='powershell -NoProfile -ExecutionPolicy Bypass -Command "\$names = @('\''ramendr-dr-hammerdb'\'','\''ramendr-dr-db-audit'\''); foreach (\$n in \$names) { \$trig = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At ([datetime]'\''2099-01-01T00:00:00'\''))); Set-ScheduledTask -TaskName \$n -Trigger \$trig | Out-Null; Start-ScheduledTask -TaskName \$n }; Start-Sleep -Seconds 2; foreach (\$n in \$names) { if (((Get-ScheduledTask -TaskName \$n).State) -ne '\''Running'\'') { exit 1 } }"'
             if [[ "\$ACTION" == "start" ]]; then
@@ -125,12 +127,12 @@ spec:
             fi
             ssh_linux() {
               local host="\$1" port="\$2" ssh_user="\$3"
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20"
               if [[ -f /tmp/ssh-privatekey ]]; then
-                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$LINUX_CMD" && return 0
+                timeout -k 5 "\$SSH_CMD_TIMEOUT" ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$LINUX_CMD" && return 0
               fi
               if [[ -n "\$LINUX_PASS" ]]; then
-                sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
+                timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   "\${ssh_user}@\${host}" "\$LINUX_CMD" && return 0
               fi
@@ -138,12 +140,12 @@ spec:
             }
             ssh_windows() {
               local host="\$1" port="\$2" ssh_user="\$3"
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20"
               if [[ -z "\$WINDOWS_PASS" ]]; then
                 echo "WARN: skipping windows host \$host (no windows-password)" >&2
                 return 1
               fi
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$WINDOWS_CMD"
             }

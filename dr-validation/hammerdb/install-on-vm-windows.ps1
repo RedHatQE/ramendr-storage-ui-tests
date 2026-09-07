@@ -509,8 +509,24 @@ function Get-TpccTableRowCount {
     return [int]($out | Select-Object -First 1)
 }
 
+function Test-TpccTableExists {
+    param([string]$Table)
+    $sqlcmd = Get-SqlCmdPath
+    if (-not $sqlcmd) { return $false }
+    $ident = $Table.Replace(']', ']]')
+    $query = "SELECT CASE WHEN OBJECT_ID(N'[$ident]', N'U') IS NULL THEN 0 ELSE 1 END"
+    $out = & $sqlcmd -S "(local)\$Instance" -U $User -P $Password -d $Database -h -1 -W -b -Q $query 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    return ([int]($out | Select-Object -First 1) -ge 1)
+}
+
 # Same min>0 thresholds as ramendr_dr_validation.tpcc_schema.TPCC_MIN_ROW_COUNTS.
+# Zero-min tables (orders/order_line/new_order/history) must still exist:
+# COUNT(*) returns 0 for a missing table, which would skip rebuild.
 function Test-TpccSchemaPopulated {
+    foreach ($table in @('warehouse', 'district', 'customer', 'stock', 'item', 'orders', 'order_line', 'new_order', 'history')) {
+        if (-not (Test-TpccTableExists $table)) { return $false }
+    }
     $warehouse = Get-TpccTableRowCount 'warehouse'
     $district = Get-TpccTableRowCount 'district'
     $customer = Get-TpccTableRowCount 'customer'
