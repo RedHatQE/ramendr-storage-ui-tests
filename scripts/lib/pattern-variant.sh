@@ -165,12 +165,6 @@ _require_variant_gitops_match() {
     return 0
   fi
 
-  if [[ "$PATTERN_VARIANT" != "odf" ]]; then
-    _pv_warn "Git ${ref} has main.variant='${git_variant:-unset}', local patch sets ${PATTERN_VARIANT}."
-    _pv_warn "Hub Argo CD will keep syncing main.variant=${git_variant:-unset} until the fork commits ${PATTERN_VARIANT}."
-    return 0
-  fi
-
   _pv_err "Git ${ref} has main.variant='${git_variant:-unset}', but PATTERN_VARIANT=${PATTERN_VARIANT}."
   _pv_err "Hub Argo CD will not use a local-only values-global.yaml patch."
   _pv_err "Point UPSTREAM_* at a fork commit whose values-global.yaml has main.variant=${PATTERN_VARIANT}."

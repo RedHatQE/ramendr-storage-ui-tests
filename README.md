@@ -188,8 +188,9 @@ export PATTERN_VARIANT=drpartner-s4   # or drpartner-minimal
 and ODF golden-image fix-up (override with `REQUIRE_WINDOWS_VMS` / `SKIP_*`).
 
 **GitOps:** hub Argo CD reads `values-global.yaml` from the **git remote**, not the local patch.
-The fork at `59e84b5d…` must have `main.variant: odf` committed. Partner deploys need a fork that
-**commits** `drpartner-s4` or `drpartner-minimal`, then `UPSTREAM_REPO` pointed at that fork.
+`redeploy.sh` fails if that git revision still has a different `main.variant`. The fork at
+`59e84b5d…` has `main.variant: odf` committed. Partner deploys need a fork that **commits**
+`drpartner-s4` or `drpartner-minimal`, then `UPSTREAM_REPO` pointed at that fork.
 
 ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is
 independent of `main.variant`.

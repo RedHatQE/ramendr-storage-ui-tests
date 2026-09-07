@@ -26,7 +26,7 @@ The entrypoint is `scripts/redeploy.sh`.
 - `redeploy.sh` patches `main.variant` and sets `byoc: true` in the local checkout. Preview RHDR
   (`rhdr-catalog`, `rhdr-multicluster-operator`, GitOps `extraObjects` IDMS) is already committed
   in the fork; do not locally rewrite catalog subscriptions.
-- Hub Argo CD reads git, not local patches. Tip commit has `main.variant: odf`; partner variants warn unless
+- Hub Argo CD reads git, not local patches. Tip commit has `main.variant: odf`; partner variants fail unless
   the fork branch commits the matching variant.
 
 Customizations (Windows edge VMs, additionalPvcDisks, byoc cluster names, ODF channel pins,

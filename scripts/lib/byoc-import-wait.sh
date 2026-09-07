@@ -131,14 +131,10 @@ byoc_spokes_joined_count() {
   echo "$count"
 }
 
-pattern_install_joined_cluster_count() {
-  local status count=0
-  while read -r status; do
-    [[ "$status" == "True" ]] && count=$((count + 1))
-  done < <(oc get managedcluster \
-    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="ManagedClusterJoined")].status}{"\n"}{end}' \
-    2>/dev/null || true)
-  echo "$count"
+_expected_spoke_count() {
+  # shellcheck disable=SC2086
+  set -- ${SPOKE_CLUSTERS}
+  echo "$#"
 }
 
 wait_for_byoc_spoke_import() {
@@ -160,20 +156,19 @@ wait_for_byoc_spoke_import() {
   _byoc_log "All BYOC spokes imported."
 }
 
-# Pre-PR-#25 OR gate: continue past install-byoc timeout when hub landed.
+# Continue past install-byoc timeout only when named spokes are joined and
+# the selected parent or regional-dr is already Healthy. ACM-only or an
+# arbitrary ManagedCluster count is not recoverability.
 pattern_install_recoverable() {
-  local ns hub_health rdr_health acm_health joined
+  local ns hub_health rdr_health spokes_joined expected
   ns="$(hub_argocd_namespace)"
   hub_health="$(hub_pattern_app_health)"
   rdr_health=$(oc get application.argoproj.io regional-dr -n "$ns" \
     -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  acm_health=$(oc get application.argoproj.io acm -n "$ns" \
-    -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  joined="$(pattern_install_joined_cluster_count 2>/dev/null || echo 0)"
-  [[ "$hub_health" == "Healthy" ]] \
-    || [[ "$rdr_health" == "Healthy" ]] \
-    || [[ "$acm_health" == "Healthy" ]] \
-    || [[ "${joined:-0}" -ge 3 ]]
+  spokes_joined="$(byoc_spokes_joined_count 2>/dev/null || echo 0)"
+  expected="$(_expected_spoke_count)"
+  [[ "${spokes_joined:-0}" -ge "$expected" ]] \
+    && { [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]]; }
 }
 
 # Count hub child apps still blocking convergence.
@@ -247,13 +242,30 @@ pattern_install_early_exit_watcher() {
       _byoc_log "[early-exit] ${reason} (${consecutive}/${PATTERN_INSTALL_EARLY_EXIT_CHECKS})..."
       if [[ "$consecutive" -ge "$PATTERN_INSTALL_EARLY_EXIT_CHECKS" ]]; then
         _byoc_log "[early-exit] Cutting pattern.sh short."
-        kill "$pid" 2>/dev/null || true
+        pattern_install_stop_group "$pid"
         return 0
       fi
     else
       consecutive=0
     fi
   done
+}
+
+# Replace the current process with CMD in a new process group so TERM reaches
+# make/podman children of pattern.sh. Call from a background subshell.
+pattern_install_exec_in_group() {
+  exec python3 -c 'import os, sys
+try:
+    os.setpgrp()
+except OSError:
+    pass
+os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+}
+
+pattern_install_stop_group() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
 }
 
 nudge_progressing_odf_apps() {

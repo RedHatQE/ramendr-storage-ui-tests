@@ -853,18 +853,19 @@ deploy_pattern() {
   local bootstrap_pid=$!
   (
     cd "$UPSTREAM_DIR"
-    KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig" \
-      VALUES_SECRET="$BYOC_VALUES_SECRET" \
-      TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" \
-      TARGET_BRANCH="${UPSTREAM_BRANCH}" \
-      TARGET_VARIANT="${target_variant}" \
-      ./pattern.sh make install-byoc 2>&1
+    export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+    export VALUES_SECRET="$BYOC_VALUES_SECRET"
+    export TARGET_ORIGIN="${TARGET_ORIGIN:-origin}"
+    export TARGET_BRANCH="${UPSTREAM_BRANCH}"
+    export TARGET_VARIANT="${target_variant}"
+    pattern_install_exec_in_group ./pattern.sh make install-byoc
   ) &
   local pattern_pid=$!
   pattern_install_early_exit_watcher "$pattern_pid" &
   local watcher_pid=$!
 
   wait "$pattern_pid" || pattern_exit=$?
+  pattern_install_stop_group "$pattern_pid"
   kill "$watcher_pid" 2>/dev/null || true
   wait "$watcher_pid" 2>/dev/null || true
   wait "$bootstrap_pid" 2>/dev/null || true
