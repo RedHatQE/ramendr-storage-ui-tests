@@ -498,13 +498,31 @@ function Get-SqlCmdPath {
     return (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source
 }
 
-function Get-TpccCoreTableCount {
+function Get-TpccTableRowCount {
+    param([string]$Table)
     $sqlcmd = Get-SqlCmdPath
     if (-not $sqlcmd) { return 0 }
-    $query = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('customer','orders','warehouse')"
+    $ident = $Table.Replace(']', ']]')
+    $query = "SELECT COUNT(*) FROM [$ident]"
     $out = & $sqlcmd -S "(local)\$Instance" -U $User -P $Password -d $Database -h -1 -W -b -Q $query 2>$null
     if ($LASTEXITCODE -ne 0) { return 0 }
     return [int]($out | Select-Object -First 1)
+}
+
+# Same min>0 thresholds as ramendr_dr_validation.tpcc_schema.TPCC_MIN_ROW_COUNTS.
+function Test-TpccSchemaPopulated {
+    $warehouse = Get-TpccTableRowCount 'warehouse'
+    $district = Get-TpccTableRowCount 'district'
+    $customer = Get-TpccTableRowCount 'customer'
+    $stock = Get-TpccTableRowCount 'stock'
+    $item = Get-TpccTableRowCount 'item'
+    return (
+        ($warehouse -ge 1) -and
+        ($district -ge 10) -and
+        ($customer -ge 3000) -and
+        ($stock -ge 100000) -and
+        ($item -ge 100000)
+    )
 }
 
 function Get-AuditRowCount {
@@ -663,10 +681,8 @@ function Register-LongRunningTask {
     Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue
 
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`""
-    $triggers = @(
-        (New-ScheduledTaskTrigger -AtStartup),
-        (New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5))
-    )
+    # Far-future one-shot only (no AtStartup): a reboot must not resume OLTP.
+    $trigger = New-ScheduledTaskTrigger -Once -At ([datetime]'2099-01-01T00:00:00')
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
@@ -679,9 +695,8 @@ function Register-LongRunningTask {
         -UserId 'SYSTEM' `
         -LogonType ServiceAccount `
         -RunLevel Highest
-    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers `
+    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger `
         -Settings $settings -Principal $principal -Force | Out-Null
-    Start-ScheduledTask -TaskName $Name
 }
 
 $logDir = Join-Path $DataRoot 'logs'
@@ -725,7 +740,7 @@ $env:DR_VALIDATION_MSSQL_USER = $User
 $env:DR_VALIDATION_MSSQL_PASSWORD = $Password
 $env:DR_VALIDATION_MSSQL_DATABASE = $Database
 
-if ((Get-TpccCoreTableCount) -lt 3) {
+if (-not (Test-TpccSchemaPopulated)) {
     Stop-ScheduledTask -TaskName 'ramendr-dr-hammerdb' -ErrorAction SilentlyContinue
     Remove-Item -Force $schemaFlag -ErrorAction SilentlyContinue
     Write-Host "Building HammerDB TPC-C schema ($Warehouses warehouse(s))..."
@@ -751,7 +766,7 @@ puts "SCHEMA BUILD DONE"
         $buildTcl | Set-Content -Encoding ASCII (Join-Path $stateDir 'buildschema.tcl')
         & .\hammerdbcli.exe tcl auto (Join-Path $stateDir 'buildschema.tcl')
         if ($LASTEXITCODE -ne 0) { throw 'HammerDB buildschema failed' }
-        if ((Get-TpccCoreTableCount) -lt 3) { throw 'HammerDB buildschema finished without core TPC-C tables' }
+        if (-not (Test-TpccSchemaPopulated)) { throw 'HammerDB buildschema finished without a populated TPC-C schema' }
         New-Item -ItemType File -Force -Path $schemaFlag | Out-Null
     } finally {
         Pop-Location
@@ -760,26 +775,18 @@ puts "SCHEMA BUILD DONE"
 
 Invoke-SqlCmd -Database $Database -Query (Get-Content (Join-Path $RepoRoot 'hammerdb\sql\init-audit-mssql.sql') -Raw)
 
-Write-Host 'Seeding audit writer...'
+Write-Host 'Creating audit table (schema-only; not starting continuous writer)...'
 $env:PYTHONPATH = $PyLibDir
 $env:DR_VALIDATION_DB_ENV_FILE = $EnvFile
 & $python (Join-Path $LibDir 'db_audit_mssql.py') --max-records 2 --interval 1
-if ($LASTEXITCODE -ne 0) { throw 'Initial audit writer failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Audit table seed failed' }
 
 Register-LongRunningTask -Name 'ramendr-dr-hammerdb' -ScriptPath (Join-Path $BinDir 'run-autopilot-mssql.ps1')
 Register-LongRunningTask -Name 'ramendr-dr-db-audit' -ScriptPath (Join-Path $BinDir 'ramendr-dr-db-audit.ps1')
+Stop-ScheduledTask -TaskName 'ramendr-dr-hammerdb' -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName 'ramendr-dr-db-audit' -ErrorAction SilentlyContinue
 
-if ((Get-TpccCoreTableCount) -lt 3) { throw 'HammerDB TPC-C schema not ready on SQL Server' }
+if (-not (Test-TpccSchemaPopulated)) { throw 'HammerDB TPC-C schema not ready on SQL Server' }
 
-Write-Host 'Waiting for continuous audit writer (up to 3 min)...'
-$baselineAudit = Get-AuditRowCount
-$auditCount = $baselineAudit
-for ($i = 0; $i -lt 36; $i++) {
-    Start-Sleep -Seconds 5
-    $auditCount = Get-AuditRowCount
-    if ($auditCount -gt $baselineAudit) { break }
-}
-if ($auditCount -le $baselineAudit) { throw 'Continuous audit writer did not append rows after scheduled task start' }
-
-Write-Host "HammerDB install OK: audit_rows=$auditCount backend=mssql instance=$Instance"
+Write-Host "HammerDB install OK (schema only, writers stopped): backend=mssql instance=$Instance"
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $BinDir 'ramendr-dr-db-snapshot.ps1') | Select-Object -First 20

@@ -41,11 +41,11 @@ transactions.
 
 | Table | Role | Columns |
 |-------|------|---------|
-| `dr_validation_audit` | Continuous DR audit trail (OS disk in dual-disk mode) | `seq`, `committed_at`, `hostname`, `source` |
+| `dr_validation_audit` | DR audit trail (OS disk in dual-disk mode). Table is created at install; the continuous writer starts only for sanity / manual DR. | `seq`, `committed_at`, `hostname`, `source` |
 
 Post-DR checks validate audit sequence continuity, TPC-C row-count regression vs the
-automatic baseline, cross-disk coherence between audit and TPC-C growth, and RPO relative
-to the DR initiation timestamp.
+pre-Initiate baseline (captured by sanity, not by redeploy), cross-disk coherence between
+audit and TPC-C growth, and RPO relative to the DR initiation timestamp.
 
 See `ramendr_dr_validation/tpcc_schema.py` for programmatic minimum row counts used
-in smoke tests and redeploy verification.
+in smoke tests (schema present) and sanity OLTP-ready checks.

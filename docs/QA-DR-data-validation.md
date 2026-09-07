@@ -4,7 +4,7 @@
 
 | When | What |
 |------|------|
-| After `./scripts/redeploy.sh` | **HammerDB** (default): PostgreSQL TPC-C + audit writer on `rhel9-node-001`, initial baseline snapshot to `.work/dr-validation-db/auto/latest`. Capture a fresh baseline before DR with `./scripts/dr-validation/save-db-baseline-snapshot.sh` (sanity test does this automatically). Legacy: timestamp writers every **10 s** + rolling log snapshots every **5 min** when `DR_VALIDATION_MODE=timestamp`. |
+| After `./scripts/redeploy.sh` | **HammerDB** (default): TPC-C **schema** on every edge VM; writers stay stopped. Sanity starts OLTP after DRPC Healthy and stops it on teardown. For manual DR: `start-hammerdb-load-incluster.sh`, then `status-hammerdb.sh` (fresh audit on every VM), then `save-db-baseline-snapshot.sh` (sanity does this automatically). Legacy: timestamp writers every **10 s** + rolling log snapshots every **5 min** when `DR_VALIDATION_MODE=timestamp`. |
 | After DR + UI cleanup message | Run **one** automation script (see below) |
 
 ---
@@ -38,8 +38,9 @@ You do **not** run `cleanup-gitops-vms-non-primary.sh` or `check-after-dr.sh` se
 
 ### Playwright / sanity test
 
-The UI sanity test (`tests/ui/sanity/test_sanity.py`) runs DR validation
-automatically after each DR phase completes (healthy on the new primary):
+The UI sanity test (`tests/ui/sanity/test_sanity.py`) starts HammerDB writers after
+DRPC is Healthy, then runs DR validation automatically after each DR phase (healthy on
+the new primary):
 
 1. After **failover** to `ocp-secondary` — `./scripts/dr-validation/check-after-dr.sh`
 2. After **relocate** back to `ocp-primary` — same check again
@@ -82,7 +83,10 @@ After VMs and DataVolumes are removed, the script also deletes **all PVCs** in `
 | Cleanup only (interactive) | `./scripts/cleanup-gitops-vms-non-primary.sh` |
 | Cleanup only (automation) | `./scripts/cleanup-gitops-vms-non-primary.sh --yes` |
 | Data check only | `./scripts/dr-validation/check-after-dr.sh` |
-| Writer status | `./scripts/dr-validation/status.sh` |
+| Writer status (schema present) | `./scripts/dr-validation/status.sh` |
+| OLTP recording (audit fresh) | `./scripts/dr-validation/status-hammerdb.sh` |
+| Start HammerDB writers | `./scripts/dr-validation/start-hammerdb-load-incluster.sh` |
+| Stop HammerDB writers | `./scripts/dr-validation/stop-hammerdb-load-incluster.sh` |
 
 ---
 
@@ -96,7 +100,8 @@ After VMs and DataVolumes are removed, the script also deletes **all PVCs** in `
 
 ## Checklist
 
-- [ ] Redeploy done; HammerDB baseline saved (or timestamp auto snapshots running in legacy mode)
+- [ ] Redeploy done; HammerDB schema present (writers stopped until sanity / start-load)
+- [ ] Sanity started OLTP after Healthy (or ran `start-hammerdb-load-incluster.sh`)
 - [ ] DR completed in UI; cleanup message shown
 - [ ] Ran `./scripts/dr-validation/post-dr-automation.sh` → **PASS**
 - [ ] Attached output or report folder to ticket if needed

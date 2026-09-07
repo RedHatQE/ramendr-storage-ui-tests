@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Wait for edge VMs + routes, install DR validation workload, verify recording.
+# Wait for edge VMs + routes, install DR validation schema (HammerDB) or writers
+# (timestamp mode). HammerDB leaves OLTP stopped; sanity starts it later.
 # Invoked automatically from scripts/redeploy.sh unless SKIP_DR_VALIDATION=1.
 # HammerDB bootstrap waits for Linux VMs only (see bootstrap-hammerdb.sh).
 

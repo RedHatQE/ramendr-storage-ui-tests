@@ -1,6 +1,7 @@
 """UI sanity tests for the RamenDR ACM console.
 
-Run after scripts/redeploy.sh completes (HammerDB PostgreSQL or timestamp validation should be recording).
+Run after scripts/redeploy.sh completes (HammerDB TPC-C schema should be present;
+this module starts OLTP writers after DRPC is Healthy and stops them on teardown).
 
 Usage:
     pytest tests/ui/sanity/test_sanity.py -m smoke
@@ -16,6 +17,8 @@ Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that ste
 Default RTO hard limit is 1200s (20 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
 Warn when RTO exceeds 900s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 20 min limit.
 DR validation subprocess timeout defaults to 900s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
+HammerDB OLTP settle retries until RAMENDR_SANITY_HAMMERDB_SETTLE_SECONDS (default 180);
+audit freshness is RAMENDR_SANITY_HAMMERDB_FRESHNESS_MAX_AGE_SECONDS (default 60).
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -43,6 +47,13 @@ from tests.utils.pattern_variant import has_vm_drpc
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
+from tests.utils.dr_validation import (
+    assert_all_hammerdb_snapshots_ready,
+    collect_db_snapshot,
+    hammerdb_mode_active,
+    start_hammerdb_load,
+    stop_hammerdb_load,
+)
 
 _FORCE_FULL_SANITY = os.getenv("RAMENDR_SANITY_FORCE_FULL", "1").lower() not in {
     "0",
@@ -81,6 +92,18 @@ _PROBE_POD_SLEEP_SECONDS = 900
 _DRPC_HEALTHY_TIMEOUT_MS = int(
     float(os.getenv("RAMENDR_SANITY_DRPC_HEALTHY_TIMEOUT_SECONDS", "1800")) * 1000
 )
+_HAMMERDB_OLTP_SETTLE_TIMEOUT_SECONDS = float(
+    os.getenv("RAMENDR_SANITY_HAMMERDB_SETTLE_SECONDS", "180")
+)
+_HAMMERDB_OLTP_SETTLE_POLL_SECONDS = float(
+    os.getenv("RAMENDR_SANITY_HAMMERDB_SETTLE_POLL_SECONDS", "10")
+)
+# Freshness is independent of the settle deadline so raising the retry window
+# does not silently accept older audit rows.
+_HAMMERDB_OLTP_FRESHNESS_MAX_AGE_SECONDS = float(
+    os.getenv("RAMENDR_SANITY_HAMMERDB_FRESHNESS_MAX_AGE_SECONDS", "60")
+)
+_hammerdb_oltp_started = False
 
 
 def _repo_root() -> Path:
@@ -1079,18 +1102,156 @@ def _require_ui_credentials():
         pytest.skip(f"Required env var(s) not set: {', '.join(missing)}")
 
 
+def _wait_until_hammerdb_oltp_ready(snapshot_root: Path) -> None:
+    """Poll snapshots until every VM has a fresh audit trail and populated TPC-C."""
+    deadline = time.monotonic() + _HAMMERDB_OLTP_SETTLE_TIMEOUT_SECONDS
+    last_error = "HammerDB OLTP did not become ready (no snapshot collected yet)"
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        snapshot_dir = snapshot_root / f"settle-{attempt}"
+        collected = collect_db_snapshot(
+            kubeconfig=HUB_KUBECONFIG,
+            out_dir=snapshot_dir,
+            skip_audit_refresh=True,
+            status_only=True,
+        )
+        if collected.returncode == 0:
+            try:
+                assert_all_hammerdb_snapshots_ready(
+                    snapshot_dir,
+                    max_age_sec=_HAMMERDB_OLTP_FRESHNESS_MAX_AGE_SECONDS,
+                )
+                return
+            except AssertionError as exc:
+                last_error = str(exc)
+        else:
+            last_error = (
+                f"snapshot collect failed:\n{collected.stdout}\n{collected.stderr}"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(_HAMMERDB_OLTP_SETTLE_POLL_SECONDS, remaining))
+    pytest.fail(
+        "HammerDB OLTP did not start recording within "
+        f"{_HAMMERDB_OLTP_SETTLE_TIMEOUT_SECONDS:.0f}s.\n{last_error}"
+    )
+
+
+def _require_hammerdb_oltp_recording() -> None:
+    """Fail fast when the UI DR test runs without live HammerDB writers."""
+    if not hammerdb_mode_active() or _SKIP_DR_TIMESTAMP_VALIDATION:
+        return
+    if _hammerdb_oltp_started:
+        return
+    with tempfile.TemporaryDirectory(prefix="hammerdb-oltp-check-") as raw:
+        dest = Path(raw)
+        collected = collect_db_snapshot(
+            kubeconfig=HUB_KUBECONFIG,
+            out_dir=dest,
+            skip_audit_refresh=True,
+            status_only=True,
+        )
+        try:
+            assert collected.returncode == 0, (
+                "Could not collect HammerDB snapshots to verify OLTP is recording.\n"
+                f"stdout:\n{collected.stdout}\n"
+                f"stderr:\n{collected.stderr}"
+            )
+            assert_all_hammerdb_snapshots_ready(
+                dest, max_age_sec=_HAMMERDB_OLTP_FRESHNESS_MAX_AGE_SECONDS
+            )
+        except AssertionError as exc:
+            pytest.fail(
+                "HammerDB OLTP is not recording. Run test_hammerdb_oltp_ready_before_dr "
+                "first, or ./scripts/dr-validation/start-hammerdb-load-incluster.sh.\n"
+                f"{exc}"
+            )
+
+
+@pytest.fixture(scope="module")
+def stop_hammerdb_load_after_sanity():
+    """Stop HammerDB writers after this module if this session started them."""
+    yield
+    if not _hammerdb_oltp_started:
+        return
+    last = None
+    for attempt in range(1, 4):
+        last = stop_hammerdb_load(kubeconfig=HUB_KUBECONFIG)
+        if last.returncode == 0:
+            return
+        print(
+            f"WARNING: HammerDB load stop attempt {attempt}/3 failed "
+            f"(exit={last.returncode}); retrying..."
+        )
+        time.sleep(5)
+    assert last is not None
+    pytest.fail(
+        "Failed to stop HammerDB load after sanity "
+        f"(last exit={last.returncode}).\n{last.stdout}\n{last.stderr}"
+    )
+
+
 @pytest.mark.smoke
 @pytest.mark.requires_stage
 @pytest.mark.skipif(
     not has_vm_drpc(),
     reason="Partner variants do not deploy 2m-vm / gitops-vm-protection",
 )
+@pytest.mark.usefixtures("stop_hammerdb_load_after_sanity")
 class TestUiSanity:
     """Verify the core Disaster Recovery UI flow is reachable and healthy."""
+
+    def test_hammerdb_oltp_ready_before_dr(self, page, tmp_path):
+        """Start HammerDB writers after DRPC is Healthy; wait until audit is live."""
+        global _hammerdb_oltp_started
+        if not hammerdb_mode_active():
+            pytest.skip("HammerDB DR validation is disabled")
+        if _SKIP_DR_TIMESTAMP_VALIDATION:
+            pytest.skip("DR validation skipped")
+        _require_ui_credentials()
+
+        login_page = LoginPage(page)
+        login_page.open(BASE_URL)
+        login_page.assert_page_loaded()
+        login_page.login(HUB_USERNAME, HUB_PASSWORD)
+
+        dashboard = DashboardPage(page)
+        dashboard.assert_page_loaded()
+        dashboard.dismiss_welcome_if_present()
+
+        drpc_page = DRPCPage(page)
+        drpc_page.navigate(BASE_URL)
+        drpc_page.assert_in_disaster_recovery_view()
+        drpc_page.navigate_protected_applications_tab()
+
+        state = drpc_page.get_drpc_state("gitops-vm-protection")
+        expected_cluster = state["cluster"] or "ocp-primary"
+        print(
+            "Waiting for DRPC Protected/settled before starting HammerDB OLTP "
+            f"(status={state['status']!r} cluster={expected_cluster!r})."
+        )
+        _wait_for_drpc_healthy_with_recovery(
+            drpc_page,
+            "gitops-vm-protection",
+            expected_cluster=expected_cluster,
+            timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
+        )
+
+        started = start_hammerdb_load(kubeconfig=HUB_KUBECONFIG)
+        assert started.returncode == 0, (
+            "Failed to start HammerDB autopilot + audit on edge VMs.\n"
+            f"stdout:\n{started.stdout}\n"
+            f"stderr:\n{started.stderr}"
+        )
+        _hammerdb_oltp_started = True
+        _wait_until_hammerdb_oltp_ready(tmp_path / "hammerdb-oltp")
 
     def test_sanity_disaster_recovery_ui(self, page):
         """Sanity DR UI walkthrough after smoke: reach DR view and verify actions."""
         _require_ui_credentials()
+        _require_hammerdb_oltp_recording()
 
         login_page = LoginPage(page)
         login_page.open(BASE_URL)
