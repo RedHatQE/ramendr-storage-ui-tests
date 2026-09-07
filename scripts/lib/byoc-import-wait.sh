@@ -252,7 +252,8 @@ pattern_install_early_exit_watcher() {
 }
 
 # Replace the current process with CMD in a new process group so TERM reaches
-# make/podman children of pattern.sh. Call from a background subshell.
+# make/podman children of pattern.sh. Call from a background subshell; callers
+# should redirect stdin away from the TTY (e.g. </dev/null) so podman is not -it.
 pattern_install_exec_in_group() {
   exec python3 -c 'import os, sys
 try:

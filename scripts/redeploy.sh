@@ -858,7 +858,9 @@ deploy_pattern() {
     export TARGET_ORIGIN="${TARGET_ORIGIN:-origin}"
     export TARGET_BRANCH="${UPSTREAM_BRANCH}"
     export TARGET_VARIANT="${target_variant}"
-    pattern_install_exec_in_group ./pattern.sh make install-byoc
+    # Background process group + inherited TTY + `podman -it` stops with SIGTTOU.
+    # Close stdin so the pattern.sh patch selects -i and podman does not take the TTY.
+    pattern_install_exec_in_group ./pattern.sh make install-byoc </dev/null
   ) &
   local pattern_pid=$!
   pattern_install_early_exit_watcher "$pattern_pid" &
