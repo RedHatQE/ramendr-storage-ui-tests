@@ -1,9 +1,9 @@
 """Post-deployment smoke tests for the RamenDR environment.
 
-Run after scripts/redeploy.sh completes (HammerDB PostgreSQL should be populated).
+Run after scripts/redeploy.sh completes (HammerDB TPC-C schema should be present).
 
 TestInfraSmoke — assertions against live cluster state via oc, plus HammerDB
-                 PostgreSQL table checks after automatic redeploy bootstrap.
+                 TPC-C schema checks after automatic redeploy bootstrap.
                  DRPC Protected is polled until cluster-data upload finishes.
                  No Playwright.
 TestUiSmoke    — Playwright tests against the ACM hub console UI.
@@ -23,7 +23,7 @@ from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
 from utils.oc import run_oc
 from tests.utils.dr_validation import (
-    assert_all_hammerdb_snapshots_ready,
+    assert_all_hammerdb_snapshots_schema_present,
     collect_db_snapshot,
     hammerdb_mode_active,
     run_status_hammerdb,
@@ -661,18 +661,19 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_qe_fleet
-    def test_hammerdb_tables_populated_on_all_vms(self, hub_kubeconfig, tmp_path):
-        """HammerDB TPC-C databases are deployed on every edge VM after redeploy.
+    def test_hammerdb_schema_present_on_all_vms(self, hub_kubeconfig, tmp_path):
+        """HammerDB TPC-C schema is present on every edge VM after redeploy.
 
-        Linux VMs use PostgreSQL; Windows VMs use SQL Server. Validates populated
-        TPC-C tables and the dr_validation_audit trail on each target.
+        Linux VMs use PostgreSQL; Windows VMs use SQL Server. Validates static
+        TPC-C tables and dual-disk layout. Does not require a live audit trail;
+        sanity starts OLTP after DRPC is Healthy.
         """
         if not hammerdb_mode_active():
             pytest.skip("HammerDB DR validation is disabled")
 
-        status = run_status_hammerdb(kubeconfig=hub_kubeconfig)
+        status = run_status_hammerdb(kubeconfig=hub_kubeconfig, schema_only=True)
         assert status.returncode == 0, (
-            "HammerDB workload is not healthy on one or more edge VMs after redeploy.\n"
+            "HammerDB TPC-C schema is missing on one or more edge VMs after redeploy.\n"
             f"stdout:\n{status.stdout}\n"
             f"stderr:\n{status.stderr}"
         )
@@ -681,6 +682,8 @@ class TestInfraSmoke:
         collected = collect_db_snapshot(
             kubeconfig=hub_kubeconfig,
             out_dir=snapshot_dir,
+            skip_audit_refresh=True,
+            status_only=True,
         )
         assert collected.returncode == 0, (
             "Could not collect HammerDB DB snapshot(s) during smoke test.\n"
@@ -688,7 +691,7 @@ class TestInfraSmoke:
             f"stderr:\n{collected.stderr}"
         )
 
-        assert_all_hammerdb_snapshots_ready(snapshot_dir)
+        assert_all_hammerdb_snapshots_schema_present(snapshot_dir)
 
     # ------------------------------------------------------------------
     # DRPolicy
@@ -773,7 +776,7 @@ class TestInfraSmoke:
 
     @_skip_without_s4
     def test_drpartner_s4_storage_namespace(self, hub_kubeconfig):
-        """Dell drpartner-s4 deploys hub vp-s4-storage for S3 buckets/profiles."""
+        """drpartner-s4 deploys hub vp-s4-storage for S3 buckets/profiles."""
         run_oc(["get", "namespace", "vp-s4-storage"], hub_kubeconfig)
 
     @_skip_without_s4
@@ -798,7 +801,7 @@ class TestInfraSmoke:
 
     @_skip_without_minimal
     def test_drpartner_minimal_has_no_s4_storage(self, hub_kubeconfig):
-        """Infinidat drpartner-minimal does not deploy vp-s4-storage."""
+        """drpartner-minimal does not deploy vp-s4-storage."""
         raw = run_oc(["get", "namespace", "--output=json"], hub_kubeconfig)
         names = {item["metadata"]["name"] for item in json.loads(raw)["items"]}
         assert "vp-s4-storage" not in names, (

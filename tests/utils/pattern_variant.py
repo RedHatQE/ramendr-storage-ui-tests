@@ -36,7 +36,7 @@ def is_minimal_variant() -> bool:
 
 
 def has_s4_storage() -> bool:
-    """Dell partner BOM deploys hub vp-s4-storage (S3 buckets + credentials)."""
+    """drpartner-s4 deploys hub vp-s4-storage (S3 buckets + credentials)."""
     return PATTERN_VARIANT == "drpartner-s4"
 
 

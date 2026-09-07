@@ -12,8 +12,20 @@ if [[ -z "${KUBECONFIG:-}" ]] && [[ -f "${hub_install_dir}/auth/kubeconfig" ]]; 
   export KUBECONFIG="${hub_install_dir}/auth/kubeconfig"
 fi
 
-echo "Validation mode: hammerdb (all edge VMs when DR_VALIDATION_HAMMERDB_ALL_VMS=1)"
-echo "Checking HammerDB workload via in-cluster DB snapshot..."
+schema_only=0
+if [[ "${1:-}" == "--schema-only" ]] || [[ "${DR_VALIDATION_STATUS_SCHEMA_ONLY:-0}" == "1" ]]; then
+  schema_only=1
+  export DR_VALIDATION_STATUS_SCHEMA_ONLY=1
+  export DR_VALIDATION_SKIP_AUDIT_REFRESH=1
+fi
+
+if [[ "$schema_only" -eq 1 ]]; then
+  echo "Validation mode: hammerdb (schema-only; writers not required)"
+  echo "Checking HammerDB TPC-C schema via in-cluster DB snapshot..."
+else
+  echo "Validation mode: hammerdb (all edge VMs when DR_VALIDATION_HAMMERDB_ALL_VMS=1)"
+  echo "Checking HammerDB workload via in-cluster DB snapshot..."
+fi
 
 export DR_VALIDATION_SNAPSHOT_STATUS_ONLY=1
 
@@ -44,7 +56,7 @@ if [[ ${#snapshots[@]} -lt "$expected_snapshots" ]]; then
 fi
 for f in "${snapshots[@]}"; do
   name=$(basename "$f" .db-snapshot.json)
-  read -r record_count last_seq age_ok tpcc_ok age_sec last_ts collected_at < <(
+  read -r record_count last_seq age_ok tpcc_ok dual_ok age_sec last_ts collected_at < <(
     python3 - "$f" "$max_age" "$clock_skew" <<'PY'
 import json
 import sys
@@ -94,18 +106,41 @@ if last_ts:
 tpcc = snap.get("tpcc") or {}
 tpcc_errors = validate_tpcc_populated(tpcc)
 tpcc_ok = 0 if tpcc_errors else 1
+storage = snap.get("storage") or {}
+# Match assert_hammerdb_schema_present: only require dual_disk when storage metadata is present.
+dual_ok = 1 if (not storage or storage.get("dual_disk") is True) else 0
 # Keep tokens single-field for bash read (timestamps are ISO-8601 without spaces).
 print(
     record_count,
     last_seq,
     age_ok,
     tpcc_ok,
+    dual_ok,
     age if age != "" else "n/a",
     last_ts or "n/a",
     ref_raw or "n/a",
 )
 PY
   )
+  if [[ "$schema_only" -eq 1 ]]; then
+    if [[ "$tpcc_ok" == "1" && "$dual_ok" == "1" ]]; then
+      log "  OK ${name} (TPC-C schema present)"
+    else
+      warn "  FAIL ${name} (tpcc=${tpcc_ok}, dual_disk=${dual_ok})"
+      if [[ "$tpcc_ok" != "1" ]]; then
+        python3 - "$f" <<'PY' || true
+import json, sys
+from pathlib import Path
+from ramendr_dr_validation.tpcc_schema import validate_tpcc_populated
+snap = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for err in validate_tpcc_populated(snap.get("tpcc") or {}):
+    print(f"    {err}")
+PY
+      fi
+      overall_fail=1
+    fi
+    continue
+  fi
   if [[ "$record_count" -ge 1 && "$age_ok" == "1" && "$tpcc_ok" == "1" ]]; then
     log "  OK ${name} (audit seq=${last_seq}, TPC-C populated)"
   else

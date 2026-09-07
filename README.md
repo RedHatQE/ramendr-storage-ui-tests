@@ -29,7 +29,7 @@ It contains:
    paths (`ocp-primary_cluster_kubeconfig`, `ocp-secondary_cluster_kubeconfig`), and run
    upstream `pattern.sh make install-byoc` (loads secrets to Vault, validates BYOC, deploys pattern).
    Preview RHDR ImageDigestMirrorSet is applied by GitOps `extraObjects.rhdr-fbc-idms` during
-   that install (the old `APPLY_ME_FIRST.idms.yaml` was dropped on this pin).
+   that install.
 5. Wait for ExternalSecrets to create `auto-import-secret` and `admin-kubeconfig` on the hub; ACM
    imports the spokes.
 
@@ -179,7 +179,7 @@ Values live under `variants/<name>/`. See the
 # Partner variant — stable GitOps needs a fork that commits main.variant:
 export UPSTREAM_REPO=https://github.com/<your-org>/ramendr-starter-kit
 export PATTERN_VARIANT=drpartner-s4   # or drpartner-minimal
-# Dell: merge dr-validation/examples/values-secret-v2-s4.fragment.yaml first
+# drpartner-s4: merge dr-validation/examples/values-secret-v2-s4.fragment.yaml first
 ./scripts/redeploy.sh --pattern-only
 ```
 
@@ -196,7 +196,7 @@ ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. Th
 independent of `main.variant`.
 
 Smoke tests skip VM / ODF / MirrorPeer assertions on partner variants and instead check
-`vp-s4-storage` plus `2m-drpolicy` (Dell) or their absence (Infinidat). Export the same
+`vp-s4-storage` plus `2m-drpolicy` (`drpartner-s4`) or their absence (`drpartner-minimal`). Export the same
 `PATTERN_VARIANT` when you run pytest. Partner CSI itself is not something the pattern
 or these tests can verify.
 
@@ -274,15 +274,23 @@ Default mode is **HammerDB TPC-C on PostgreSQL** (`DR_VALIDATION_MODE=hammerdb`)
 `gitops-vms`: 2 Linux + 1 Windows Server 2022 + 1 Windows Server 2025. Add
 `privatevm-credentials` (Quay robot for `quay.io/martjack/*` images) and
 `windows-admin` (local Administrator password for Windows SSH verification) to
-`~/values-secret.yaml` before redeploy. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL,
-builds populated TPC-C tables (customers with IDs, orders, stock, …), verifies recording,
-and saves an initial baseline snapshot to `.work/dr-validation-db/auto/latest`.
+`~/values-secret.yaml` before redeploy. A full `./scripts/redeploy.sh` run **automatically** bootstraps PostgreSQL/SQL Server and
+builds populated TPC-C tables (customers with IDs, orders, stock, …). Autopilot and the
+audit writer stay **stopped** so Ceph mirroring is not racing a live OLTP firehose.
+Smoke tests assert the schema is present; sanity starts writers after DRPC is Healthy,
+captures a fresh baseline immediately before Initiate, and stops writers on teardown.
 
-For DR validation, capture a fresh baseline immediately before Initiate (the sanity test
-does this automatically; for manual runs use `./scripts/dr-validation/save-db-baseline-snapshot.sh`).
+For manual DR, start load first:
 
-Smoke tests assert the database tables are populated after redeploy; sanity tests validate
-table data continuity after failover/relocate via `check-after-dr.sh`.
+```bash
+./scripts/dr-validation/start-hammerdb-load-incluster.sh
+./scripts/dr-validation/status-hammerdb.sh
+./scripts/dr-validation/save-db-baseline-snapshot.sh
+```
+
+`status-hammerdb.sh` (no `--schema-only`) must pass on every VM so the baseline includes a fresh audit row, not leftover install seed data.
+
+Stop writers afterward with `./scripts/dr-validation/stop-hammerdb-load-incluster.sh`.
 
 After DR in the UI, run:
 

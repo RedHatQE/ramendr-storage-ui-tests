@@ -34,11 +34,11 @@ cost-optimized values, RHDR Quay IDMS) live in the fork's `ocp-4.22-rhdr-ramen` 
 `overrides/` and values files. Partner BOMs live under `variants/<name>/` in the configured
 fork checkout. Local edits next to the checkout do not affect Argo CD.
 
-- After hub + spoke `openshift-install`, RHDR ImageDigestMirrorSet is applied by GitOps
-  `extraObjects.rhdr-fbc-idms` (the old `APPLY_ME_FIRST.idms.yaml` was dropped). Then
-  `redeploy.sh` copies `VALUES_SECRET` to `.work/values-secret.yaml`, merges spoke kubeconfig
-  file paths, and runs `pattern.sh make install-byoc`. Vault + ExternalSecrets deliver
-  kubeconfigs to ACM (no manual `oc create secret`).
+- After hub + spoke `openshift-install`, `redeploy.sh` copies `VALUES_SECRET` to
+  `.work/values-secret.yaml`, merges spoke kubeconfig file paths, and runs
+  `pattern.sh make install-byoc`. Preview RHDR ImageDigestMirrorSet is applied by GitOps
+  `extraObjects.rhdr-fbc-idms`. Vault + ExternalSecrets deliver kubeconfigs to ACM
+  (no manual `oc create secret`).
 
 **Mixed edge VM fleet (`gitops-vms`, `PATTERN_VARIANT=odf` only):**
 
@@ -75,8 +75,9 @@ Currently implemented in `tests/ui/`:
 - `pyproject.toml` + `pytest.ini` — test runner configuration with Playwright
 
 Smoke tests expect the full mixed fleet (4 edge VMs) and validate Windows OS disk size (45 Gi)
-when `PATTERN_VARIANT=odf`. Partner variants skip those assertions and check S4 (Dell)
-`2m-drpolicy` or Infinidat's lack of S4/DRPolicy.
+when `PATTERN_VARIANT=odf`. Partner variants skip those assertions and check S4
+`2m-drpolicy` (`drpartner-s4`) or the lack of S4/DRPolicy (`drpartner-minimal`). HammerDB smoke checks TPC-C **schema**
+only; sanity starts OLTP after DRPC Healthy and stops writers on teardown.
 
 ## Future
 
