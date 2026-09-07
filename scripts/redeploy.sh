@@ -20,22 +20,9 @@ WORK_DIR="${WORK_DIR:-$REPO_ROOT/.work}"
 # shellcheck source=lib/pattern-variant.sh
 source "$REPO_ROOT/scripts/lib/pattern-variant.sh"
 
-# PATTERN_VARIANT selects starter-kit v1.3 install BOMs (main.variant).
-# Empty keeps the QE mixed-fleet fork (main.clusterGroupName: hub).
-# v1.3 values: odf | drpartner-s4 | drpartner-minimal
-PATTERN_VARIANT="${PATTERN_VARIANT:-}"
-
-if [[ -n "$PATTERN_VARIANT" ]]; then
-  UPSTREAM_REPO="${UPSTREAM_REPO:-$V13_UPSTREAM_REPO}"
-  UPSTREAM_REF="${UPSTREAM_REF:-$V13_UPSTREAM_REF}"
-  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-$V13_UPSTREAM_BRANCH}"
-else
-  # Tip of fork branch ocp-4.22-rhdr-ramen (RHDR operator images via Quay IDMS).
-  UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/elsapassaro/ramendr-starter-kit}"
-  UPSTREAM_REF="${UPSTREAM_REF:-d6c21253595ea809c779279e20bcc3e990420781}"
-  UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-ocp-4.22-rhdr-ramen}"
-fi
-# Named local branch even when UPSTREAM_REF is a SHA (pattern Makefile + hub Argo CD).
+# PATTERN_VARIANT selects the install BOM (main.variant): odf | drpartner-s4 | drpartner-minimal.
+# Default odf uses the QE fork (preview RHDR in git, mixed Windows/Linux fleet, HammerDB).
+resolve_pattern_variant || exit 1
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-$WORK_DIR/upstream/ramendr-starter-kit}"
 
@@ -326,26 +313,9 @@ hub_pattern_app_health() {
       -o jsonpath='{.status.health.status}' 2>/dev/null || true
 }
 
-pattern_install_recoverable() {
-  local hub_health rdr_health joined acm_health ns
-  ns="$(hub_argocd_namespace)"
-  hub_health="$(hub_pattern_app_health)"
-  rdr_health=$(oc get application.argoproj.io regional-dr \
-    -n "$ns" \
-    -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  acm_health=$(oc get application.argoproj.io acm \
-    -n "$ns" \
-    -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-  joined=$(oc get managedclusters --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
-  [[ "${joined:-0}" -ge 3 ]] || return 1
-  [[ "$hub_health" == "Healthy" ]] || [[ "$rdr_health" == "Healthy" ]] \
-    || [[ "$acm_health" == "Healthy" ]]
-}
-
 # Helm --set main.clusterGroupName=null does not drop the field on an existing
 # Pattern CR, so a QE hub clustergroup Application keeps fighting the variant.
 clear_legacy_cluster_group_name() {
-  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
   if ! oc get pattern ramendr-starter-kit -n patterns-operator \
     -o jsonpath='{.spec.clusterGroupName}' 2>/dev/null | grep -q .; then
     return 0
@@ -368,7 +338,6 @@ _orphan_delete_application() {
 # vp-gitops keeps both parents Degraded (shared ClusterRoles) and blocks later
 # sync waves (opp-policy, regional-dr).
 retire_previous_clustergroup_apps() {
-  [[ -n "${PATTERN_VARIANT:-}" ]] || return 0
   local keep child app
   keep="$(hub_pattern_app_name)"
   for app in $(oc get applications.argoproj.io -n vp-gitops \
@@ -482,11 +451,7 @@ cleanup_variant_leftovers() {
 }
 
 prepare_upstream() {
-  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
-    log "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
-  else
-    log "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
-  fi
+  log "Pattern variant: ${PATTERN_VARIANT} (main.variant)"
   log "Preparing upstream checkout at $UPSTREAM_REF..."
   mkdir -p "$WORK_DIR/upstream"
 
@@ -838,12 +803,12 @@ scale_hub_workers() {
 }
 
 apply_rhdr_idms() {
-  # Quay ImageDigestMirrorSet for RHDR operator images (APPLY_ME_FIRST.idms.yaml in the
-  # upstream checkout). Must land on hub + spokes after openshift-install and before
-  # pattern.sh make install-byoc so OLM can pull mirrored bundles promptly.
+  # Legacy early IDMS apply. Fork pin 5159788d dropped APPLY_ME_FIRST.idms.yaml;
+  # preview RHDR IDMS is GitOps extraObjects.rhdr-fbc-idms on hub + spoke BOMs.
+  # Keep this path for older UPSTREAM_REF overrides that still ship the file.
   local idms_file="${UPSTREAM_DIR}/APPLY_ME_FIRST.idms.yaml"
   if [[ ! -f "$idms_file" ]]; then
-    warn "No APPLY_ME_FIRST.idms.yaml in upstream checkout (${idms_file}); skipping IDMS."
+    log "No APPLY_ME_FIRST.idms.yaml in upstream checkout; RHDR IDMS comes from GitOps extraObjects.rhdr-fbc-idms."
     return 0
   fi
 
@@ -878,44 +843,51 @@ deploy_pattern() {
   prepare_byoc_values_secret || exit 1
 
   log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."
-  local pattern_exit=0
-  # pattern-install uses TARGET_VARIANT as the DNS-length clusterGroup name.
-  # Official drpartner-minimal exceeds that limit; the QE fork sets
-  # clusterGroup.name=minimal in variants/drpartner-minimal values instead.
-  local target_variant="${PATTERN_VARIANT:-}"
+  local pattern_exit=0 target_variant="$PATTERN_VARIANT"
   if [[ "$target_variant" == "drpartner-minimal" ]]; then
     log "Omitting TARGET_VARIANT for drpartner-minimal (DNS length); using clusterGroup.name from variant values."
     target_variant=""
   fi
-  ( cd "$UPSTREAM_DIR" && \
-      KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig" \
-      VALUES_SECRET="$BYOC_VALUES_SECRET" \
-      TARGET_ORIGIN="${TARGET_ORIGIN:-origin}" \
-      TARGET_BRANCH="${UPSTREAM_BRANCH}" \
-      TARGET_VARIANT="${target_variant}" \
-      ./pattern.sh make install-byoc 2>&1 ) \
-    || pattern_exit=$?
 
-  clear_legacy_cluster_group_name
-  retire_previous_clustergroup_apps
+  bootstrap_byoc_spoke_import &
+  local bootstrap_pid=$!
+  (
+    cd "$UPSTREAM_DIR"
+    export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+    export VALUES_SECRET="$BYOC_VALUES_SECRET"
+    export TARGET_ORIGIN="${TARGET_ORIGIN:-origin}"
+    export TARGET_BRANCH="${UPSTREAM_BRANCH}"
+    export TARGET_VARIANT="${target_variant}"
+    # Background process group + inherited TTY + `podman -it` stops with SIGTTOU.
+    # Close stdin so the pattern.sh patch selects -i and podman does not take the TTY.
+    pattern_install_exec_in_group ./pattern.sh make install-byoc </dev/null
+  ) &
+  local pattern_pid=$!
+  pattern_install_early_exit_watcher "$pattern_pid" &
+  local watcher_pid=$!
+
+  wait "$pattern_pid" || pattern_exit=$?
+  pattern_install_stop_group "$pattern_pid"
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$bootstrap_pid" 2>/dev/null || true
+  bootstrap_byoc_spoke_import || warn "BYOC spoke bootstrap incomplete."
 
   if [[ $pattern_exit -ne 0 ]]; then
-    # pattern.sh often times out because regional-dr and/or the parent clustergroup
-    # Application are OutOfSync/Healthy — expected drift that the fix-up functions below correct.
-    warn "pattern.sh make install-byoc returned non-zero — checking whether this is recoverable drift..."
-    local hub_health rdr_health
-    hub_health="$(hub_pattern_app_health)"
-    rdr_health=$(oc get application.argoproj.io regional-dr \
-      -n "$(hub_argocd_namespace)" \
-      -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+    warn "pattern.sh make install-byoc returned non-zero — checking recoverability..."
     if pattern_install_recoverable; then
-      warn "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
-      warn "Treating as recoverable drift — continuing with fix-up functions."
+      warn "Recoverable — continuing (hub=$(hub_pattern_app_health))."
     else
       err "Pattern install failed and cluster appears non-recoverable."
-      err "Hub health=${hub_health:-unknown}, regional-dr health=${rdr_health:-unknown}."
       exit 1
     fi
+  fi
+
+  clear_legacy_cluster_group_name
+  if oc get application.argoproj.io "$(hub_pattern_app_name)" -n vp-gitops &>/dev/null; then
+    retire_previous_clustergroup_apps
+  else
+    warn "Skipping clustergroup retirement — parent application not present yet."
   fi
 
   cleanup_variant_leftovers
@@ -923,6 +895,7 @@ deploy_pattern() {
   if ! wait_for_byoc_spoke_import; then
     warn "BYOC spoke import did not complete within timeout; resilient GitOps and DR bootstrap may fail."
   fi
+  nudge_progressing_odf_apps
 
   prepare_spoke_argo_appprojects_on_all_spokes || \
     warn "[spoke-gitops] AppProject/default pre-create incomplete; resilient parent sync may wedge."
@@ -1108,11 +1081,7 @@ show_status() {
   echo " RamenDR Starter Kit — Environment Status"
   echo "============================================"
   echo ""
-  if [[ -n "${PATTERN_VARIANT:-}" ]]; then
-    echo "Pattern variant: ${PATTERN_VARIANT} (starter-kit v1.3 main.variant)"
-  else
-    echo "Pattern variant: QE mixed-fleet fork (main.clusterGroupName=hub)"
-  fi
+  echo "Pattern variant: ${PATTERN_VARIANT} (main.variant)"
   echo "Upstream: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}") @ ${UPSTREAM_REF} (${UPSTREAM_BRANCH})"
   echo ""
   echo "--- Clusters ---"
@@ -1242,10 +1211,9 @@ case "${1:-}" in
     echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
     echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
     echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
-    echo " PATTERN_VARIANT         v1.3 install variant: odf | drpartner-s4 | drpartner-minimal"
-    echo "                         Unset keeps the QE mixed-fleet fork (clusterGroupName layout)."
-    echo "                         When set, defaults UPSTREAM_* to validatedpatterns ramendr-starter-kit v1.3"
-    echo "                         and writes main.variant into the local checkout values-global.yaml."
+    echo " PATTERN_VARIANT         Install variant: odf (default) | drpartner-s4 | drpartner-minimal"
+    echo "                         All variants use elsapassaro fork ocp-4.22-rhdr-ramen @ ${UPSTREAM_REF}"
+    echo "                         Preview RHDR (rhdr-catalog) is committed in the fork; partner BOMs differ in variants/<name>/."
     echo ""
     echo "Environment variables:"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
@@ -1290,6 +1258,9 @@ case "${1:-}" in
     echo " SPOKE_ODF_STORAGE_WAIT_SLEEP      Seconds between ODF Available polls (default 30)"
     echo " BYOC_IMPORT_WAIT_ATTEMPTS      Wait for ESO/MC spoke import per step (default 40)"
     echo " BYOC_IMPORT_WAIT_SLEEP         Seconds between BYOC import polls (default 30)"
+    echo " BYOC_BOOTSTRAP_SPOKE_IMPORT    Bootstrap spoke hub ns + import secrets (default 1)"
+    echo " PATTERN_INSTALL_EARLY_EXIT_CHECKS  Stable checks before cutting install-byoc short (default 3)"
+    echo " PATTERN_INSTALL_EARLY_EXIT_SLEEP   Seconds between early-exit polls (default 30)"
     ;;
   *)
     full_redeploy

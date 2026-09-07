@@ -1,27 +1,30 @@
 """Starter-kit install variant helpers for tests and skip conditions.
 
-PATTERN_VARIANT maps to ramendr-starter-kit v1.3 ``main.variant``:
-odf, drpartner-s4, drpartner-minimal. Unset means the QE mixed-fleet fork
-(``main.clusterGroupName: hub``).
+PATTERN_VARIANT selects the install BOM (main.variant): odf (default),
+drpartner-s4, or drpartner-minimal.
 """
 
 from __future__ import annotations
 
 import os
 
-PATTERN_VARIANT = os.getenv("PATTERN_VARIANT", "").strip()
+DEFAULT_PATTERN_VARIANT = "odf"
+PATTERN_VARIANT = (
+    os.getenv("PATTERN_VARIANT", DEFAULT_PATTERN_VARIANT).strip()
+    or DEFAULT_PATTERN_VARIANT
+)
 
 PARTNER_VARIANTS = frozenset({"drpartner-s4", "drpartner-minimal"})
-V13_VARIANTS = frozenset({"odf", "drpartner-s4", "drpartner-minimal"})
+ALL_VARIANTS = frozenset({"odf", "drpartner-s4", "drpartner-minimal"})
 
 
 def is_qe_mixed_fleet() -> bool:
     """True when tests should expect the QE 4-VM Windows+Linux gitops-vms fleet."""
-    return PATTERN_VARIANT == ""
+    return PATTERN_VARIANT == "odf"
 
 
 def is_v13_variant() -> bool:
-    return PATTERN_VARIANT in V13_VARIANTS
+    return PATTERN_VARIANT in ALL_VARIANTS
 
 
 def is_partner_variant() -> bool:
@@ -38,25 +41,22 @@ def has_s4_storage() -> bool:
 
 
 def has_odf_mirrorpeer() -> bool:
-    """ODF StorageCluster + MirrorPeer exist on the QE fork and the odf variant."""
-    return PATTERN_VARIANT not in PARTNER_VARIANTS
+    """ODF StorageCluster + MirrorPeer exist on the odf variant."""
+    return PATTERN_VARIANT == "odf"
 
 
 def has_edge_vms() -> bool:
     """gitops-vms edge VMs are disabled on partner variants."""
-    return PATTERN_VARIANT not in PARTNER_VARIANTS
+    return PATTERN_VARIANT == "odf"
 
 
 def has_vm_drpc() -> bool:
-    """2m-vm DRPolicy + gitops-vm-protection DRPC exist on QE fork and odf."""
-    return PATTERN_VARIANT not in PARTNER_VARIANTS
+    """2m-vm DRPolicy + gitops-vm-protection DRPC exist on the odf variant."""
+    return PATTERN_VARIANT == "odf"
 
 
 def hub_argocd_namespace() -> str:
     """Namespace that holds child Argo Applications for the installed BOM."""
-    # QE fork shortens clusterGroup.name to "minimal" for DNS limits.
     if PATTERN_VARIANT == "drpartner-minimal":
         return "ramendr-starter-kit-minimal"
-    if PATTERN_VARIANT:
-        return f"ramendr-starter-kit-{PATTERN_VARIANT}"
-    return "ramendr-starter-kit-hub"
+    return f"ramendr-starter-kit-{PATTERN_VARIANT}"
