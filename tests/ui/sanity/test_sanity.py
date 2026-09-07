@@ -43,6 +43,9 @@ from tests.utils.pattern_variant import has_vm_drpc
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
+from reporting.jira_client import JiraClient, config_from_env
+from reporting.jira_config import JiraReportingConfig, reporting_config_from_env
+from reporting.jira_results import derive_run_id, jira_test_case_result
 
 _FORCE_FULL_SANITY = os.getenv("RAMENDR_SANITY_FORCE_FULL", "1").lower() not in {
     "0",
@@ -81,6 +84,25 @@ _PROBE_POD_SLEEP_SECONDS = 900
 _DRPC_HEALTHY_TIMEOUT_MS = int(
     float(os.getenv("RAMENDR_SANITY_DRPC_HEALTHY_TIMEOUT_SECONDS", "1800")) * 1000
 )
+
+
+def _jira_reporting_setup() -> tuple[JiraClient | None, JiraReportingConfig, str]:
+    """Build the (client, config, run_id) shared by both DR scenarios reported
+    from one ``test_sanity_disaster_recovery_ui`` invocation.
+
+    ``JIRA_REPORT_RESULTS`` defaults to ``false`` (see
+    ``reporting/jira_config.py``), so an ordinary developer/CI run of this
+    test makes zero Jira calls and creates zero Jira Test Results unless
+    reporting is explicitly enabled. ``run_id`` is derived exactly once here
+    and passed to every ``jira_test_case_result()`` call for this
+    invocation -- failover and relocate always share one run id, even when
+    ``$JIRA_RUN_ID`` isn't set and a fallback must be generated.
+    """
+    config = reporting_config_from_env()
+    client: JiraClient | None = None
+    if config.report_results:
+        client = JiraClient(config_from_env())
+    return client, config, derive_run_id(config)
 
 
 def _repo_root() -> Path:
@@ -956,7 +978,14 @@ def _run_force_full_sanity_dr_flow(
     drpc_page: DRPCPage,
     drpc_name: str = "gitops-vm-protection",
 ):
-    """Run the full failover → relocate cycle with no resume shortcuts."""
+    """Run the full failover → relocate cycle with no resume shortcuts.
+
+    Always executes (and reports) both scenarios -- there is no resume logic
+    in this flow, so it's a single contiguous block per scenario and each
+    is reported independently via ``jira_test_case_result``.
+    """
+    jira_client, jira_config, run_id = _jira_reporting_setup()
+
     drpc_page.assert_drpc(
         drpc_name,
         expected_policy="2m-vm",
@@ -968,97 +997,119 @@ def _run_force_full_sanity_dr_flow(
     drpc_page.assert_failover_dialog_contents()
     drpc_page.cancel_failover_dialog()
 
-    drpc_page.open_failover_dialog(drpc_name)
-    drpc_page.assert_failover_dialog_contents()
-    _save_hammerdb_baseline_snapshot(phase="failover")
-    failover_started_at = time.monotonic()
-    failover_initiated_utc = datetime.now(timezone.utc)
-    drpc_page.initiate_failover_dialog()
+    # --- RHELTEST-3600 (failover_primary_to_secondary) Jira boundary starts:
+    # dialog validation through post-failover HammerDB/data validation. Any
+    # exception in this block reports FAIL and re-raises unmodified; success
+    # reports PASS only once every check below has passed.
+    with jira_test_case_result(
+        "failover_primary_to_secondary",
+        scenario="Failover primary to secondary",
+        run_id=run_id,
+        client=jira_client,
+        config=jira_config,
+    ):
+        drpc_page.open_failover_dialog(drpc_name)
+        drpc_page.assert_failover_dialog_contents()
+        _save_hammerdb_baseline_snapshot(phase="failover")
+        failover_started_at = time.monotonic()
+        failover_initiated_utc = datetime.now(timezone.utc)
+        drpc_page.initiate_failover_dialog()
 
-    try:
-        drpc_page.wait_for_failover_progress_state(drpc_name)
-        drpc_page.open_failover_progress_popover(drpc_name)
-        drpc_page.assert_failover_progress_popover(
-            expected_target_cluster="ocp-secondary"
+        try:
+            drpc_page.wait_for_failover_progress_state(drpc_name)
+            drpc_page.open_failover_progress_popover(drpc_name)
+            drpc_page.assert_failover_progress_popover(
+                expected_target_cluster="ocp-secondary"
+            )
+        except AssertionError:
+            pass
+
+        post_progress_state = drpc_page.get_drpc_state(drpc_name)
+        post_progress_status = post_progress_state["status"].strip().lower()
+        if post_progress_status in {
+            "waitonusertocleanup",
+            "action needed",
+            "protection error",
+        }:
+            _run_cleanup_non_primary_cluster(skip_pvcs=True)
+
+        drpc_page.wait_for_failover_complete_state(
+            drpc_name,
+            expected_cluster="ocp-secondary",
+            timeout_ms=900_000,
         )
-    except AssertionError:
-        pass
+        # RTO ends when all VMs are Running with SSH services on the secondary,
+        # confirmed by both the Kubernetes API signal and an in-cluster TCP probe.
+        failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
+            SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
+        )
+        _probe_ssh_via_pod(SECONDARY_KUBECONFIG, failover_ssh_ips)
+        _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
+        _wait_for_drpc_healthy_with_recovery(
+            drpc_page,
+            drpc_name,
+            expected_cluster="ocp-secondary",
+            cleanup_skip_pvcs=True,
+            timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
+        )
+        _assert_managed_clusters_available()
+        _run_dr_data_validation(phase="failover", initiated_utc=failover_initiated_utc)
+    # --- RHELTEST-3600 Jira boundary ends (PASS committed before relocate starts).
 
-    post_progress_state = drpc_page.get_drpc_state(drpc_name)
-    post_progress_status = post_progress_state["status"].strip().lower()
-    if post_progress_status in {
-        "waitonusertocleanup",
-        "action needed",
-        "protection error",
-    }:
-        _run_cleanup_non_primary_cluster(skip_pvcs=True)
+    # --- RHELTEST-3610 (relocate_secondary_to_primary) Jira boundary starts:
+    # pre-relocate baseline through post-relocate HammerDB/data validation.
+    with jira_test_case_result(
+        "relocate_secondary_to_primary",
+        scenario="Relocate secondary to primary",
+        run_id=run_id,
+        client=jira_client,
+        config=jira_config,
+    ):
+        state_before_relocate = drpc_page.get_drpc_state(drpc_name)
+        assert state_before_relocate["cluster"] == "ocp-secondary", (
+            "Expected DRPC on ocp-secondary before relocate, got "
+            f"{state_before_relocate['cluster']!r}"
+        )
+        assert state_before_relocate["status"].strip().lower() == "healthy", (
+            "Expected DR status Healthy before relocate — DRPC must be Protected=True "
+            "before triggering relocate to avoid Ceph split-brain. Got "
+            f"{state_before_relocate['status']!r}"
+        )
 
-    drpc_page.wait_for_failover_complete_state(
-        drpc_name,
-        expected_cluster="ocp-secondary",
-        timeout_ms=900_000,
-    )
-    # RTO ends when all VMs are Running with SSH services on the secondary, confirmed
-    # by both the Kubernetes API signal and an in-cluster TCP probe.
-    failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
-        SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
-    )
-    _probe_ssh_via_pod(SECONDARY_KUBECONFIG, failover_ssh_ips)
-    _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
-    _wait_for_drpc_healthy_with_recovery(
-        drpc_page,
-        drpc_name,
-        expected_cluster="ocp-secondary",
-        cleanup_skip_pvcs=True,
-        timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
-    )
-    _assert_managed_clusters_available()
-    _run_dr_data_validation(phase="failover", initiated_utc=failover_initiated_utc)
+        drpc_page.open_relocate_dialog(drpc_name)
+        drpc_page.assert_relocate_dialog_contents()
+        _save_hammerdb_baseline_snapshot(phase="relocate")
+        relocate_started_at = time.monotonic()
+        relocate_initiated_utc = datetime.now(timezone.utc)
+        drpc_page.initiate_relocate_dialog()
 
-    state_before_relocate = drpc_page.get_drpc_state(drpc_name)
-    assert state_before_relocate["cluster"] == "ocp-secondary", (
-        "Expected DRPC on ocp-secondary before relocate, got "
-        f"{state_before_relocate['cluster']!r}"
-    )
-    assert state_before_relocate["status"].strip().lower() == "healthy", (
-        "Expected DR status Healthy before relocate — DRPC must be Protected=True "
-        "before triggering relocate to avoid Ceph split-brain. Got "
-        f"{state_before_relocate['status']!r}"
-    )
+        _relocate_best_effort_progress(drpc_page, drpc_name)
+        _wait_for_relocate_secondary_cleared(
+            drpc_page,
+            drpc_name,
+            timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
+        )
 
-    drpc_page.open_relocate_dialog(drpc_name)
-    drpc_page.assert_relocate_dialog_contents()
-    _save_hammerdb_baseline_snapshot(phase="relocate")
-    relocate_started_at = time.monotonic()
-    relocate_initiated_utc = datetime.now(timezone.utc)
-    drpc_page.initiate_relocate_dialog()
-
-    _relocate_best_effort_progress(drpc_page, drpc_name)
-    _wait_for_relocate_secondary_cleared(
-        drpc_page,
-        drpc_name,
-        timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
-    )
-
-    drpc_page.wait_for_relocate_complete_state(
-        drpc_name,
-        expected_cluster="ocp-primary",
-        timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
-    )
-    relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
-        PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
-    )
-    _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_ssh_ips)
-    _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
-    _wait_for_drpc_healthy_with_recovery(
-        drpc_page,
-        drpc_name,
-        expected_cluster="ocp-primary",
-        cleanup_skip_pvcs=True,
-        timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
-    )
-    _assert_managed_clusters_available()
-    _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
+        drpc_page.wait_for_relocate_complete_state(
+            drpc_name,
+            expected_cluster="ocp-primary",
+            timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
+        )
+        relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
+            PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
+        )
+        _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_ssh_ips)
+        _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
+        _wait_for_drpc_healthy_with_recovery(
+            drpc_page,
+            drpc_name,
+            expected_cluster="ocp-primary",
+            cleanup_skip_pvcs=True,
+            timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
+        )
+        _assert_managed_clusters_available()
+        _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
+    # --- RHELTEST-3610 Jira boundary ends.
 
 
 def _require_ui_credentials():
@@ -1171,144 +1222,222 @@ class TestUiSanity:
         relocate_initiated_utc: datetime | None = None
         relocate_was_initiated = False
 
-        # Fresh flow: healthy on primary, then trigger failover.
-        if ready_for_failover:
-            drpc_page.assert_drpc(
-                "gitops-vm-protection",
-                expected_policy="2m-vm",
-                expected_cluster="ocp-primary",
-            )
-            drpc_page.assert_drpc_actions_menu("gitops-vm-protection")
+        # Independent Jira Test Result boundaries for this invocation. Each
+        # starts out None and is only ever created when THIS invocation
+        # actually initiates the corresponding DR action below -- resuming
+        # into an already-completed phase (post_failover / post_relocate)
+        # deliberately leaves the corresponding reporter None, so no Jira
+        # Test Result is fabricated for work this invocation didn't do (see
+        # docs/jira-test-result-reporting.md, "Resume behavior").
+        jira_client, jira_config, run_id = _jira_reporting_setup()
+        failover_reporter = None
+        relocate_reporter = None
 
-            # --- Failover popup (cancel path) ---
-            drpc_page.open_failover_dialog("gitops-vm-protection")
-            drpc_page.assert_failover_dialog_contents()
-            drpc_page.cancel_failover_dialog()
-
-            # --- Failover popup (initiate path) ---
-            drpc_page.open_failover_dialog("gitops-vm-protection")
-            drpc_page.assert_failover_dialog_contents()
-            _save_hammerdb_baseline_snapshot(phase="failover")
-            failover_started_at = time.monotonic()
-            failover_initiated_utc = datetime.now(timezone.utc)
-            drpc_page.initiate_failover_dialog()
-            failover_initiated = True
-        elif post_failover:
-            is_already_completed = status_lower_initial in {
-                "failedover",
-                "failover complete",
-                "healthy",
-                "protection error",
-            }
-        elif post_relocate:
-            pass
-        else:
-            assert state["cluster"] in {"ocp-primary", "ocp-secondary"}, (
-                "Unexpected DRPC cluster before DR progression checks: "
-                f"{state['cluster']!r} phase={drpc_phase!r} status={state['status']!r}"
-            )
-
-        run_failover_phase = (failover_initiated or post_failover) and not post_relocate
-
-        if run_failover_phase and (
-            failover_initiated or (post_failover and not is_already_completed)
-        ):
-            # Best-effort failover progress path.
-            try:
-                drpc_page.wait_for_failover_progress_state("gitops-vm-protection")
-                drpc_page.open_failover_progress_popover("gitops-vm-protection")
-                drpc_page.assert_failover_progress_popover(
-                    expected_target_cluster="ocp-secondary"
+        # Everything below is one try/except so that ANY exception -- no
+        # matter which branch/step it comes from -- reports FAIL for
+        # whichever scenario boundary is still open (i.e. hasn't already
+        # been closed with a PASS) before re-raising. A boundary that
+        # already closed successfully (e.g. failover PASS, before relocate
+        # even starts) is never retroactively marked FAIL by a later,
+        # independent relocate failure.
+        try:
+            # Fresh flow: healthy on primary, then trigger failover.
+            if ready_for_failover:
+                drpc_page.assert_drpc(
+                    "gitops-vm-protection",
+                    expected_policy="2m-vm",
+                    expected_cluster="ocp-primary",
                 )
-            except AssertionError:
+                drpc_page.assert_drpc_actions_menu("gitops-vm-protection")
+
+                # --- Failover popup (cancel path) ---
+                drpc_page.open_failover_dialog("gitops-vm-protection")
+                drpc_page.assert_failover_dialog_contents()
+                drpc_page.cancel_failover_dialog()
+
+                # --- Failover popup (initiate path) ---
+                drpc_page.open_failover_dialog("gitops-vm-protection")
+                drpc_page.assert_failover_dialog_contents()
+
+                # This invocation is genuinely driving failover -- open its
+                # independent Jira boundary now (dialog validation onward).
+                # See docs/jira-test-result-reporting.md for why post_failover
+                # resume never reaches this branch and so never opens one.
+                failover_reporter = jira_test_case_result(
+                    "failover_primary_to_secondary",
+                    scenario="Failover primary to secondary",
+                    run_id=run_id,
+                    client=jira_client,
+                    config=jira_config,
+                ).start()
+
+                _save_hammerdb_baseline_snapshot(phase="failover")
+                failover_started_at = time.monotonic()
+                failover_initiated_utc = datetime.now(timezone.utc)
+                drpc_page.initiate_failover_dialog()
+                failover_initiated = True
+            elif post_failover:
+                is_already_completed = status_lower_initial in {
+                    "failedover",
+                    "failover complete",
+                    "healthy",
+                    "protection error",
+                }
+            elif post_relocate:
                 pass
+            else:
+                assert state["cluster"] in {"ocp-primary", "ocp-secondary"}, (
+                    "Unexpected DRPC cluster before DR progression checks: "
+                    f"{state['cluster']!r} phase={drpc_phase!r} status={state['status']!r}"
+                )
 
-            # If failover is stuck in action-needed/progress states, run cleanup.
-            post_progress_state = drpc_page.get_drpc_state("gitops-vm-protection")
-            post_progress_status = post_progress_state["status"].strip().lower()
-            if post_progress_status in {
-                "waitonusertocleanup",
-                "action needed",
-                "protection error",
-            }:
-                _run_cleanup_non_primary_cluster(skip_pvcs=True)
+            run_failover_phase = (
+                failover_initiated or post_failover
+            ) and not post_relocate
 
-        if run_failover_phase:
-            # --- Wait for failover completion + healthy (up to 15 minutes) ---
-            drpc_page.wait_for_failover_complete_state(
+            if run_failover_phase and (
+                failover_initiated or (post_failover and not is_already_completed)
+            ):
+                # Best-effort failover progress path.
+                try:
+                    drpc_page.wait_for_failover_progress_state("gitops-vm-protection")
+                    drpc_page.open_failover_progress_popover("gitops-vm-protection")
+                    drpc_page.assert_failover_progress_popover(
+                        expected_target_cluster="ocp-secondary"
+                    )
+                except AssertionError:
+                    pass
+
+                # If failover is stuck in action-needed/progress states, run cleanup.
+                post_progress_state = drpc_page.get_drpc_state("gitops-vm-protection")
+                post_progress_status = post_progress_state["status"].strip().lower()
+                if post_progress_status in {
+                    "waitonusertocleanup",
+                    "action needed",
+                    "protection error",
+                }:
+                    _run_cleanup_non_primary_cluster(skip_pvcs=True)
+
+            if run_failover_phase:
+                # --- Wait for failover completion + healthy (up to 15 minutes) ---
+                drpc_page.wait_for_failover_complete_state(
+                    "gitops-vm-protection",
+                    expected_cluster="ocp-secondary",
+                    timeout_ms=900_000,
+                )
+                # RTO ends when all VMs are Running with SSH services on the secondary,
+                # confirmed by both the K8s API signal and an in-cluster TCP probe.
+                failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
+                    SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
+                )
+                _probe_ssh_via_pod(SECONDARY_KUBECONFIG, failover_ssh_ips)
+                _assert_rto_within_standard(
+                    phase="failover", started_at=failover_started_at
+                )
+                _wait_for_drpc_healthy_with_recovery(
+                    drpc_page,
+                    "gitops-vm-protection",
+                    expected_cluster="ocp-secondary",
+                    cleanup_skip_pvcs=True,
+                    timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
+                )
+
+                # --- Cluster health check before relocate ---
+                _assert_managed_clusters_available()
+                _run_dr_data_validation(
+                    phase="failover", initiated_utc=failover_initiated_utc
+                )
+
+                # RHELTEST-3600 boundary ends here (PASS committed) -- only
+                # when this invocation actually opened it above. A resumed
+                # post_failover run never set failover_initiated and so
+                # never created a reporter; nothing is reported here for it.
+                if failover_reporter is not None:
+                    failover_reporter.close_success()
+                    failover_reporter = None
+
+                state_before_relocate = drpc_page.get_drpc_state("gitops-vm-protection")
+                assert state_before_relocate["cluster"] == "ocp-secondary", (
+                    "Expected DRPC to be on ocp-secondary before relocate, got "
+                    f"{state_before_relocate['cluster']!r}"
+                )
+                assert state_before_relocate["status"].strip().lower() == "healthy", (
+                    "Expected DR status Healthy before relocate — DRPC must be Protected=True "
+                    "before triggering relocate to avoid Ceph split-brain. Got "
+                    f"{state_before_relocate['status']!r}"
+                )
+
+                # RHELTEST-3610 boundary starts here: reaching this point
+                # inside run_failover_phase always leads to a real relocate
+                # initiation just below, so it's always opened here.
+                relocate_reporter = jira_test_case_result(
+                    "relocate_secondary_to_primary",
+                    scenario="Relocate secondary to primary",
+                    run_id=run_id,
+                    client=jira_client,
+                    config=jira_config,
+                ).start()
+
+                # --- Relocate from secondary back to primary ---
+                drpc_page.open_relocate_dialog("gitops-vm-protection")
+                drpc_page.assert_relocate_dialog_contents()
+                _save_hammerdb_baseline_snapshot(phase="relocate")
+                relocate_started_at = time.monotonic()
+                relocate_initiated_utc = datetime.now(timezone.utc)
+                drpc_page.initiate_relocate_dialog()
+                relocate_was_initiated = True
+
+            if not _is_relocate_truly_done(drpc_page, "gitops-vm-protection"):
+                if relocate_was_initiated:
+                    _relocate_best_effort_progress(drpc_page, "gitops-vm-protection")
+                _wait_for_relocate_secondary_cleared(
+                    drpc_page,
+                    "gitops-vm-protection",
+                    timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
+                )
+
+            # --- Wait for relocate completion + healthy on primary ---
+            drpc_page.wait_for_relocate_complete_state(
                 "gitops-vm-protection",
-                expected_cluster="ocp-secondary",
-                timeout_ms=900_000,
+                expected_cluster="ocp-primary",
+                timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
             )
-            # RTO ends when all VMs are Running with SSH services on the secondary,
-            # confirmed by both the K8s API signal and an in-cluster TCP probe.
-            failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
-                SECONDARY_KUBECONFIG, cluster_name="ocp-secondary"
+            relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
+                PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
             )
-            _probe_ssh_via_pod(SECONDARY_KUBECONFIG, failover_ssh_ips)
+            _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_ssh_ips)
             _assert_rto_within_standard(
-                phase="failover", started_at=failover_started_at
+                phase="relocate", started_at=relocate_started_at
             )
             _wait_for_drpc_healthy_with_recovery(
                 drpc_page,
                 "gitops-vm-protection",
-                expected_cluster="ocp-secondary",
+                expected_cluster="ocp-primary",
                 cleanup_skip_pvcs=True,
                 timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
             )
-
-            # --- Cluster health check before relocate ---
             _assert_managed_clusters_available()
             _run_dr_data_validation(
-                phase="failover", initiated_utc=failover_initiated_utc
+                phase="relocate", initiated_utc=relocate_initiated_utc
             )
 
-            state_before_relocate = drpc_page.get_drpc_state("gitops-vm-protection")
-            assert state_before_relocate["cluster"] == "ocp-secondary", (
-                "Expected DRPC to be on ocp-secondary before relocate, got "
-                f"{state_before_relocate['cluster']!r}"
-            )
-            assert state_before_relocate["status"].strip().lower() == "healthy", (
-                "Expected DR status Healthy before relocate — DRPC must be Protected=True "
-                "before triggering relocate to avoid Ceph split-brain. Got "
-                f"{state_before_relocate['status']!r}"
-            )
-
-            # --- Relocate from secondary back to primary ---
-            drpc_page.open_relocate_dialog("gitops-vm-protection")
-            drpc_page.assert_relocate_dialog_contents()
-            _save_hammerdb_baseline_snapshot(phase="relocate")
-            relocate_started_at = time.monotonic()
-            relocate_initiated_utc = datetime.now(timezone.utc)
-            drpc_page.initiate_relocate_dialog()
-            relocate_was_initiated = True
-
-        if not _is_relocate_truly_done(drpc_page, "gitops-vm-protection"):
-            if relocate_was_initiated:
-                _relocate_best_effort_progress(drpc_page, "gitops-vm-protection")
-            _wait_for_relocate_secondary_cleared(
-                drpc_page,
-                "gitops-vm-protection",
-                timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
-            )
-
-        # --- Wait for relocate completion + healthy on primary ---
-        drpc_page.wait_for_relocate_complete_state(
-            "gitops-vm-protection",
-            expected_cluster="ocp-primary",
-            timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
-        )
-        relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
-            PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
-        )
-        _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_ssh_ips)
-        _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
-        _wait_for_drpc_healthy_with_recovery(
-            drpc_page,
-            "gitops-vm-protection",
-            expected_cluster="ocp-primary",
-            cleanup_skip_pvcs=True,
-            timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
-        )
-        _assert_managed_clusters_available()
-        _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
+            # RHELTEST-3610 boundary ends here -- only when this invocation
+            # actually opened it above (run_failover_phase was True and
+            # relocate was genuinely initiated this run).
+            if relocate_reporter is not None:
+                relocate_reporter.close_success()
+                relocate_reporter = None
+        except BaseException as exc:
+            # Safety net: report FAIL for whichever scenario boundary is
+            # still open (i.e. hasn't already been closed with a PASS
+            # above), then always re-raise the original exception
+            # unmodified -- Jira reporting never swallows or replaces a
+            # real test failure. A boundary already closed successfully
+            # (e.g. failover PASS, committed before relocate even started)
+            # is never retroactively marked FAIL by an independent,
+            # later relocate failure.
+            if failover_reporter is not None:
+                failover_reporter.close_failure(exc)
+            if relocate_reporter is not None:
+                relocate_reporter.close_failure(exc)
+            raise
