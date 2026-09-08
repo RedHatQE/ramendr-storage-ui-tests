@@ -1,6 +1,9 @@
 """Rewrite starter-kit values files for a v1.3 PATTERN_VARIANT.
 
 Used by scripts/lib/pattern-variant.sh (install-time) and unit tests.
+
+Preview RHDR (rhdr-catalog / rhdr-multicluster-operator / extraObjects IDMS) is
+committed in the fork; this helper only selects main.variant and BYOC.
 """
 
 from __future__ import annotations

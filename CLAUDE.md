@@ -4,11 +4,9 @@
 
 This repository (`ramendr-storage-ui-tests`) provides:
 
-- A reproducible way to deploy either:
-  - the QE fork of the upstream validated pattern
-    `elsapassaro/ramendr-starter-kit` (branch `ocp-4.22-rhdr-ramen`, pinned locally by commit SHA), or
-  - official `validatedpatterns/ramendr-starter-kit` branch `v1.3` selected with `PATTERN_VARIANT`
-    (`odf`, `drpartner-s4`, `drpartner-minimal`) via `main.variant` / `variants/`
+- A reproducible way to deploy the RamenDR validated pattern via three install variants
+  (`PATTERN_VARIANT`: `odf`, `drpartner-s4`, `drpartner-minimal`) selected with `main.variant`
+  / `variants/` in the upstream starter kit
 - A home for UI tests (Playwright + Python) to validate RamenDR workflows
 
 ## Non-goals
@@ -20,30 +18,29 @@ This repository (`ramendr-storage-ui-tests`) provides:
 
 The entrypoint is `scripts/redeploy.sh`.
 
-**Upstream pinning (two references):**
+**Upstream pinning (single fork, all variants):**
 
-- **Local checkout** (`pattern.sh`, utility container): cloned into
-  `.work/upstream/ramendr-starter-kit` at the immutable commit in `UPSTREAM_REF`.
-  Default is `d6c21253595ea809c779279e20bcc3e990420781` from fork branch `ocp-4.22-rhdr-ramen`.
-  When `PATTERN_VARIANT` is set (`odf` / `drpartner-s4` / `drpartner-minimal`), default is
-  official `validatedpatterns/ramendr-starter-kit` `v1.3` at `7451daf8cb3926f4ab7e36a29fd3ee0da91444a1`.
-  Override with `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
-- **Hub Argo CD** (ongoing GitOps sync): reads values from the git remote (`ocp-4.22-rhdr-ramen`
-  or `v1.3` unless Applications pin a specific revision). Local `main.variant` patches are
-  install-time only; persist partner variants by committing them on a fork.
+- Local checkout and default pin: `elsapassaro/ramendr-starter-kit` branch `ocp-4.22-rhdr-ramen` at
+  `59e84b5d2ce44a987859d153b0cc365033135dd5` (upstream v1.3 + QE odf overrides). Override with
+  `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
+- `redeploy.sh` patches `main.variant` and sets `byoc: true` in the local checkout. Preview RHDR
+  (`rhdr-catalog`, `rhdr-multicluster-operator`, GitOps `extraObjects` IDMS) is already committed
+  in the fork; do not locally rewrite catalog subscriptions.
+- Hub Argo CD reads git, not local patches. Tip commit has `main.variant: odf`; partner variants fail unless
+  the fork branch commits the matching variant.
 
 Customizations (Windows edge VMs, additionalPvcDisks, byoc cluster names, ODF channel pins,
 cost-optimized values, RHDR Quay IDMS) live in the fork's `ocp-4.22-rhdr-ramen` branch under
-`overrides/` and values files. v1.3 partner BOMs live under `variants/<name>/` on the official
-starter kit. Local edits next to the checkout do not affect Argo CD.
+`overrides/` and values files. Partner BOMs live under `variants/<name>/` in the configured
+fork checkout. Local edits next to the checkout do not affect Argo CD.
 
-- After hub + spoke `openshift-install`, `redeploy.sh` applies upstream
-  `APPLY_ME_FIRST.idms.yaml` (Quay ImageDigestMirrorSet for RHDR images) to hub + both
-  spokes, then copies `VALUES_SECRET` to `.work/values-secret.yaml`, merges spoke kubeconfig
+- After hub + spoke `openshift-install`, RHDR ImageDigestMirrorSet is applied by GitOps
+  `extraObjects.rhdr-fbc-idms` (the old `APPLY_ME_FIRST.idms.yaml` was dropped). Then
+  `redeploy.sh` copies `VALUES_SECRET` to `.work/values-secret.yaml`, merges spoke kubeconfig
   file paths, and runs `pattern.sh make install-byoc`. Vault + ExternalSecrets deliver
   kubeconfigs to ACM (no manual `oc create secret`).
 
-**Mixed edge VM fleet (`gitops-vms`):**
+**Mixed edge VM fleet (`gitops-vms`, `PATTERN_VARIANT=odf` only):**
 
 - 2× RHEL — `rhel9-node-*` (DataVolume data disk) + `rhel9-node-pvc-*` (PVC data disk); HammerDB PostgreSQL on both
 - 1× Windows Server 2022 (`windows2k22-server-*`) + 1× Windows Server 2025 (`windows2k25-server-*`); HammerDB SQL Server
@@ -78,7 +75,7 @@ Currently implemented in `tests/ui/`:
 - `pyproject.toml` + `pytest.ini` — test runner configuration with Playwright
 
 Smoke tests expect the full mixed fleet (4 edge VMs) and validate Windows OS disk size (45 Gi)
-when `PATTERN_VARIANT` is unset. Partner variants skip those assertions and check S4 (Dell)
+when `PATTERN_VARIANT=odf`. Partner variants skip those assertions and check S4 (Dell)
 `2m-drpolicy` or Infinidat's lack of S4/DRPolicy.
 
 ## Future
