@@ -408,6 +408,46 @@ def test_diagnose_never_treats_absence_from_createmeta_as_nonexistence():
     assert diagnosis["createable_via_create_metadata"] is False
 
 
+def test_diagnose_confirms_existence_via_createmeta_without_a_sample():
+    """When no --sample-test-result was given (or it failed) but the type IS in
+    create metadata, existence must be confirmed via ``createmeta_issue_type_id``
+    -- create metadata only lists types that already exist."""
+    diagnosis = discover.diagnose_test_result_availability(
+        create_metadata_has_test_result=True,
+        createmeta_issue_type_id="10272",
+        sample_issue_type_id=None,
+        sample_issue_type_name=None,
+        sample_issue_type_subtask=None,
+        associated_with_project_issue_type_scheme=True,
+        create_fields_probe_field_count=5,
+        create_fields_probe_error=None,
+    )
+    assert diagnosis["exists_in_project"] is True
+    assert diagnosis["likely_cause"] == "none"
+    assert not any(
+        "GET /issue/{key} for the sample succeeded" in line
+        for line in diagnosis["reasoning"]
+    ), "must never claim a sample GET succeeded when no sample was fetched"
+
+
+def test_diagnose_does_not_fabricate_sample_evidence_from_createmeta_alone():
+    """``sample_issue_type_id`` must never be backfilled from the createmeta
+    result: without an actual sample fetch AND without the type present in
+    create metadata, the diagnosis must stay inconclusive."""
+    diagnosis = discover.diagnose_test_result_availability(
+        create_metadata_has_test_result=False,
+        createmeta_issue_type_id=None,
+        sample_issue_type_id=None,
+        sample_issue_type_name=None,
+        sample_issue_type_subtask=None,
+        associated_with_project_issue_type_scheme=None,
+        create_fields_probe_field_count=None,
+        create_fields_probe_error=None,
+    )
+    assert diagnosis["exists_in_project"] is False
+    assert diagnosis["likely_cause"] == "inconclusive"
+
+
 # --------------------------------------------------------------------------
 # Full discovery run against a fake (read-only) client
 # --------------------------------------------------------------------------

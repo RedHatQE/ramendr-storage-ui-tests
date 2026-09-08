@@ -27,11 +27,33 @@ DEFAULT_FAIL_TRANSITION_ID = "4"
 DEFAULT_BLOCKED_TRANSITION_ID = "5"
 
 
+#: Recognized truthy/falsy spellings for boolean env vars (case-insensitive).
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
 def _bool_env(source: Mapping[str, str], name: str, default: bool) -> bool:
+    """Parse a boolean env var, defaulting when unset/empty.
+
+    Unset or empty returns ``default``. An explicit truthy/falsy spelling
+    (see ``_TRUE_VALUES``/``_FALSE_VALUES``) returns the matching bool. Any
+    other value raises ``ValueError`` rather than silently treating a typo
+    (e.g. ``JIRA_REPORT_DRY_RUN=ture``) as falsy -- for a safety flag like
+    ``JIRA_REPORT_DRY_RUN`` (default ``True``), silently coercing a typo to
+    ``False`` would disable a write-safety gate without any indication.
+    """
     raw = source.get(name)
     if raw is None or raw == "":
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    normalized = raw.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"Invalid boolean value for {name}={raw!r}; expected one of "
+        f"{sorted(_TRUE_VALUES | _FALSE_VALUES)}"
+    )
 
 
 @dataclass(frozen=True)

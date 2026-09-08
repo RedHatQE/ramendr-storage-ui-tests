@@ -346,6 +346,14 @@ def report_test_result(
         )
 
     issue_key = client.create_issue(fields)
+    logger.info(
+        "Jira issue %s created for test case %s (run_id=%s) -- logged immediately "
+        "in case a later step (snapshot fetch, transition lookup, validation) "
+        "raises before the final ReportResult is returned",
+        issue_key,
+        execution.test_case_key,
+        execution.run_id,
+    )
 
     # Never assume the initial status -- observe it, and the transitions
     # Jira actually offers, before attempting to move it anywhere.

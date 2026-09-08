@@ -1,10 +1,12 @@
-# Jira Test Result reporting — Phase A: schema discovery
+# Jira Test Result reporting
 
-**Status: Phase A only.** This describes a **read-only** discovery tool used to
-determine the production Jira schema for `RHELTEST` before any code that
-creates or transitions Jira issues is implemented. See
+**Status: Phase A, B, and C are all implemented.** This describes the Jira
+Cloud REST API v3 integration used for RamenDR Test Result reporting: Phase A's
+read-only schema discovery tool for the production `RHELTEST` project, plus
+Phase B/C's gated write support (`create_issue`/`transition_issue`) and its
+pytest/sanity wiring. See
 [`Ramen_DR_Jira_Test_Result_Integration_Plan.md`](Ramen_DR_Jira_Test_Result_Integration_Plan.md)
-for the full phased plan; nothing beyond Phase A has been implemented yet.
+for the full phased plan and rationale.
 
 ## What exists today
 
@@ -155,9 +157,10 @@ contacts a real Jira instance.
 
 Phase B/C add the ability to create and transition a real Jira Test Result,
 but every default is the safest option and a real write requires **three**
-independent, explicit opt-ins at once. Nothing here is wired into pytest or
-`tests/ui/sanity/test_sanity.py` yet, and no automatic instrumentation
-exists -- reporting only happens when the CLI below is run directly.
+independent, explicit opt-ins at once. `tests/ui/sanity/test_sanity.py` is
+wired up to report automatically (see "Phase 1 pytest/sanity wiring" below);
+the CLI (`scripts/jira/create_test_result_smoke.py`) is a separate, manual
+entrypoint for ad hoc/smoke reporting outside of pytest.
 
 ### New modules
 
@@ -189,12 +192,21 @@ exists -- reporting only happens when the CLI below is run directly.
 
 ### Safety gates
 
-A real Jira write only happens when **all three** are true:
-`JIRA_REPORT_RESULTS=true` **and** `JIRA_REPORT_DRY_RUN=false` **and**
-`--confirm` was passed on the CLI. Any other combination is either a pure
-offline payload build (reporting disabled -- zero Jira calls, not even a
-GET) or a safe preview that validates the parent Test Case with a read-only
-GET but performs no writes.
+A real Jira write requires two independent, explicit environment opt-ins in
+every caller: `JIRA_REPORT_RESULTS=true` **and** `JIRA_REPORT_DRY_RUN=false`.
+Any other combination is either a pure offline payload build (reporting
+disabled -- zero Jira calls, not even a GET) or a safe preview that validates
+the parent Test Case with a read-only GET but performs no writes.
+
+- **`scripts/jira/create_test_result_smoke.py` (CLI)** adds a *third*,
+  CLI-specific gate on top of the two env vars: `--confirm` must also be
+  passed. All three (`JIRA_REPORT_RESULTS=true`, `JIRA_REPORT_DRY_RUN=false`,
+  `--confirm`) must be true together before this CLI performs a write.
+- **`tests/ui/sanity/test_sanity.py` (pytest)** has no `--confirm`-equivalent
+  flag -- it is gated purely by the two environment variables above. Setting
+  `JIRA_REPORT_RESULTS=true` and `JIRA_REPORT_DRY_RUN=false` before running
+  pytest is sufficient (and necessary) to enable real Jira writes from the
+  sanity flow; see "Phase 1 pytest/sanity wiring" below.
 
 `report_test_result()` never assumes a newly created issue's initial
 status: after `create_issue`, it re-fetches the issue's current status and

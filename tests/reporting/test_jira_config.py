@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from reporting.jira_config import reporting_config_from_env
 from reporting.jira_models import TestOutcome
 
@@ -62,10 +64,22 @@ def test_bool_env_accepts_common_truthy_spellings():
         assert config.report_results is True, f"{value!r} should be truthy"
 
 
-def test_bool_env_treats_anything_else_as_falsy():
-    for value in ("0", "false", "no", "off", "garbage"):
+def test_bool_env_accepts_common_falsy_spellings():
+    for value in ("0", "false", "False", "FALSE", "no", "off"):
         config = reporting_config_from_env({"JIRA_REPORT_RESULTS": value})
         assert config.report_results is False, f"{value!r} should be falsy"
+
+
+def test_bool_env_raises_on_unrecognized_value_instead_of_silently_falsy():
+    """An unrecognized value (typo or garbage) must never be silently coerced
+    to False -- for a safety flag like JIRA_REPORT_DRY_RUN (default True),
+    that would silently disable a write-safety gate. It must raise instead,
+    preserving the safe default rather than guessing."""
+    for value in ("garbage", "ture"):
+        with pytest.raises(ValueError, match=value):
+            reporting_config_from_env({"JIRA_REPORT_RESULTS": value})
+        with pytest.raises(ValueError, match=value):
+            reporting_config_from_env({"JIRA_REPORT_DRY_RUN": value})
 
 
 def test_transition_id_for_maps_each_outcome():

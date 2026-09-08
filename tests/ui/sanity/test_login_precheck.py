@@ -15,9 +15,11 @@ full sanity DR flow (``tests/ui/sanity/test_sanity.py``).
 
     pytest tests/ui/sanity/test_login_precheck.py --tb=short
 
-``--tb=short`` is intentional: the default (long) traceback prints each
-frame's local variables, which would include the plaintext password
-argument to ``LoginPage.login()`` on failure.
+``--tb=short`` gives a compact traceback on failure. Frame-local variables
+are only printed when ``--showlocals``/``-l`` is explicitly passed -- do
+**not** enable that flag when running this test: ``LoginPage.login()``
+receives the plaintext password as an argument, and ``--showlocals`` would
+print it in the traceback on failure.
 """
 
 from __future__ import annotations

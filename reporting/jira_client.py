@@ -37,6 +37,9 @@ DEFAULT_TIMEOUT: tuple[float, float] = (10.0, 30.0)
 _RETRY_STATUS_CODES = frozenset({429, 502, 503, 504})
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_SECONDS = 1.0
+#: Hard cap on any retry delay, including a server-supplied ``Retry-After`` --
+#: never sleep longer than the read timeout would allow a caller to wait.
+_MAX_RETRY_DELAY_SECONDS = DEFAULT_TIMEOUT[1]
 
 _API_PREFIX = "rest/api/3"
 
@@ -102,6 +105,11 @@ class JiraConfig:
         if missing:
             raise ValueError(
                 "Missing required Jira configuration: " + ", ".join(missing)
+            )
+        if not self.base_url.startswith("https://"):
+            raise ValueError(
+                "JIRA_BASE_URL must use HTTPS (got a non-HTTPS URL) -- refusing "
+                "to send credentials over an insecure scheme"
             )
 
 
@@ -434,11 +442,16 @@ def _sanitize_error_body(response: requests.Response) -> str:
 
 
 def _retry_delay_seconds(response: requests.Response, attempt: int) -> float:
-    """Compute a backoff delay, honoring ``Retry-After`` when Jira sends one."""
+    """Compute a backoff delay, honoring ``Retry-After`` when Jira sends one.
+
+    A server-supplied ``Retry-After`` is clamped to ``_MAX_RETRY_DELAY_SECONDS``
+    -- an overly large or malicious value must never block a retry loop far
+    longer than our own read timeout would.
+    """
     retry_after = response.headers.get("Retry-After")
     if retry_after:
         try:
-            return max(float(retry_after), 0.0)
+            return min(max(float(retry_after), 0.0), _MAX_RETRY_DELAY_SECONDS)
         except ValueError:
             pass
     return _RETRY_BACKOFF_SECONDS * attempt

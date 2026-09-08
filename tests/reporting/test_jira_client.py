@@ -6,6 +6,7 @@ import pytest
 import requests
 
 from reporting.jira_client import (
+    _MAX_RETRY_DELAY_SECONDS,
     JiraAmbiguousWriteError,
     JiraAuthenticationError,
     JiraClient,
@@ -13,10 +14,11 @@ from reporting.jira_client import (
     JiraConfig,
     JiraPermissionError,
     JiraWriteError,
+    _retry_delay_seconds,
     config_from_env,
 )
 
-_TOKEN = "TOP-SECRET-TOKEN-do-not-leak"
+_TOKEN = "TOP-SECRET-TOKEN-do-not-leak"  # noqa: S105 -- test fixture, not a real credential
 _EMAIL = "qe-automation@example.com"
 
 
@@ -101,6 +103,24 @@ def test_config_from_env_reads_expected_variables():
 def test_config_from_env_missing_variables_raises(env):
     with pytest.raises(ValueError):
         config_from_env(env)
+
+
+@pytest.mark.parametrize(
+    "bad_base_url",
+    [
+        "http://redhat.atlassian.net",
+        "ftp://redhat.atlassian.net",
+        "redhat.atlassian.net",
+    ],
+)
+def test_config_rejects_non_https_base_url(bad_base_url):
+    with pytest.raises(ValueError, match="HTTPS"):
+        JiraConfig(base_url=bad_base_url, email=_EMAIL, api_token=_TOKEN)
+
+
+def test_config_accepts_https_base_url():
+    config = _config(base_url="https://redhat.atlassian.net")
+    assert config.base_url == "https://redhat.atlassian.net"
 
 
 def test_client_sets_basic_auth_from_config():
@@ -493,6 +513,24 @@ def test_gives_up_after_max_retries_on_persistent_503():
         client.get_current_user()
     # 1 initial attempt + 3 retries = 4 calls, then it raises rather than retry forever.
     assert len(session.calls) == 4
+
+
+def test_retry_delay_honors_a_reasonable_retry_after():
+    response = FakeResponse(429, headers={"Retry-After": "2"})
+    assert _retry_delay_seconds(response, attempt=1) == 2.0
+
+
+def test_retry_delay_caps_an_excessive_retry_after():
+    """A server-supplied (or malicious/misconfigured) Retry-After far beyond
+    our own read timeout must never be honored verbatim -- it's clamped to
+    _MAX_RETRY_DELAY_SECONDS."""
+    response = FakeResponse(429, headers={"Retry-After": "99999"})
+    assert _retry_delay_seconds(response, attempt=1) == _MAX_RETRY_DELAY_SECONDS
+
+
+def test_retry_delay_falls_back_to_backoff_on_invalid_retry_after():
+    response = FakeResponse(429, headers={"Retry-After": "not-a-number"})
+    assert _retry_delay_seconds(response, attempt=2) == pytest.approx(2.0)
 
 
 def test_network_error_raises_jira_client_error(monkeypatch):

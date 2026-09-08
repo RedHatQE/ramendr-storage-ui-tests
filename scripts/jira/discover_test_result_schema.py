@@ -313,6 +313,7 @@ def diagnose_test_result_availability(
     *,
     create_metadata_has_test_result: bool,
     create_issue_types_listing_empty: bool = False,
+    createmeta_issue_type_id: str | None = None,
     sample_issue_type_id: str | None,
     sample_issue_type_name: str | None,
     sample_issue_type_subtask: bool | None,
@@ -336,16 +337,28 @@ def diagnose_test_result_availability(
     HTTP 200 with zero fields (not a 4xx) when a type is not createable for
     the current user/project, so an empty-but-200 probe is *not* evidence of
     a bug in our own listing code.
+
+    ``sample_issue_type_id`` must be reserved exclusively for evidence from an
+    actually-fetched sample issue (``GET /issue/{key}``) -- never backfilled
+    from createmeta. Pass the createmeta-derived id separately via
+    ``createmeta_issue_type_id`` instead; presence in create metadata is its
+    own, independent proof of existence (see ``exists_in_project`` below) and
+    must not be misreported as "a sample GET succeeded".
     """
-    exists_in_project = sample_issue_type_id is not None
+    sample_fetched = sample_issue_type_id is not None
+    exists_via_createmeta = create_metadata_has_test_result and (
+        createmeta_issue_type_id is not None
+    )
+    exists_in_project = sample_fetched or exists_via_createmeta
     reasoning: list[str] = []
     probe_returned_fields = bool(create_fields_probe_field_count)
 
     if not exists_in_project:
         reasoning.append(
             "No sample Test Result was fetched (no --sample-test-result given, or "
-            "the fetch failed) -- cannot confirm existence independently of create "
-            "metadata. Re-run with --sample-test-result RHELTEST-XXXX."
+            "the fetch failed) and the issue type is absent from create metadata -- "
+            "cannot confirm existence independently. Re-run with "
+            "--sample-test-result RHELTEST-XXXX."
         )
         return {
             "exists_in_project": False,
@@ -361,11 +374,21 @@ def diagnose_test_result_availability(
             "reasoning": reasoning,
         }
 
-    reasoning.append(
-        f"GET /issue/{{key}} for the sample succeeded and returned issue type "
-        f"{sample_issue_type_name!r} (id={sample_issue_type_id}) -> the issue type "
-        "exists in the project and is viewable by the current user."
-    )
+    if sample_fetched:
+        reasoning.append(
+            f"GET /issue/{{key}} for the sample succeeded and returned issue type "
+            f"{sample_issue_type_name!r} (id={sample_issue_type_id}) -> the issue type "
+            "exists in the project and is viewable by the current user."
+        )
+    else:
+        reasoning.append(
+            "No sample was fetched, but the issue type "
+            f"(id={createmeta_issue_type_id}) is present in "
+            "GET /issue/createmeta/{project}/issuetypes for the current user -- "
+            "create metadata only lists types that already exist, so its "
+            "presence there is independent proof of existence even without a "
+            "sample."
+        )
 
     likely_cause = "inconclusive"
 
@@ -559,8 +582,11 @@ def build_summary_text(
     if transitions is not None:
         lines.append("Available workflow transitions:")
         for t in transitions:
+            transition_id = t["transition_id"] or ""
+            transition_name = t["transition_name"] or ""
+            to_status_name = t["to_status_name"] or ""
             lines.append(
-                f"  {t['transition_id']:<6} {t['transition_name']:<20} -> {t['to_status_name']}"
+                f"  {transition_id:<6} {transition_name:<20} -> {to_status_name}"
             )
         lines.append("")
         lines.append(
@@ -830,8 +856,11 @@ def run_discovery(args: argparse.Namespace) -> int:
 
     if args.verbose:
         print("Fetching global field registry...")
-    all_fields = client.get_fields()
-    write_json(output_dir / "jira-fields.json", all_fields)
+    try:
+        all_fields = client.get_fields()
+        write_json(output_dir / "jira-fields.json", all_fields)
+    except JiraClientError as exc:
+        print(f"Warning: GET /field failed: {exc}", file=sys.stderr)
 
     associated_with_scheme: bool | None = None
     if project_issue_types_error is None and resolved_id:
@@ -842,8 +871,10 @@ def run_discovery(args: argparse.Namespace) -> int:
     diagnosis = diagnose_test_result_availability(
         create_metadata_has_test_result=create_metadata_has_test_result,
         create_issue_types_listing_empty=len(issue_types_raw) == 0,
-        sample_issue_type_id=sample_issue_type_id
-        or (resolved_id if create_metadata_has_test_result else None),
+        createmeta_issue_type_id=(
+            resolved_id if create_metadata_has_test_result else None
+        ),
+        sample_issue_type_id=sample_issue_type_id,
         sample_issue_type_name=sample_issue_type_name or resolved_name,
         sample_issue_type_subtask=(
             sample_issue_type_subtask if sample_issue_type_id else resolved_subtask
