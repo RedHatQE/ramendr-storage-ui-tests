@@ -9,6 +9,8 @@ import pytest
 
 from tests.utils.dr_validation import (
     assert_all_hammerdb_snapshots_ready,
+    assert_all_hammerdb_snapshots_schema_present,
+    assert_hammerdb_schema_present,
     assert_hammerdb_snapshot_ready,
 )
 
@@ -124,4 +126,83 @@ def test_assert_all_hammerdb_snapshots_ready_reports_per_vm_failures(
     )
 
     with pytest.raises(AssertionError, match=r"bad \(mssql\)"):
+        assert_all_hammerdb_snapshots_ready(tmp_path)
+
+
+def test_assert_hammerdb_snapshot_ready_accepts_fresh_status_only_audit() -> None:
+    snapshot = {
+        "database_backend": "postgres",
+        "collected_at_utc": "2026-09-01T12:00:10Z",
+        "audit": {
+            "records": [],
+            "record_count": 3,
+            "last_committed_at": "2026-09-01T12:00:01Z",
+        },
+        "tpcc": dict(_POPULATED_TPCC),
+        "storage": _DUAL_DISK_STORAGE,
+    }
+    assert_hammerdb_snapshot_ready(snapshot, max_age_sec=90)
+
+
+def test_assert_hammerdb_snapshot_ready_rejects_stale_audit() -> None:
+    snapshot = {
+        "database_backend": "postgres",
+        "collected_at_utc": "2026-09-01T12:00:00Z",
+        "audit": {
+            "records": [],
+            "record_count": 2,
+            "last_committed_at": "2026-09-01T10:00:00Z",
+        },
+        "tpcc": dict(_POPULATED_TPCC),
+        "storage": _DUAL_DISK_STORAGE,
+    }
+    assert_hammerdb_schema_present(snapshot)
+    with pytest.raises(AssertionError, match="not fresh"):
+        assert_hammerdb_snapshot_ready(snapshot, max_age_sec=90)
+
+
+def test_assert_hammerdb_schema_present_allows_empty_audit() -> None:
+    snapshot = {
+        "database_backend": "postgres",
+        "audit": {"records": [], "record_count": 0},
+        "tpcc": dict(_POPULATED_TPCC),
+        "storage": _DUAL_DISK_STORAGE,
+    }
+    assert_hammerdb_schema_present(snapshot)
+    with pytest.raises(AssertionError, match="workload not recording"):
+        assert_hammerdb_snapshot_ready(snapshot)
+
+
+def test_assert_all_hammerdb_snapshots_schema_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DR_VALIDATION_HAMMERDB_ALL_VMS", "0")
+    monkeypatch.delenv("DR_VALIDATION_HAMMERDB_VMS", raising=False)
+
+    (tmp_path / "linux.db-snapshot.json").write_text(
+        json.dumps(
+            {
+                "database_backend": "postgres",
+                "audit": {"records": []},
+                "tpcc": dict(_POPULATED_TPCC),
+                "storage": _DUAL_DISK_STORAGE,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "windows.db-snapshot.json").write_text(
+        json.dumps(
+            {
+                "database_backend": "mssql",
+                "audit": {"records": []},
+                "tpcc": dict(_POPULATED_TPCC),
+                "storage": _DUAL_DISK_STORAGE,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert_all_hammerdb_snapshots_schema_present(tmp_path)
+    with pytest.raises(AssertionError, match="workload not recording"):
         assert_all_hammerdb_snapshots_ready(tmp_path)

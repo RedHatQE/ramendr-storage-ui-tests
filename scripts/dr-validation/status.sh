@@ -8,7 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 if dr_validation_uses_hammerdb; then
-  exec "$SCRIPT_DIR/status-hammerdb.sh"
+  # Redeploy / QA status is schema-present. Use status-hammerdb.sh (no flag) to
+  # require a fresh audit trail after OLTP has been started.
+  exec "$SCRIPT_DIR/status-hammerdb.sh" --schema-only
 fi
 
 hub_install_dir="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"

@@ -180,7 +180,7 @@ for name in ("s4-ui-credentials", "s4-api-credentials"):
 PY
 )
     if [[ -n "${missing_s4_secrets:-}" ]]; then
-      warn "VALUES_SECRET missing Dell S4 secrets: $(tr '\n' ' ' <<<"$missing_s4_secrets")"
+      warn "VALUES_SECRET missing S4 secrets: $(tr '\n' ' ' <<<"$missing_s4_secrets")"
       warn "Add s4-ui-credentials and s4-api-credentials (see dr-validation/examples/values-secret-v2-s4.fragment.yaml)."
     fi
   fi
@@ -356,7 +356,7 @@ retire_previous_clustergroup_apps() {
   done
 }
 
-# QE fork + v1.3 odf / Dell BOM names. Never delete unlisted DR objects.
+# QE fork + v1.3 odf / S4 BOM names. Never delete unlisted DR objects.
 _STARTER_KIT_DRPOLICY_NAMES="2m-vm 2m-novm 2m-drpolicy"
 _STARTER_KIT_DRPC_NAMES="gitops-vm-protection"
 
@@ -441,7 +441,7 @@ cleanup_variant_leftovers() {
       oc delete namespace vp-s4-storage --wait=false &>/dev/null || true
       ;;
     odf)
-      log "Removing leftover Dell DRPolicy 2m-drpolicy (odf uses 2m-vm / 2m-novm)..."
+      log "Removing leftover DRPolicy 2m-drpolicy (odf uses 2m-vm / 2m-novm)..."
       oc delete drpolicy 2m-drpolicy --wait=false &>/dev/null || true
       ;;
     *)
@@ -802,44 +802,11 @@ scale_hub_workers() {
   done
 }
 
-apply_rhdr_idms() {
-  # Legacy early IDMS apply. Fork pin 5159788d dropped APPLY_ME_FIRST.idms.yaml;
-  # preview RHDR IDMS is GitOps extraObjects.rhdr-fbc-idms on hub + spoke BOMs.
-  # Keep this path for older UPSTREAM_REF overrides that still ship the file.
-  local idms_file="${UPSTREAM_DIR}/APPLY_ME_FIRST.idms.yaml"
-  if [[ ! -f "$idms_file" ]]; then
-    log "No APPLY_ME_FIRST.idms.yaml in upstream checkout; RHDR IDMS comes from GitOps extraObjects.rhdr-fbc-idms."
-    return 0
-  fi
-
-  log "Applying RHDR Quay ImageDigestMirrorSet to hub + spokes (before install-byoc)..."
-  local name dir kc
-  for name in hub ocp-primary ocp-secondary; do
-    case "$name" in
-      hub) dir="$HUB_INSTALL_DIR" ;;
-      ocp-primary) dir="$PRIMARY_INSTALL_DIR" ;;
-      ocp-secondary) dir="$SECONDARY_INSTALL_DIR" ;;
-    esac
-    kc="${dir}/auth/kubeconfig"
-    if [[ ! -f "$kc" ]]; then
-      err "Missing kubeconfig for ${name} (${kc}); cannot apply IDMS."
-      return 1
-    fi
-    log " Applying IDMS on ${name}..."
-    if ! KUBECONFIG="$kc" oc apply -f "$idms_file"; then
-      err "Failed to apply ${idms_file} on ${name}."
-      return 1
-    fi
-  done
-  log "RHDR IDMS applied on hub, ocp-primary, and ocp-secondary."
-}
-
 deploy_pattern() {
   ensure_podman_ready || exit 1
   log "Deploying RamenDR pattern (BYOC: install-byoc with spoke kubeconfigs in values-secret)..."
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
-  apply_rhdr_idms || exit 1
   prepare_byoc_values_secret || exit 1
 
   log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."
@@ -1059,7 +1026,7 @@ setup_dr_validation() {
     fi
   fi
 
-  log "DR validation is running (mode=${DR_VALIDATION_MODE:-hammerdb})."
+  log "DR validation bootstrap complete (mode=${DR_VALIDATION_MODE:-hammerdb}; HammerDB writers stay stopped until sanity)."
   if [[ "${DR_VALIDATION_MODE:-hammerdb}" != "hammerdb" ]] && \
     [[ "${SKIP_DR_VALIDATION_SNAPSHOTS:-0}" != "1" ]] && \
     [[ -x "$REPO_ROOT/scripts/dr-validation/start-snapshot-daemon.sh" ]]; then

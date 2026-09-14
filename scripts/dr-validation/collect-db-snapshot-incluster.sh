@@ -79,6 +79,8 @@ spec:
         env:
         - name: DR_VALIDATION_SNAPSHOT_STATUS_ONLY
           value: "${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}"
+        - name: DR_VALIDATION_SKIP_AUDIT_REFRESH
+          value: "${DR_VALIDATION_SKIP_AUDIT_REFRESH:-0}"
         volumeMounts:
         - name: ssh
           mountPath: /ssh
@@ -126,8 +128,10 @@ spec:
                 remote_cmd="\${remote_cmd} --status-only"
               fi
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-              refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
-              sleep 15
+              if [[ "\${DR_VALIDATION_SKIP_AUDIT_REFRESH:-0}" != "1" ]]; then
+                refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
+                sleep 15
+              fi
               if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null; then
                 return 0
               fi
@@ -149,8 +153,10 @@ spec:
                 echo "WARN: skipping \$name (no windows-password)" >&2
                 return 1
               fi
-              refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
-              sleep 15
+              if [[ "\${DR_VALIDATION_SKIP_AUDIT_REFRESH:-0}" != "1" ]]; then
+                refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
+                sleep 15
+              fi
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1

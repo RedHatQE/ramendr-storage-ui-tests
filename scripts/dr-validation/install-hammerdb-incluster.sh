@@ -349,46 +349,7 @@ spec:
               echo "One or more HammerDB installs failed."
               exit 1
             fi
-            refresh_linux_audit() {
-              local host="\$1" port="\$2" ssh_user="\$3"
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-              local cmd="sudo systemctl restart ramendr-dr-db-audit.service"
-              if [[ -f /tmp/ssh-privatekey ]]; then
-                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$cmd"
-                return \$?
-              fi
-              if [[ -n "\$LINUX_PASS" ]]; then
-                sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
-                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "\$cmd"
-                return \$?
-              fi
-              return 1
-            }
-            refresh_windows_audit() {
-              local host="\$1" port="\$2" ssh_user="\$3"
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-              local cmd='powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-ScheduledTask -TaskName ramendr-dr-db-audit -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName ramendr-dr-db-audit"'
-              if [[ -z "\$WINDOWS_PASS" ]]; then
-                return 1
-              fi
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
-                -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                "\${ssh_user}@\${host}" "\$cmd"
-            }
-            echo "Refreshing audit writers on all target VMs..."
-            while IFS=\$'\t' read -r name host port platform ssh_user; do
-              [[ -z "\$name" ]] && continue
-              port="\${port:-22}"
-              if [[ "\$platform" == windows ]]; then
-                refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \$name"
-              else
-                refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \$name"
-              fi
-            done < /tmp/hosts.tsv
-            echo "Waiting 45s for audit writers to append fresh rows..."
-            sleep 45
-            echo "HammerDB install completed."
+            echo "HammerDB install completed (schema only; writers left stopped)."
       volumes:
       - name: payload
         configMap:
