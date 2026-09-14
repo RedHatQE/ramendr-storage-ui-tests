@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ramendr_dr_validation.tpcc_schema import validate_tpcc_populated
@@ -12,6 +14,7 @@ from ramendr_dr_validation.tpcc_schema import validate_tpcc_populated
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _STATUS_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_DR_STATUS_TIMEOUT_SECONDS", "600"))
 _COLLECT_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_DR_COLLECT_TIMEOUT_SECONDS", "600"))
+_LOAD_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_DR_LOAD_TIMEOUT_SECONDS", "600"))
 
 
 def repo_root() -> Path:
@@ -45,12 +48,46 @@ def hub_env(kubeconfig: str) -> dict[str, str]:
     return env
 
 
-def run_status_hammerdb(*, kubeconfig: str) -> subprocess.CompletedProcess[str]:
+def _parse_utc(ts: str) -> datetime:
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(ts)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _audit_age_seconds(snapshot: dict) -> float | None:
+    audit = snapshot.get("audit") or {}
+    last_ts = audit.get("last_committed_at")
+    records = audit.get("records") or []
+    if not last_ts and records:
+        last_ts = records[-1].get("committed_at")
+    if not last_ts:
+        return None
+    last_dt = _parse_utc(str(last_ts))
+    ref_raw = snapshot.get("collected_at_utc")
+    if ref_raw:
+        ref_dt = _parse_utc(str(ref_raw))
+    else:
+        ref_dt = datetime.now(timezone.utc)
+    return (ref_dt - last_dt).total_seconds()
+
+
+def run_status_hammerdb(
+    *, kubeconfig: str, schema_only: bool = False
+) -> subprocess.CompletedProcess[str]:
     script = repo_root() / "scripts" / "dr-validation" / "status-hammerdb.sh"
+    env = hub_env(kubeconfig)
+    cmd = ["bash", str(script)]
+    if schema_only:
+        cmd.append("--schema-only")
+        env["DR_VALIDATION_STATUS_SCHEMA_ONLY"] = "1"
+        env["DR_VALIDATION_SKIP_AUDIT_REFRESH"] = "1"
     return subprocess.run(  # noqa: S603
-        ["bash", str(script)],  # noqa: S607
+        cmd,  # noqa: S607
         cwd=repo_root(),
-        env=hub_env(kubeconfig),
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -58,21 +95,57 @@ def run_status_hammerdb(*, kubeconfig: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def collect_db_snapshot(
-    *, kubeconfig: str, out_dir: Path
+def _run_hammerdb_load(
+    *, kubeconfig: str, action: str
 ) -> subprocess.CompletedProcess[str]:
     script = (
-        repo_root() / "scripts" / "dr-validation" / "collect-db-snapshot-incluster.sh"
+        repo_root() / "scripts" / "dr-validation" / "control-hammerdb-load-incluster.sh"
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
     return subprocess.run(  # noqa: S603
-        ["bash", str(script), str(out_dir)],  # noqa: S607
+        ["bash", str(script), action],  # noqa: S607
         cwd=repo_root(),
         env=hub_env(kubeconfig),
         text=True,
         capture_output=True,
         check=False,
-        timeout=_COLLECT_TIMEOUT_SECONDS,
+        timeout=_LOAD_TIMEOUT_SECONDS,
+    )
+
+
+def start_hammerdb_load(*, kubeconfig: str) -> subprocess.CompletedProcess[str]:
+    return _run_hammerdb_load(kubeconfig=kubeconfig, action="start")
+
+
+def stop_hammerdb_load(*, kubeconfig: str) -> subprocess.CompletedProcess[str]:
+    return _run_hammerdb_load(kubeconfig=kubeconfig, action="stop")
+
+
+def collect_db_snapshot(
+    *,
+    kubeconfig: str,
+    out_dir: Path,
+    skip_audit_refresh: bool = False,
+    status_only: bool = False,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    script = (
+        repo_root() / "scripts" / "dr-validation" / "collect-db-snapshot-incluster.sh"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = hub_env(kubeconfig)
+    if skip_audit_refresh:
+        env["DR_VALIDATION_SKIP_AUDIT_REFRESH"] = "1"
+    if status_only:
+        env["DR_VALIDATION_SNAPSHOT_STATUS_ONLY"] = "1"
+    collect_timeout = _COLLECT_TIMEOUT_SECONDS if timeout is None else timeout
+    return subprocess.run(  # noqa: S603
+        ["bash", str(script), str(out_dir)],  # noqa: S607
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=collect_timeout,
     )
 
 
@@ -110,12 +183,8 @@ def load_all_hammerdb_snapshots(snapshot_dir: Path) -> dict[str, dict]:
     }
 
 
-def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
-    """Require audit rows and HammerDB TPC-C minimum row counts on one VM snapshot."""
-    audit = snapshot.get("audit") or {}
-    records = audit.get("records") or []
-    assert records, "dr_validation_audit has no rows — workload not recording"
-
+def assert_hammerdb_schema_present(snapshot: dict) -> None:
+    """Require static TPC-C minima and dual-disk layout; audit freshness is optional."""
     tpcc = snapshot.get("tpcc") or {}
     tpcc_errors = validate_tpcc_populated(tpcc)
     assert not tpcc_errors, "TPC-C tables not populated after deploy:\n" + "\n".join(
@@ -133,7 +202,37 @@ def assert_hammerdb_snapshot_ready(snapshot: dict) -> None:
         )
 
 
-def assert_all_hammerdb_snapshots_ready(snapshot_dir: Path) -> None:
+def assert_hammerdb_snapshot_ready(
+    snapshot: dict, *, max_age_sec: float | None = None
+) -> None:
+    """Require audit rows and HammerDB TPC-C minimum row counts on one VM snapshot.
+
+    When ``max_age_sec`` is set, ``last_committed_at`` must be within that many
+    seconds of ``collected_at_utc`` (or now). Stale seed rows from schema-only
+    install then fail the OLTP-ready check.
+    """
+    audit = snapshot.get("audit") or {}
+    records = audit.get("records") or []
+    record_count = audit.get("record_count")
+    has_audit = bool(records) or (record_count is not None and int(record_count) >= 1)
+    assert has_audit, "dr_validation_audit has no rows — workload not recording"
+
+    if max_age_sec is not None:
+        age = _audit_age_seconds(snapshot)
+        assert age is not None, (
+            "dr_validation_audit has no committed_at — workload not recording"
+        )
+        clock_skew = float(os.getenv("DR_VALIDATION_STATUS_CLOCK_SKEW_SEC", "30"))
+        assert -clock_skew <= age <= max_age_sec, (
+            f"dr_validation_audit is not fresh (age={age:.1f}s, max={max_age_sec:.0f}s)"
+        )
+
+    assert_hammerdb_schema_present(snapshot)
+
+
+def assert_all_hammerdb_snapshots_ready(
+    snapshot_dir: Path, *, max_age_sec: float | None = None
+) -> None:
     """Validate every edge-VM HammerDB snapshot under ``snapshot_dir``.
 
     Iterates all ``*.db-snapshot.json`` files and applies the same per-VM checks as
@@ -141,6 +240,21 @@ def assert_all_hammerdb_snapshots_ready(snapshot_dir: Path) -> None:
     customer >= 3000, warehouse >= 1, item >= 100_000, etc.). Thresholds are
     identical for PostgreSQL and SQL Server backends.
     """
+
+    def check(snapshot: dict) -> None:
+        assert_hammerdb_snapshot_ready(snapshot, max_age_sec=max_age_sec)
+
+    _assert_all_hammerdb_snapshots(snapshot_dir, check)
+
+
+def assert_all_hammerdb_snapshots_schema_present(snapshot_dir: Path) -> None:
+    """Validate static TPC-C + dual-disk layout on every snapshot (no audit required)."""
+    _assert_all_hammerdb_snapshots(snapshot_dir, assert_hammerdb_schema_present)
+
+
+def _assert_all_hammerdb_snapshots(
+    snapshot_dir: Path, check: Callable[[dict], None]
+) -> None:
     snapshots = load_all_hammerdb_snapshots(snapshot_dir)
     expected = expected_hammerdb_vm_count()
     assert len(snapshots) >= expected, (
@@ -151,7 +265,7 @@ def assert_all_hammerdb_snapshots_ready(snapshot_dir: Path) -> None:
     for vm_name, snapshot in sorted(snapshots.items()):
         backend = snapshot.get("database_backend", "unknown")
         try:
-            assert_hammerdb_snapshot_ready(snapshot)
+            check(snapshot)
         except AssertionError as exc:
             failures.append(f"{vm_name} ({backend}): {exc}")
     assert not failures, "HammerDB snapshot validation failed:\n" + "\n".join(

@@ -22,6 +22,10 @@ TPCC_TABLES: dict[str, str] = {
 TPCC_TABLE_NAMES: tuple[str, ...] = tuple(TPCC_TABLES)
 
 # Minimum row counts after HammerDB buildschema with one warehouse.
+# Keep Linux/Windows install "schema populated" checks in sync
+# (install-on-vm.sh / install-on-vm-windows.ps1). A warehouse row alone is not
+# enough: HammerDB creates tables first, then loads item/stock/customer.
+# Zero-min tables must exist; COUNT(*)==0 cannot distinguish missing vs empty.
 TPCC_MIN_ROW_COUNTS: dict[str, int] = {
     "warehouse": 1,
     "district": 10,

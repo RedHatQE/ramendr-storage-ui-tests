@@ -11,15 +11,28 @@ Set `DR_VALIDATION_MODE=timestamp` to use the original per-VM timestamp writer
 
 ## HammerDB workflow (default)
 
-1. **Deploy environment** — `./scripts/redeploy.sh` automatically installs HammerDB on
-   all edge VMs (unless `SKIP_DR_VALIDATION=1`), verifies TPC-C tables are populated on
-   each target, and saves an initial baseline snapshot to `.work/dr-validation-db/auto/latest`.
-2. **Before DR** — capture a fresh baseline immediately before Initiate (sanity test does
-   this automatically; for manual runs use `./scripts/dr-validation/save-db-baseline-snapshot.sh`).
-3. **Run DR** — failover / relocate on DRPC `gitops-vm-protection`.
-4. **After DR** — sanity test or `./scripts/dr-validation/post-dr-automation.sh` validates
-   TPC-C table data on all supported platforms (PostgreSQL on Linux, SQL Server on Windows)
-   automatically.
+1. **Deploy environment** — `./scripts/redeploy.sh` installs PostgreSQL/SQL Server and
+   builds the TPC-C **schema** on all edge VMs (unless `SKIP_DR_VALIDATION=1`). Autopilot
+   and the audit writer stay **stopped and not enabled at boot**. Smoke checks that the
+   databases exist (`status-hammerdb.sh --schema-only`). Redeploy does **not** save a DR
+   baseline and does **not** start OLTP.
+2. **Before DR (sanity)** — after `gitops-vm-protection` is Healthy, sanity starts
+   autopilot + audit on every VM (`systemctl enable --now` / Windows AtStartup so both
+   resume after failover reboot), polls until the audit trail is live (~1 min), then
+   captures a fresh baseline immediately before Initiate. For manual DR:
+   `./scripts/dr-validation/start-hammerdb-load-incluster.sh`, then
+   `./scripts/dr-validation/status-hammerdb.sh` (fresh audit on every VM), then
+   `./scripts/dr-validation/save-db-baseline-snapshot.sh`.
+3. **Run DR** — failover / relocate on DRPC `gitops-vm-protection` (writers stay running
+   during the DR window).
+4. **After DR** — sanity or `./scripts/dr-validation/post-dr-automation.sh` validates
+   TPC-C table data on all supported platforms (PostgreSQL on Linux, SQL Server on Windows).
+   Sanity **stops** the writers on teardown (pass, fail, or skip after start). Manual:
+   `./scripts/dr-validation/stop-hammerdb-load-incluster.sh` (Linux `systemctl disable`
+   and Windows drop the AtStartup trigger so a reboot does not resume OLTP).
+
+Do **not** `TRUNCATE`/`DELETE` TPC-C tables to reclaim space: post-DR compare treats
+row-count drops as data loss, and live TPC-C needs FK-consistent rows.
 
 A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline
 on any supported platform (PostgreSQL or SQL Server),
@@ -27,12 +40,16 @@ and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 
 | Path | Purpose |
 |------|---------|
-| `hammerdb/install-on-vm.sh` | PostgreSQL + HammerDB install on Linux edge VM |
-| `hammerdb/install-on-vm-windows.ps1` | SQL Server + HammerDB install on Windows edge VM |
-| `ramendr_dr_validation/db_audit.py` | Continuous audit inserts (systemd) |
+| `hammerdb/install-on-vm.sh` | PostgreSQL + TPC-C schema on Linux (writers left stopped) |
+| `hammerdb/install-on-vm-windows.ps1` | SQL Server + TPC-C schema on Windows (tasks registered, stopped) |
+| `ramendr_dr_validation/db_audit.py` | Continuous audit inserts (started for sanity / manual DR) |
 | `ramendr_dr_validation/db_snapshot.py` | Export DB snapshot JSON |
 | `ramendr_dr_validation/db_validator.py` | Gap/RPO/TPC-C validation |
 | `scripts/dr-validation/install-hammerdb-incluster.sh` | In-cluster SSH install job |
+| `scripts/dr-validation/start-hammerdb-load-incluster.sh` | Start autopilot + audit; enable at boot for the DR window |
+| `scripts/dr-validation/stop-hammerdb-load-incluster.sh` | Stop writers; Linux disable on boot |
+| `scripts/dr-validation/status-hammerdb.sh` | OLTP recording check (audit freshness) |
+| `scripts/dr-validation/status-hammerdb.sh --schema-only` | Schema-present check (no audit required) |
 | `scripts/dr-validation/collect-db-snapshot-incluster.sh` | In-cluster snapshot collect |
 | `scripts/dr-validation/save-db-baseline-snapshot.sh` | Capture pre-DR DB baseline (updates `auto/latest`) |
 | `scripts/dr-validation/check-after-dr-hammerdb.sh` | Post-DR HammerDB validation |
@@ -65,7 +82,8 @@ is detected. Override mount/drive via `DR_VALIDATION_DATA_DISK_MOUNT` /
 ### In-cluster utility container (amd64)
 
 DR validation Jobs (`install-hammerdb-incluster.sh`, `collect-db-snapshot-incluster.sh`,
-etc.) use `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` from `scripts/dr-validation/lib.sh`.
+`start-hammerdb-load-incluster.sh`, `stop-hammerdb-load-incluster.sh`, etc.) use
+`DR_VALIDATION_UTILITY_CONTAINER_IMAGE` from `scripts/dr-validation/lib.sh`.
 The default is the semver tag **`quay.io/validatedpatterns/utility-container:v1.0.4`** (amd64).
 
 This test harness targets **amd64** hub and spoke workers (AWS `openshift-install` in
@@ -145,7 +163,7 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key for direct/laptop SSH (`install-writer.sh`, non-in-cluster collect) |
 | `DR_VALIDATION_SSH_PASSWORD` | (from Vault) | Password for in-cluster install/collect Jobs (private keys are not copied to spokes) |
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |
-| `DR_VALIDATION_STATUS_MAX_AGE_SEC` | `300` | Max log age for `status.sh` freshness check |
+| `DR_VALIDATION_STATUS_MAX_AGE_SEC` | `300` | Max audit age for `status-hammerdb.sh` freshness check (not used with `--schema-only`) |
 | `DR_VALIDATION_LOG_PATH` | `/var/lib/ramendr-dr-validation/timestamps.log` | Log on VM |
 | `DR_VALIDATION_INTERVAL` | `10.0` | Seconds between records |
 | `DR_VALIDATION_MAX_RPO_SECONDS` | `120` | Fail check when estimated RPO (`max_seq_gap * interval`) exceeds this threshold |
