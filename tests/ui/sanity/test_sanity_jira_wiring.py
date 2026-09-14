@@ -259,6 +259,7 @@ def _patch_common(monkeypatch, *, initial_state: dict, backend_phase: str, clien
         },
     )
     monkeypatch.setattr(sanity, "_save_hammerdb_baseline_snapshot", lambda **kw: None)
+    monkeypatch.setattr(sanity, "_require_hammerdb_oltp_recording", lambda: None)
     monkeypatch.setattr(sanity, "_run_cleanup_non_primary_cluster", lambda **kw: None)
     monkeypatch.setattr(
         sanity, "_wait_for_vms_running_with_ssh_service", lambda *a, **kw: []
