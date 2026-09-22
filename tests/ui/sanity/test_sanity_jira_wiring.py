@@ -232,6 +232,24 @@ def _make_run_dr_data_validation(raise_for_phase: str | None = None):
     return fn
 
 
+def _make_save_hammerdb_baseline_snapshot(raise_for_phase: str | None = None):
+    """Scripted replacement for ``_save_hammerdb_baseline_snapshot`` that can
+    raise for a specific phase -- used to simulate a failure that happens
+    *before* the corresponding ``initiate_*_dialog()`` call, i.e. before the
+    scenario's ``*_initiated`` flag is ever set."""
+    calls: list[str] = []
+
+    def fn(*, phase):
+        calls.append(phase)
+        if phase == raise_for_phase:
+            raise AssertionError(
+                f"simulated HammerDB baseline snapshot failure for {phase}"
+            )
+
+    fn.calls = calls  # type: ignore[attr-defined]
+    return fn
+
+
 def _patch_common(monkeypatch, *, initial_state: dict, backend_phase: str, client):
     """Patch every DR/Playwright/oc-touching dependency of test_sanity.py's
     adaptive flow to a no-op or scripted fake, and force RAMENDR_SANITY_FORCE_FULL
@@ -434,6 +452,81 @@ def test_failover_pass_then_relocate_fail_reported_independently(monkeypatch):
 
     assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS
     assert client.outcome_for_parent("RHELTEST-3610") == "4"  # FAIL
+
+
+# --------------------------------------------------------------------------
+# Failures before the DR action was actually initiated
+#
+# Regression coverage for a CodeRabbit finding on PR #28: failover_reporter /
+# relocate_reporter are constructed before the corresponding
+# initiate_*_dialog() call succeeds (they cover HammerDB baseline capture and
+# the initiate click itself too). If something raises in that window -- e.g.
+# the baseline snapshot -- the *_initiated flag is never set, so no DR action
+# was actually attempted, and the safety-net except block must NOT call
+# close_failure() for that reporter: doing so would create and fail a real
+# Jira Test Result for an action this invocation never took.
+# --------------------------------------------------------------------------
+
+
+def test_failure_before_failover_initiation_reports_no_jira_result(monkeypatch):
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_PRIMARY_FRESH,
+        backend_phase="Deployed",
+        client=client,
+    )
+    monkeypatch.setattr(
+        sanity,
+        "_save_hammerdb_baseline_snapshot",
+        _make_save_hammerdb_baseline_snapshot(raise_for_phase="failover"),
+    )
+    _enable_jira_env(monkeypatch)
+
+    import pytest
+
+    with pytest.raises(AssertionError, match="baseline snapshot"):
+        _run_sanity_test(
+            monkeypatch, run_dr_data_validation=_make_run_dr_data_validation()
+        )
+
+    # initiate_failover_dialog() was never reached -> failover_initiated
+    # stayed False -> no Jira Test Result may exist for either scenario.
+    assert client.created == []
+    assert client.outcome_for_parent("RHELTEST-3600") is None
+    assert client.outcome_for_parent("RHELTEST-3610") is None
+
+
+def test_failure_before_relocate_initiation_reports_no_jira_result(monkeypatch):
+    """Resumes from a completed failover (so relocate_reporter is the one
+    under test in isolation): the baseline snapshot for relocate raises
+    before initiate_relocate_dialog() runs, so relocate_was_initiated stays
+    False and RHELTEST-3610 must get no Jira Test Result. RHELTEST-3600 also
+    gets none, since resuming into post_failover never opens that boundary."""
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_SECONDARY_POST_FAILOVER,
+        backend_phase="FailedOver",
+        client=client,
+    )
+    monkeypatch.setattr(
+        sanity,
+        "_save_hammerdb_baseline_snapshot",
+        _make_save_hammerdb_baseline_snapshot(raise_for_phase="relocate"),
+    )
+    _enable_jira_env(monkeypatch)
+
+    import pytest
+
+    with pytest.raises(AssertionError, match="baseline snapshot"):
+        _run_sanity_test(
+            monkeypatch, run_dr_data_validation=_make_run_dr_data_validation()
+        )
+
+    assert client.created == []
+    assert client.outcome_for_parent("RHELTEST-3600") is None
+    assert client.outcome_for_parent("RHELTEST-3610") is None
 
 
 # --------------------------------------------------------------------------

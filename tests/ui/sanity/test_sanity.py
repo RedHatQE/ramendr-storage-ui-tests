@@ -1608,14 +1608,23 @@ class TestUiSanity:
         except BaseException as exc:
             # Safety net: report FAIL for whichever scenario boundary is
             # still open (i.e. hasn't already been closed with a PASS
-            # above), then always re-raise the original exception
-            # unmodified -- Jira reporting never swallows or replaces a
-            # real test failure. A boundary already closed successfully
-            # (e.g. failover PASS, committed before relocate even started)
-            # is never retroactively marked FAIL by an independent,
-            # later relocate failure.
-            if failover_reporter is not None:
+            # above) AND was actually initiated by this invocation, then
+            # always re-raise the original exception unmodified -- Jira
+            # reporting never swallows or replaces a real test failure. A
+            # boundary already closed successfully (e.g. failover PASS,
+            # committed before relocate even started) is never
+            # retroactively marked FAIL by an independent, later relocate
+            # failure. A reporter can be non-None here even though its DR
+            # action never actually started -- e.g. the HammerDB baseline
+            # snapshot or the initiate click itself raised before the
+            # corresponding *_initiated flag was set. Gating on that flag
+            # ensures close_failure() (which creates/transitions a real
+            # Jira Test Result) only ever fires for actions this
+            # invocation actually initiated, never for a setup failure
+            # that preceded initiation. See docs/jira-test-result-reporting.md,
+            # "Resume behavior".
+            if failover_reporter is not None and failover_initiated:
                 failover_reporter.close_failure(exc)
-            if relocate_reporter is not None:
+            if relocate_reporter is not None and relocate_was_initiated:
                 relocate_reporter.close_failure(exc)
             raise
