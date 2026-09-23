@@ -342,24 +342,39 @@ function Ensure-SqlExpress {
         return
     }
 
-    $stagedSsei = 'C:\Temp\SQL2022-SSEI-Expr.exe'
-    Test-StagedExecutable -Path $stagedSsei -Label 'SQL Server SSEI bootstrapper'
-
     $mediaPath = 'C:\Temp\sqlserver-media'
     if (Test-Path $mediaPath) {
         Remove-Item -Recurse -Force $mediaPath
     }
     New-Item -ItemType Directory -Force -Path $mediaPath | Out-Null
 
-    Write-Host 'Downloading SQL Server 2022 Express media via SSEI bootstrapper...'
-    $download = Start-Process -FilePath $stagedSsei -ArgumentList @(
-        '/ACTION=Download',
-        "/MEDIAPATH=$mediaPath",
-        '/MEDIATYPE=Core',
-        '/QUIET'
-    ) -Wait -PassThru
-    if ($download.ExitCode -ne 0 -and $download.ExitCode -ne 3010) {
-        throw "SQL Server media download failed with exit code $($download.ExitCode)"
+    # Prefer staged full Express media (SQLEXPR_x64_ENU.exe). Fall back to the
+    # SSEI web bootstrapper when an override still stages SQL2022-SSEI-Expr.exe.
+    $stagedFullMedia = @(
+        'C:\Temp\SQLEXPR_x64_ENU.exe',
+        'C:\Temp\SQL2022-SSEI-Expr.exe'
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $stagedFullMedia) {
+        throw 'SQL Server installer missing under C:\Temp (expected SQLEXPR_x64_ENU.exe or SQL2022-SSEI-Expr.exe from in-cluster staging).'
+    }
+    Test-StagedExecutable -Path $stagedFullMedia -Label 'SQL Server Express installer'
+
+    $setup = $null
+    $isSseiBootstrapper = ($stagedFullMedia -like '*SSEI*') -and ((Get-Item $stagedFullMedia).Length -lt 50MB)
+    if ($isSseiBootstrapper) {
+        Write-Host "Downloading SQL Server 2022 Express media via SSEI bootstrapper ($stagedFullMedia)..."
+        $download = Start-Process -FilePath $stagedFullMedia -ArgumentList @(
+            '/ACTION=Download',
+            "/MEDIAPATH=$mediaPath",
+            '/MEDIATYPE=Core',
+            '/QUIET'
+        ) -Wait -PassThru
+        if ($download.ExitCode -ne 0 -and $download.ExitCode -ne 3010) {
+            throw "SQL Server media download failed with exit code $($download.ExitCode)"
+        }
+    } else {
+        Write-Host "Using staged SQL Server Express media: $stagedFullMedia"
+        Copy-Item -LiteralPath $stagedFullMedia -Destination (Join-Path $mediaPath (Split-Path $stagedFullMedia -Leaf)) -Force
     }
 
     Write-Host 'SQL Server media layout:'

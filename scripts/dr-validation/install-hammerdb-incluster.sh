@@ -165,13 +165,23 @@ spec:
             if [[ "\$WINDOWS_TARGETS" -eq 1 ]]; then
               HAMMER_VERSION="\${HAMMERDB_VERSION:-5.0}"
               HAMMER_ZIP="HammerDB-\${HAMMER_VERSION}-Prod-Win.tar.gz"
-              SQL_INSTALLER="SQL2022-SSEI-Expr.exe"
+              SQL_URL="\${DR_VALIDATION_SQL_SSEI_URL:-https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SQLEXPR_x64_ENU.exe}"
+              SQL_INSTALLER="\$(basename "\${SQL_URL%%\?*}")"
+              [[ -n "\$SQL_INSTALLER" ]] || SQL_INSTALLER="SQLEXPR_x64_ENU.exe"
               PYTHON_INSTALLER="python-amd64.exe"
               ODBC_INSTALLER="msodbcsql17.exe"
               if [[ ! -s "/tmp/windows-staging/\${SQL_INSTALLER}" ]]; then
-                echo "Staging SQL Server 2022 Express bootstrapper for Windows targets..."
-                curl -fL -o "/tmp/windows-staging/\${SQL_INSTALLER}" \
-                  "\${DR_VALIDATION_SQL_SSEI_URL:-https://download.microsoft.com/download/5/1/4/5145fe04-4d30-4b85-b0d1-39533663a2f1/SQL2022-SSEI-Expr.exe}" || true
+                echo "Staging SQL Server 2022 Express media (\${SQL_INSTALLER}) for Windows targets..."
+                if ! curl -fL -o "/tmp/windows-staging/\${SQL_INSTALLER}" "\$SQL_URL"; then
+                  echo "ERROR: failed to download SQL Server installer from \$SQL_URL"
+                  exit 1
+                fi
+                # Reject HTML error pages / truncated SSEI stubs (< 1 MiB).
+                sql_bytes="\$(wc -c < "/tmp/windows-staging/\${SQL_INSTALLER}" | tr -d ' ')"
+                if [[ "\${sql_bytes:-0}" -lt 1000000 ]]; then
+                  echo "ERROR: staged SQL installer is too small (\${sql_bytes} bytes); check DR_VALIDATION_SQL_SSEI_URL"
+                  exit 1
+                fi
               fi
               if [[ ! -s "/tmp/windows-staging/\${PYTHON_INSTALLER}" ]]; then
                 echo "Staging Python Windows installer for Windows targets..."
@@ -235,7 +245,10 @@ spec:
               local remote='cmd.exe /c C:\\Temp\\install-remote-windows.cmd'
               local hammer_version="\${HAMMERDB_VERSION:-5.0}"
               local hammer_zip="HammerDB-\${hammer_version}-Prod-Win.tar.gz"
-              local sql_installer="SQL2022-SSEI-Expr.exe"
+              local sql_url="\${DR_VALIDATION_SQL_SSEI_URL:-https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SQLEXPR_x64_ENU.exe}"
+              local sql_installer
+              sql_installer="\$(basename "\${sql_url%%\?*}")"
+              [[ -n "\$sql_installer" ]] || sql_installer="SQLEXPR_x64_ENU.exe"
               local python_installer="python-amd64.exe"
               local odbc_installer="msodbcsql17.exe"
               local mssql_env_file="/tmp/mssql-install-\${name}.env"
