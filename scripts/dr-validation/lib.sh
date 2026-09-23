@@ -21,8 +21,11 @@ DR_VALIDATION_HAMMERDB_VM="${DR_VALIDATION_HAMMERDB_VM:-rhel9-node-001}"
 DR_VALIDATION_HAMMERDB_ALL_VMS="${DR_VALIDATION_HAMMERDB_ALL_VMS:-1}"
 # Optional comma-separated VM name filter (overrides ALL_VMS and legacy HAMMERDB_VM).
 DR_VALIDATION_HAMMERDB_VMS="${DR_VALIDATION_HAMMERDB_VMS:-}"
-# Direct Microsoft download (go.microsoft.com/fwlink linkid=2216018 is broken — returns HTML).
-DR_VALIDATION_SQL_SSEI_URL="${DR_VALIDATION_SQL_SSEI_URL:-https://download.microsoft.com/download/5/1/4/5145fe04-4d30-4b85-b0d1-39533663a2f1/SQL2022-SSEI-Expr.exe}"
+# SQL Server 2022 Express media for Windows HammerDB. Prefer the full SQLEXPR
+# offline installer: the old SQL2022-SSEI-Expr.exe CDN path 404s, and
+# go.microsoft.com/fwlink/?linkid=2216019 now redirects to SQL 2025 Express.
+# Override with a reachable SSEI or SQLEXPR URL if needed (basename becomes the staged filename).
+DR_VALIDATION_SQL_SSEI_URL="${DR_VALIDATION_SQL_SSEI_URL:-https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SQLEXPR_x64_ENU.exe}"
 DR_VALIDATION_PYTHON_WINDOWS_VERSION="${DR_VALIDATION_PYTHON_WINDOWS_VERSION:-3.12.7}"
 DR_VALIDATION_PYTHON_WINDOWS_URL="${DR_VALIDATION_PYTHON_WINDOWS_URL:-https://www.python.org/ftp/python/${DR_VALIDATION_PYTHON_WINDOWS_VERSION}/python-${DR_VALIDATION_PYTHON_WINDOWS_VERSION}-amd64.exe}"
 DR_VALIDATION_ODBC_DRIVER_MSI_URL="${DR_VALIDATION_ODBC_DRIVER_MSI_URL:-https://go.microsoft.com/fwlink/?linkid=2361646}"
