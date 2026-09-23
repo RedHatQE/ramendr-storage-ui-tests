@@ -333,6 +333,9 @@ function Wait-SqlService {
 }
 
 function Ensure-SqlExpress {
+    param(
+        [string]$StagedInstallerName = $env:DR_VALIDATION_SQL_INSTALLER
+    )
     Enable-SqlPrerequisites
 
     $existing = Get-RunningSqlInstanceName
@@ -348,18 +351,25 @@ function Ensure-SqlExpress {
     }
     New-Item -ItemType Directory -Force -Path $mediaPath | Out-Null
 
-    # Prefer staged full Express media (SQLEXPR_x64_ENU.exe). Fall back to the
-    # SSEI web bootstrapper when an override still stages SQL2022-SSEI-Expr.exe.
-    $stagedFullMedia = @(
+    # Prefer the URL-derived filename staged by install-hammerdb-incluster.sh.
+    $stagedCandidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($StagedInstallerName)) {
+        $stagedCandidates += (Join-Path 'C:\Temp' (Split-Path $StagedInstallerName -Leaf))
+    }
+    $stagedCandidates += @(
         'C:\Temp\SQLEXPR_x64_ENU.exe',
         'C:\Temp\SQL2022-SSEI-Expr.exe'
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    )
+    $stagedFullMedia = $stagedCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     if (-not $stagedFullMedia) {
-        throw 'SQL Server installer missing under C:\Temp (expected SQLEXPR_x64_ENU.exe or SQL2022-SSEI-Expr.exe from in-cluster staging).'
+        $expected = if ($StagedInstallerName) { Split-Path $StagedInstallerName -Leaf } else { 'SQLEXPR_x64_ENU.exe or SQL2022-SSEI-Expr.exe' }
+        throw "SQL Server installer missing under C:\Temp (expected $expected from in-cluster staging)."
     }
     Test-StagedExecutable -Path $stagedFullMedia -Label 'SQL Server Express installer'
 
     $setup = $null
+    $stagedLeaf = Split-Path $stagedFullMedia -Leaf
+    $copiedMedia = Join-Path $mediaPath $stagedLeaf
     $isSseiBootstrapper = ($stagedFullMedia -like '*SSEI*') -and ((Get-Item $stagedFullMedia).Length -lt 50MB)
     if ($isSseiBootstrapper) {
         Write-Host "Downloading SQL Server 2022 Express media via SSEI bootstrapper ($stagedFullMedia)..."
@@ -374,7 +384,7 @@ function Ensure-SqlExpress {
         }
     } else {
         Write-Host "Using staged SQL Server Express media: $stagedFullMedia"
-        Copy-Item -LiteralPath $stagedFullMedia -Destination (Join-Path $mediaPath (Split-Path $stagedFullMedia -Leaf)) -Force
+        Copy-Item -LiteralPath $stagedFullMedia -Destination $copiedMedia -Force
     }
 
     Write-Host 'SQL Server media layout:'
@@ -386,14 +396,20 @@ function Ensure-SqlExpress {
         Where-Object { $_.Name -ieq 'SETUP.EXE' } |
         Select-Object -First 1
     if (-not $setup) {
-        $sqlexpr = Get-ChildItem -Path $mediaPath -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like 'SQLEXPR*.exe' -or $_.Name -like 'SQLServer*.exe' } |
-            Select-Object -First 1
-        if ($sqlexpr) {
+        $extractSource = $null
+        if (Test-Path -LiteralPath $copiedMedia) {
+            $extractSource = Get-Item -LiteralPath $copiedMedia
+        }
+        if (-not $extractSource) {
+            $extractSource = Get-ChildItem -Path $mediaPath -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -ieq '.exe' } |
+                Select-Object -First 1
+        }
+        if ($extractSource) {
             $extractPath = Join-Path $mediaPath 'extracted'
             New-Item -ItemType Directory -Force -Path $extractPath | Out-Null
-            Write-Host "Extracting SQL Server setup from $($sqlexpr.Name)..."
-            $extract = Start-Process -FilePath $sqlexpr.FullName -ArgumentList @('/q', "/x:$extractPath") -Wait -PassThru
+            Write-Host "Extracting SQL Server setup from $($extractSource.Name)..."
+            $extract = Start-Process -FilePath $extractSource.FullName -ArgumentList @('/q', "/x:$extractPath") -Wait -PassThru
             if ($extract.ExitCode -ne 0 -and $extract.ExitCode -ne 3010) {
                 throw "SQL Server setup extract failed with exit code $($extract.ExitCode)"
             }

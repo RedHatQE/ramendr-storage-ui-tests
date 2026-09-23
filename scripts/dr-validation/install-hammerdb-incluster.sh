@@ -174,14 +174,16 @@ spec:
                 echo "Staging SQL Server 2022 Express media (\${SQL_INSTALLER}) for Windows targets..."
                 if ! curl -fL -o "/tmp/windows-staging/\${SQL_INSTALLER}" "\$SQL_URL"; then
                   echo "ERROR: failed to download SQL Server installer from \$SQL_URL"
+                  rm -f "/tmp/windows-staging/\${SQL_INSTALLER}"
                   exit 1
                 fi
-                # Reject HTML error pages / truncated SSEI stubs (< 1 MiB).
-                sql_bytes="\$(wc -c < "/tmp/windows-staging/\${SQL_INSTALLER}" | tr -d ' ')"
-                if [[ "\${sql_bytes:-0}" -lt 1000000 ]]; then
-                  echo "ERROR: staged SQL installer is too small (\${sql_bytes} bytes); check DR_VALIDATION_SQL_SSEI_URL"
-                  exit 1
-                fi
+              fi
+              # Reject HTML error pages / truncated stubs (< 1 MiB), including cached partials.
+              sql_bytes="\$(wc -c < "/tmp/windows-staging/\${SQL_INSTALLER}" | tr -d ' ')"
+              if [[ "\${sql_bytes:-0}" -lt 1000000 ]]; then
+                echo "ERROR: staged SQL installer is too small (\${sql_bytes} bytes); check DR_VALIDATION_SQL_SSEI_URL"
+                rm -f "/tmp/windows-staging/\${SQL_INSTALLER}"
+                exit 1
               fi
               if [[ ! -s "/tmp/windows-staging/\${PYTHON_INSTALLER}" ]]; then
                 echo "Staging Python Windows installer for Windows targets..."
@@ -262,8 +264,8 @@ spec:
               fi
               install -m 0600 /dev/null "\$mssql_env_file"
               trap 'rm -f "\$mssql_env_file"' RETURN
-              printf 'DR_VALIDATION_MSSQL_SA_PASSWORD=%s\nDR_VALIDATION_MSSQL_USER=%s\nDR_VALIDATION_MSSQL_PASSWORD=%s\n' \
-                "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" > "\$mssql_env_file"
+              printf 'DR_VALIDATION_MSSQL_SA_PASSWORD=%s\nDR_VALIDATION_MSSQL_USER=%s\nDR_VALIDATION_MSSQL_PASSWORD=%s\nDR_VALIDATION_SQL_INSTALLER=%s\n' \
+                "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" "\$sql_installer" > "\$mssql_env_file"
               sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$prep" && \
