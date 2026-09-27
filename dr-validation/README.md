@@ -54,8 +54,10 @@ and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 | `scripts/dr-validation/save-db-baseline-snapshot.sh` | Capture pre-DR DB baseline (updates `auto/latest`) |
 | `scripts/dr-validation/check-after-dr-hammerdb.sh` | Post-DR HammerDB validation |
 
-Windows VMs receive **SQL Server 2022 Express** (via staged `SQL2022-SSEI-Expr.exe` from
-`download.microsoft.com`) and **HammerDB** `HammerDB-5.0-Prod-Win.tar.gz`. The in-cluster
+Windows VMs receive **SQL Server 2022 Express** (via staged `SQLEXPR_x64_ENU.exe` from
+`download.microsoft.com`; override with `DR_VALIDATION_SQL_SSEI_URL`) and **HammerDB**
+`HammerDB-5.0-Prod-Win.tar.gz`. The old `SQL2022-SSEI-Expr.exe` CDN path 404s, and the
+former Express fwlink now redirects to SQL 2025 — do not use those. The in-cluster
 install Job stages installers on the utility container and copies them over SSH — no winget,
 choco, or golden-image changes required. Windows `Administrator` password is read from Vault
 `secret/global/windows-admin` or `windows-admin` in `VALUES_SECRET` (v2.0 `secrets` list form).

@@ -1195,7 +1195,7 @@ case "${1:-}" in
     echo " DR_VALIDATION_HAMMERDB_ALL_VMS  Install on every edge VM (default 1; 0 = legacy single VM)"
     echo " DR_VALIDATION_HAMMERDB_VMS      Comma-separated VM name filter (overrides ALL_VMS)"
     echo " DR_VALIDATION_HAMMERDB_VM       Legacy single VM when ALL_VMS=0 (default rhel9-node-001)"
-    echo " DR_VALIDATION_SQL_SSEI_URL       Direct URL for SQL2022-SSEI-Expr.exe (staged to Windows VMs)"
+    echo " DR_VALIDATION_SQL_SSEI_URL       URL for SQL Server 2022 Express media (default: SQLEXPR_x64_ENU.exe CDN; basename is staged filename)"
     echo " DR_VALIDATION_PYTHON_WINDOWS_URL Python amd64 installer URL (staged to Windows VMs)"
     echo " SKIP_DR_VALIDATION    Set to 1 to skip automatic DR validation bootstrap and snapshots"
     echo " SKIP_DR_VALIDATION_SNAPSHOTS  Set to 1 to skip only the 5-min snapshot daemon"
