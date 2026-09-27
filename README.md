@@ -22,7 +22,7 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `59e84b5d2ce44a987859d153b0cc365033135dd5` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `91b7890a15bff26338917f01e3349fd21d57ba7b` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
 4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
@@ -45,7 +45,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `59e84b5d2ce44a987859d153b0cc365033135dd5` (`ocp-4.22-rhdr-ramen`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `91b7890a15bff26338917f01e3349fd21d57ba7b` (`ocp-4.22-rhdr-ramen`) |
 | Hub Argo CD Applications | Remote git on GitHub | Fork branch `ocp-4.22-rhdr-ramen` (`main.variant: odf` on tip). Partner variants need a fork branch/commit with matching `main.variant` for stable GitOps. |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
@@ -189,7 +189,7 @@ and ODF golden-image fix-up (override with `REQUIRE_WINDOWS_VMS` / `SKIP_*`).
 
 **GitOps:** hub Argo CD reads `values-global.yaml` from the **git remote**, not the local patch.
 `redeploy.sh` fails if that git revision still has a different `main.variant`. The fork at
-`59e84b5d…` has `main.variant: odf` committed. Partner deploys need a fork that **commits**
+`91b7890…` has `main.variant: odf` committed. Partner deploys need a fork that **commits**
 `drpartner-s4` or `drpartner-minimal`, then `UPSTREAM_REPO` pointed at that fork.
 
 ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is
