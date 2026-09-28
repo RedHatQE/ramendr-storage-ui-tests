@@ -685,19 +685,39 @@ for key, pattern in (
         values[key] = m.group(1)
 if len(values) < 3:
     def secret_block(secret: str) -> str:
+        # The boundary that ends this secret's block must be a *sibling* list
+        # item (a new "- name:"/"- fields:" entry at the SAME indentation as
+        # the entry we anchored on), not one of this secret's own nested
+        # "fields:" list items. PyYAML's default dumper (and hand-written
+        # values-secret.yaml files, e.g. ExternalSecrets-style
+        # "fields: [{name:, value:}, ...]") commonly render nested field
+        # entries at the SAME column as the parent "fields:" key, which is
+        # only 2 spaces deeper than the secret's own "- name:" line - so a
+        # fixed "0 or 2 spaces" boundary pattern can accidentally match a
+        # nested field (e.g. "- name: sa_password") and truncate the block
+        # right after "fields:", before any fields are captured. Anchoring
+        # the boundary to the *exact* indentation of the matched line avoids
+        # that collision, since nested fields are always indented deeper
+        # than their own secret's "- name:" line.
         m = re.search(
-            rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+            rf"^( *)- name:\s*{re.escape(secret)}\s*$",
             text,
             re.MULTILINE,
         )
         if m:
+            indent = m.group(1)
             rest = text[m.end() :]
-            n = re.search(r"^(?:  )?- (?:name:|fields:)", rest, re.MULTILINE)
+            n = re.search(
+                rf"^{re.escape(indent)}- (?:name:|fields:)", rest, re.MULTILINE
+            )
             end = m.end() + (n.start() if n else len(rest))
             return text[m.start() : end]
-        for m in re.finditer(r"^- fields:", text, re.MULTILINE):
+        for m in re.finditer(r"^( *)- fields:", text, re.MULTILINE):
+            indent = m.group(1)
             rest = text[m.end() :]
-            n = re.search(r"^- (?:name:|fields:)", rest, re.MULTILINE)
+            n = re.search(
+                rf"^{re.escape(indent)}- (?:name:|fields:)", rest, re.MULTILINE
+            )
             block = text[m.start() : m.end() + (n.start() if n else len(rest))]
             if re.search(rf"name:\s*{re.escape(secret)}\s*$", block, re.MULTILINE):
                 return block
