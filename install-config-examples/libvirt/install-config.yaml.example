@@ -1,0 +1,28 @@
+apiVersion: v1
+baseDomain: <BASE_DOMAIN>
+metadata:
+  name: <CLUSTER_NAME>
+compute:
+  - name: worker
+    replicas: 0
+controlPlane:
+  name: master
+  replicas: 3
+  hyperthreading: Enabled
+  architecture: amd64
+networking:
+  networkType: OVNKubernetes
+  clusterNetwork:
+    - cidr: <CLUSTER_NETWORK_CIDR>
+      hostPrefix: 23
+  machineNetwork:
+    - cidr: <MACHINE_CIDR>
+  serviceNetwork:
+    - <SERVICE_NETWORK_CIDR>
+platform:
+  none: {}
+# Image Registry Operator starts as Removed on platform none (no cloud object
+# storage). scripts/lib/libvirt-agent.sh enables Managed + emptyDir after
+# install-complete so in-cluster pulls (e.g. ODF label Jobs) work.
+pullSecret: '<PULL_SECRET_JSON>'
+sshKey: '<SSH_PUBLIC_KEY>'

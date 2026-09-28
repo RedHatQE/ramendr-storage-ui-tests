@@ -1,0 +1,15 @@
+---
+# Copy to the starter-kit fork as overrides/values-BareMetal.yaml when
+# Infrastructure.status.platform is BareMetal.
+odf:
+  osd:
+    pvc:
+      storage: 100Gi
+      storageClassName: localblock
+objectStorage:
+  enable: true
+storageSystem:
+  deploy: false
+  inventory:
+    useSpecificNodes: false
+    nodeJobLabelSelector: "node-role.kubernetes.io/worker=,!submariner.io/gateway,!node-role.kubernetes.io/infra"

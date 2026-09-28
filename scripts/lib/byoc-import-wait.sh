@@ -9,8 +9,7 @@ set -euo pipefail
 : "${BYOC_IMPORT_WAIT_ATTEMPTS:=40}"
 : "${BYOC_IMPORT_WAIT_SLEEP:=30}"
 : "${SPOKE_CLUSTERS:=ocp-primary ocp-secondary}"
-: "${PRIMARY_INSTALL_DIR:=${HOME}/git/ocp-primary-install}"
-: "${SECONDARY_INSTALL_DIR:=${HOME}/git/ocp-secondary-install}"
+# PRIMARY/SECONDARY_INSTALL_DIR: set by redeploy.sh (aws vs libvirt roots).
 : "${BYOC_BOOTSTRAP_SPOKE_IMPORT:=1}"
 : "${PATTERN_INSTALL_EARLY_EXIT_CHECKS:=3}"
 : "${PATTERN_INSTALL_EARLY_EXIT_SLEEP:=30}"
@@ -80,6 +79,11 @@ bootstrap_byoc_spoke_import() {
     fi
     _ensure_spoke_import_secrets "$cluster" "$kc_file" || failed=1
   done
+  # ManagedCluster CRs are required for ACM auto-import; regional-dr may create
+  # them later, but pattern early-exit / recoverability need them immediately.
+  if declare -F preregister_spoke_managed_clusters >/dev/null; then
+    preregister_spoke_managed_clusters || true
+  fi
   return "$failed"
 }
 

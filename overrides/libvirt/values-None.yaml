@@ -1,0 +1,20 @@
+---
+# Copy to the starter-kit fork as overrides/values-None.yaml (UPI/libvirt
+# clusterPlatform is often None). Hub Argo CD reads git, not a local checkout.
+#
+# OSD PVCs use Local Storage Operator class localblock (see
+# scripts/lib/odf-local-storage.sh). Do not use gp3-csi on libvirt.
+# Ceph mons need Filesystem storage; the consumer sets monDataDirHostPath
+# imperatively (Block localblock PVs cannot bind mon PVCs).
+odf:
+  osd:
+    pvc:
+      storage: 100Gi
+      storageClassName: localblock
+objectStorage:
+  enable: true
+storageSystem:
+  deploy: false
+  inventory:
+    useSpecificNodes: false
+    nodeJobLabelSelector: "node-role.kubernetes.io/worker=,!submariner.io/gateway,!node-role.kubernetes.io/infra"

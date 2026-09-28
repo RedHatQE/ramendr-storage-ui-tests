@@ -20,8 +20,7 @@
 : "${RESILIENT_APP_RECOVERY_AFTER_SECONDS:=900}"
 : "${SPOKE_APPPROJECT_PREP_WAIT_ATTEMPTS:=40}"
 : "${SPOKE_APPPROJECT_PREP_WAIT_SLEEP:=15}"
-: "${PRIMARY_INSTALL_DIR:=$HOME/git/ocp-primary-install}"
-: "${SECONDARY_INSTALL_DIR:=$HOME/git/ocp-secondary-install}"
+# PRIMARY/SECONDARY_INSTALL_DIR: set by redeploy.sh (aws vs libvirt roots).
 
 _rs_log() {
   if [[ $(type -t log) == function ]]; then

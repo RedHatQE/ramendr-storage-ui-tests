@@ -1,0 +1,30 @@
+apiVersion: v1alpha1
+kind: AgentConfig
+metadata:
+  name: <CLUSTER_NAME>
+rendezvousIP: <RENDEZVOUS_IP>
+# Hosts are filled by libvirt-provision.sh (MAC + rootDeviceHints).
+# Assisted picks the *smallest* disk that fits RHCOS by default; with an extra
+# empty OSD disk that would be /dev/vdb — pin the OS to /dev/vda explicitly.
+hosts:
+  - hostname: <CLUSTER_NAME>-master-0
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/vda
+    interfaces:
+      - name: enp1s0
+        macAddress: <MAC_0>
+  - hostname: <CLUSTER_NAME>-master-1
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/vda
+    interfaces:
+      - name: enp1s0
+        macAddress: <MAC_1>
+  - hostname: <CLUSTER_NAME>-master-2
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/vda
+    interfaces:
+      - name: enp1s0
+        macAddress: <MAC_2>

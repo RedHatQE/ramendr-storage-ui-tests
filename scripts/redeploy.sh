@@ -38,10 +38,48 @@ source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
 source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 # shellcheck source=lib/byoc-import-wait.sh
 source "$REPO_ROOT/scripts/lib/byoc-import-wait.sh"
+# shellcheck source=lib/odf-nodes.sh
+source "$REPO_ROOT/scripts/lib/odf-nodes.sh"
+# shellcheck source=lib/odf-local-storage.sh
+source "$REPO_ROOT/scripts/lib/odf-local-storage.sh"
+# shellcheck source=lib/libvirt-common.sh
+source "$REPO_ROOT/scripts/lib/libvirt-common.sh"
+# shellcheck source=lib/libvirt-ssh.sh
+source "$REPO_ROOT/scripts/lib/libvirt-ssh.sh"
 
-HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
-PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
-SECONDARY_INSTALL_DIR="${SECONDARY_INSTALL_DIR:-$HOME/git/ocp-secondary-install}"
+: "${REDEPLOY_PLATFORM:=aws}"
+case "$REDEPLOY_PLATFORM" in
+  aws|libvirt) ;;
+  *)
+    echo "ERROR: Unknown REDEPLOY_PLATFORM=${REDEPLOY_PLATFORM} (aws|libvirt)" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]]; then
+  # ~/git/libvirt/<hypervisor>/… — keep AWS ~/git/*-install dirs untouched.
+  libvirt_apply_default_install_dirs
+  # Provision downloads oc into LIBVIRT_REMOTE_WORKDIR/bin; SSH non-login
+  # sessions do not inherit an interactive PATH that includes it.
+  export PATH="${LIBVIRT_REMOTE_WORKDIR}/bin:${PATH}"
+  # Networks helpers (cross-cluster API DNS, apps DNS flip) are required for
+  # prepare_nodes; agent alone is not enough.
+  # shellcheck source=lib/libvirt-networks.sh
+  source "$REPO_ROOT/scripts/lib/libvirt-networks.sh"
+  # shellcheck source=lib/libvirt-agent.sh
+  source "$REPO_ROOT/scripts/lib/libvirt-agent.sh"
+  if [[ "${LIBVIRT_REMOTE_SESSION:-}" == "1" ]]; then
+    libvirt_ensure_oc || exit 1
+  fi
+  # pattern-only on HV often has empty BASE_DOMAIN unless derived from install-config.
+  if declare -F libvirt_resolve_base_domain >/dev/null; then
+    libvirt_resolve_base_domain || true
+  fi
+else
+  HUB_INSTALL_DIR="${HUB_INSTALL_DIR:-$HOME/git/hub-cluster-install}"
+  PRIMARY_INSTALL_DIR="${PRIMARY_INSTALL_DIR:-$HOME/git/ocp-primary-install}"
+  SECONDARY_INSTALL_DIR="${SECONDARY_INSTALL_DIR:-$HOME/git/ocp-secondary-install}"
+fi
 
 VALUES_SECRET="${VALUES_SECRET:-$HOME/values-secret.yaml}"
 
@@ -59,8 +97,14 @@ SECONDARY_REGION="${SECONDARY_REGION:-eu-west-1}"
 # to avoid ODF Multicluster Orchestrator incompatibilities.
 HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.22.1}"
 
-# Windows edge VMs are part of the protected gitops-vms fleet; fail redeploy if stabilize/OpenSSH fails.
-: "${REQUIRE_WINDOWS_VMS:=1}"
+# Windows edge VMs are part of the protected gitops-vms fleet on AWS.
+# Libvirt compact labs default Windows off (nested RAM).
+if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]]; then
+  : "${REQUIRE_WINDOWS_VMS:=0}"
+  : "${SKIP_WINDOWS_VM_STABILIZE:=1}"
+else
+  : "${REQUIRE_WINDOWS_VMS:=1}"
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -85,9 +129,14 @@ warn() { echo -e "${YELLOW}[$(date +%H:%M:%S)] WARNING:${NC} $*"; }
 err() { echo -e "${RED}[$(date +%H:%M:%S)] ERROR:${NC} $*"; }
 
 check_prerequisites() {
-  log "Checking prerequisites..."
+  log "Checking prerequisites (REDEPLOY_PLATFORM=${REDEPLOY_PLATFORM})..."
   local missing=0
-  for cmd in oc openshift-install aws podman git python3 curl jq; do
+  local cmds=(oc podman git python3 curl jq)
+  if [[ "$REDEPLOY_PLATFORM" == "aws" ]]; then
+    cmds+=(openshift-install aws)
+  fi
+  local cmd
+  for cmd in "${cmds[@]}"; do
     if ! command -v "$cmd" &>/dev/null; then
       err "Missing: $cmd"
       missing=1
@@ -107,13 +156,15 @@ check_prerequisites() {
     err "Missing: virtctl (required for Windows VM SSH verification). On macOS: brew install virtctl"
     missing=1
   fi
-  if [[ -z "$HOSTED_ZONE_ID" ]]; then
-    err "HOSTED_ZONE_ID is not set. Export it or set a default in this script."
-    missing=1
-  fi
-  if [[ -z "$BASE_DOMAIN" ]]; then
-    err "BASE_DOMAIN is not set. Export it or set a default in this script."
-    missing=1
+  if [[ "$REDEPLOY_PLATFORM" == "aws" ]]; then
+    if [[ -z "$HOSTED_ZONE_ID" ]]; then
+      err "HOSTED_ZONE_ID is not set. Export it or set a default in this script."
+      missing=1
+    fi
+    if [[ -z "$BASE_DOMAIN" ]]; then
+      err "BASE_DOMAIN is not set. Export it or set a default in this script."
+      missing=1
+    fi
   fi
   if [[ ! -f "$VALUES_SECRET" ]]; then
     err "Missing secrets file: $VALUES_SECRET"
@@ -186,22 +237,31 @@ PY
   fi
   for dir_var in HUB_INSTALL_DIR PRIMARY_INSTALL_DIR SECONDARY_INSTALL_DIR; do
     local dir="${!dir_var}"
-    if [[ ! -f "$dir/install-config.yaml.bak" ]]; then
+    if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]]; then
+      if [[ ! -f "$dir/auth/kubeconfig" ]]; then
+        err "Missing kubeconfig: $dir/auth/kubeconfig (run scripts/libvirt-provision.sh first)"
+        missing=1
+      fi
+    elif [[ ! -f "$dir/install-config.yaml.bak" ]]; then
       err "Missing install-config backup: $dir/install-config.yaml.bak"
       missing=1
     fi
   done
   [[ $missing -eq 1 ]] && { err "Prerequisites not met. Aborting."; exit 1; }
 
-  local account_id
-  account_id=$(current_aws_account_id) || { err "Cannot determine AWS account (check credentials)."; exit 1; }
-  log "Using AWS account: $account_id"
+  if [[ "$REDEPLOY_PLATFORM" == "aws" ]]; then
+    local account_id
+    account_id=$(current_aws_account_id) || { err "Cannot determine AWS account (check credentials)."; exit 1; }
+    log "Using AWS account: $account_id"
 
-  if ! verify_hosted_zone_in_account; then
-    err "HOSTED_ZONE_ID ($HOSTED_ZONE_ID) is not accessible in the current AWS account."
-    exit 1
+    if ! verify_hosted_zone_in_account; then
+      err "HOSTED_ZONE_ID ($HOSTED_ZONE_ID) is not accessible in the current AWS account."
+      exit 1
+    fi
+    log "Route53 hosted zone $HOSTED_ZONE_ID verified in current account (zone will be preserved)."
+  else
+    log "Libvirt BYOC: skipping AWS/Route53 checks."
   fi
-  log "Route53 hosted zone $HOSTED_ZONE_ID verified in current account (zone will be preserved)."
   log "All prerequisites met."
 }
 
@@ -480,6 +540,7 @@ prepare_upstream() {
   )
 
   apply_pattern_variant "$UPSTREAM_DIR" || exit 1
+  copy_libvirt_odf_overlays_if_needed
 
   # Patch upstream pattern.sh for automation (non-TTY) and Apple Silicon (amd64 container).
   if [[ -f "$UPSTREAM_DIR/pattern.sh" ]]; then
@@ -914,6 +975,10 @@ wait_for_convergence() {
 }
 
 run_post_pattern_steps() {
+  if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]]; then
+    bootstrap_odf_local_storage_all || \
+      warn "Local ODF storage bootstrap incomplete; StorageCluster may still reference gp3-csi."
+  fi
   if ! wait_for_spoke_resilient_gitops; then
     warn "Spoke resilient GitOps did not converge — spoke ODF may be missing; skipping golden image fix and DR validation."
     export SKIP_DR_VALIDATION=1
@@ -1108,7 +1173,48 @@ show_status() {
   echo ""
 }
 
+prepare_nodes_for_pattern() {
+  if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]]; then
+    # platform none leaves Image Registry Removed; ODF Jobs need it Managed.
+    if declare -F libvirt_ensure_image_registry_all >/dev/null; then
+      libvirt_ensure_image_registry_all || warn "[libvirt] Image registry ensure incomplete"
+    fi
+    label_odf_storage_nodes || exit 1
+    bootstrap_odf_local_storage_all || exit 1
+    # Patch monDataDirHostPath when StorageCluster appears mid install-byoc.
+    if declare -F libvirt_odf_storagecluster_patch_watch >/dev/null; then
+      libvirt_odf_storagecluster_patch_watch || true
+    fi
+    # Vault needs a filesystem default SC; localblock is Block-only for ODF OSDs.
+    ensure_libvirt_hub_filesystem_storage "$HUB_INSTALL_DIR/auth/kubeconfig" || exit 1
+    # Point api/apps at masters that answer :6443/:443 (ESO reaches Vault via
+    # vault-vault.apps.*; wrong apps IP → ClusterSecretStore InvalidProviderConfig).
+    if declare -F libvirt_point_api_dns_to_masters >/dev/null; then
+      local _lv_cluster
+      for _lv_cluster in hub ocp-primary ocp-secondary; do
+        libvirt_point_api_dns_to_masters "$_lv_cluster" include_rendezvous force \
+          || warn "[libvirt] api/apps DNS flip incomplete for ${_lv_cluster}"
+      done
+    fi
+    # Hub must resolve spoke api.* (ACM import); spokes must resolve hub api.*.
+    if declare -F libvirt_ensure_cross_cluster_api_dns >/dev/null; then
+      libvirt_ensure_cross_cluster_api_dns || warn "[libvirt] cross-cluster API DNS update failed"
+    else
+      warn "[libvirt] libvirt_ensure_cross_cluster_api_dns not loaded — spoke import DNS will fail"
+    fi
+    return 0
+  fi
+  create_spoke_metal_machinesets
+  scale_hub_workers
+  wait_for_spoke_metal_nodes
+}
+
 full_redeploy() {
+  if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]]; then
+    err "Full redeploy is AWS-only. For libvirt, run ./scripts/libvirt-provision.sh then:"
+    err "  REDEPLOY_PLATFORM=libvirt LIBVIRT_HOST=<hv> ./scripts/redeploy.sh --pattern-only"
+    exit 1
+  fi
   check_prerequisites
   prepare_upstream
 
@@ -1142,6 +1248,10 @@ full_redeploy() {
 
 case "${1:-}" in
   --destroy-only)
+    if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]]; then
+      err "Use ./scripts/libvirt-provision.sh --destroy (and --destroy-legacy if needed)."
+      exit 1
+    fi
     check_prerequisites
     [[ -x "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" ]] && \
       "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" || true
@@ -1150,11 +1260,19 @@ case "${1:-}" in
     log "Environment destroyed (Route53 hosted zone preserved)."
     ;;
   --pattern-only)
+    # Libvirt cluster APIs are only reachable on the hypervisor (guest DNS/NAT).
+    # With LIBVIRT_HOST set, sync scripts + secrets and run pattern-only there.
+    if [[ "$REDEPLOY_PLATFORM" == "libvirt" ]] && libvirt_is_remote; then
+      libvirt_reexec_redeploy_on_host --pattern-only
+      exit $?
+    fi
+    if [[ "$REDEPLOY_PLATFORM" == "libvirt" && "${LIBVIRT_REMOTE_SESSION:-}" != "1" && -z "${LIBVIRT_HOST:-}" ]]; then
+      warn "REDEPLOY_PLATFORM=libvirt without LIBVIRT_HOST: running locally."
+      warn "If oc cannot resolve api.*.${BASE_DOMAIN:-<base-domain>}, set LIBVIRT_HOST to the hypervisor."
+    fi
     check_prerequisites
     prepare_upstream
-    create_spoke_metal_machinesets
-    scale_hub_workers
-    wait_for_spoke_metal_nodes
+    prepare_nodes_for_pattern
     deploy_pattern
     run_post_pattern_steps
     ;;
@@ -1174,6 +1292,12 @@ case "${1:-}" in
     echo " --dr-bootstrap-only Wait for convergence + automatic DR validation bootstrap (existing env)"
     echo " --status Show current environment status"
     echo ""
+    echo "Libvirt / compact lab (no AWS):"
+    echo "  ./scripts/libvirt-provision.sh                 # networks + 9 VMs + agent-based OCP"
+    echo "  REDEPLOY_PLATFORM=libvirt LIBVIRT_HOST=<hv> ./scripts/redeploy.sh --pattern-only"
+    echo "  (pattern-only SSHs to LIBVIRT_HOST so oc uses hypervisor DNS for cluster APIs)"
+    echo " Full redeploy and --destroy-only are AWS-only; use libvirt-provision.sh --destroy on libvirt."
+    echo ""
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
     echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
@@ -1183,9 +1307,18 @@ case "${1:-}" in
     echo "                         Preview RHDR (rhdr-catalog) is committed in the fork; partner BOMs differ in variants/<name>/."
     echo ""
     echo "Environment variables:"
-    echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
-    echo " PRIMARY_INSTALL_DIR   Primary spoke install directory (default: ~/git/ocp-primary-install)"
-    echo " SECONDARY_INSTALL_DIR Secondary spoke install directory (default: ~/git/ocp-secondary-install)"
+    echo " REDEPLOY_PLATFORM     aws (default, full IPI) | libvirt (pattern-only on compact clusters)"
+    echo " HUB_INSTALL_DIR       Hub install dir (aws default ~/git/hub-cluster-install;"
+    echo "                       libvirt default ~/git/libvirt/<hv>/hub-cluster-install)"
+    echo " PRIMARY_INSTALL_DIR   Primary spoke install dir (aws ~/git/ocp-primary-install;"
+    echo "                       libvirt ~/git/libvirt/<hv>/ocp-primary-install)"
+    echo " SECONDARY_INSTALL_DIR Secondary spoke install dir (aws ~/git/ocp-secondary-install;"
+    echo "                       libvirt ~/git/libvirt/<hv>/ocp-secondary-install)"
+    echo " LIBVIRT_HOST          Libvirt hypervisor; short name used in libvirt install-dir defaults."
+    echo "                       When set with REDEPLOY_PLATFORM=libvirt --pattern-only, redeploy"
+    echo "                       SSHs to the HV and runs there (required for Tekton / off-HV laptops)."
+    echo " LIBVIRT_INSTALL_ROOT  Libvirt parent for install-dir defaults (default ~/git/libvirt/<hv>;"
+    echo "                       on HV remote session: \$LIBVIRT_REMOTE_WORKDIR)"
     echo " VALUES_SECRET         Path to values-secret.yaml (default: ~/values-secret.yaml)"
     echo " HUB_OCP_VERSION       OCP version for all clusters (default: 4.22.1)"
     echo " HOSTED_ZONE_ID        Route53 hosted zone ID (verified, never deleted)"
@@ -1199,7 +1332,7 @@ case "${1:-}" in
     echo " DR_VALIDATION_PYTHON_WINDOWS_URL Python amd64 installer URL (staged to Windows VMs)"
     echo " SKIP_DR_VALIDATION    Set to 1 to skip automatic DR validation bootstrap and snapshots"
     echo " SKIP_DR_VALIDATION_SNAPSHOTS  Set to 1 to skip only the 5-min snapshot daemon"
-    echo " REQUIRE_WINDOWS_VMS   Fail redeploy if Windows stabilize/OpenSSH fails (default 1; set 0 to warn only)"
+    echo " REQUIRE_WINDOWS_VMS   Fail redeploy if Windows stabilize/OpenSSH fails (default 1 on aws, 0 on libvirt)"
     echo " SKIP_WINDOWS_VM_STABILIZE  Set to 1 to skip stabilize-windows-vms.sh entirely"
     echo " DR_VALIDATION_BOOTSTRAP_RETRIES  Automatic bootstrap retries during redeploy (default 6)"
     echo " DR_VALIDATION_BOOTSTRAP_RETRY_SLEEP Seconds between bootstrap retries (default 120)"
@@ -1226,6 +1359,8 @@ case "${1:-}" in
     echo " BYOC_IMPORT_WAIT_ATTEMPTS      Wait for ESO/MC spoke import per step (default 40)"
     echo " BYOC_IMPORT_WAIT_SLEEP         Seconds between BYOC import polls (default 30)"
     echo " BYOC_BOOTSTRAP_SPOKE_IMPORT    Bootstrap spoke hub ns + import secrets (default 1)"
+    echo " ODF_LOCAL_STORAGE_CLASS  Libvirt ODF StorageClass (default localblock)"
+    echo " ODF_LOCAL_DEVICE         Unused node disk for LSO (default /dev/vdb)"
     echo " PATTERN_INSTALL_EARLY_EXIT_CHECKS  Stable checks before cutting install-byoc short (default 3)"
     echo " PATTERN_INSTALL_EARLY_EXIT_SLEEP   Seconds between early-exit polls (default 30)"
     ;;

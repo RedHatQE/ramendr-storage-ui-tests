@@ -7,8 +7,9 @@
 
 set -euo pipefail
 
-: "${PRIMARY_INSTALL_DIR:=${HOME}/git/ocp-primary-install}"
-: "${SECONDARY_INSTALL_DIR:=${HOME}/git/ocp-secondary-install}"
+# Do not default PRIMARY/SECONDARY_INSTALL_DIR here: sourcing this file before
+# redeploy.sh applies REDEPLOY_PLATFORM=libvirt paths would pin the AWS
+# ~/git/ocp-*-install locations and skip ~/git/libvirt/<hv>/…
 
 BYOC_VALUES_SECRET="${BYOC_VALUES_SECRET:-}"
 
