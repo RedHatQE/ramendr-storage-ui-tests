@@ -47,9 +47,13 @@ from tests.utils.pattern_variant import has_vm_drpc
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
-from reporting.jira_client import JiraClient, config_from_env
+from reporting.jira_client import JiraClient
 from reporting.jira_config import JiraReportingConfig, reporting_config_from_env
-from reporting.jira_results import derive_run_id, jira_test_case_result
+from reporting.jira_results import (
+    build_jira_client,
+    get_session_run_id,
+    jira_test_case_result,
+)
 from tests.utils.dr_validation import (
     assert_all_hammerdb_snapshots_ready,
     collect_db_snapshot,
@@ -113,19 +117,22 @@ def _jira_reporting_setup() -> tuple[JiraClient | None, JiraReportingConfig, str
     """Build the (client, config, run_id) shared by both DR scenarios reported
     from one ``test_sanity_disaster_recovery_ui`` invocation.
 
-    ``JIRA_REPORT_RESULTS`` defaults to ``false`` (see
-    ``reporting/jira_config.py``), so an ordinary developer/CI run of this
-    test makes zero Jira calls and creates zero Jira Test Results unless
-    reporting is explicitly enabled. ``run_id`` is derived exactly once here
-    and passed to every ``jira_test_case_result()`` call for this
-    invocation -- failover and relocate always share one run id, even when
-    ``$JIRA_RUN_ID`` isn't set and a fallback must be generated.
+    ``JIRA_REPORT_RESULTS`` defaults to ``true`` (see
+    ``reporting/jira_config.py``): an ordinary run of this test reports
+    automatically, with Jira credentials supplied by the environment/CI
+    secret store. ``JIRA_REPORT_RESULTS=false`` remains available as an
+    explicit, deliberate opt-out for local development without Jira
+    credentials (see ``build_jira_client()`` -- it fails fast and clearly,
+    never silently, if reporting is enabled but credentials are missing).
+    ``run_id`` is resolved once per pytest *process* via
+    ``get_session_run_id()`` (not just once per invocation) so that failover,
+    relocate, and any marker-based smoke Test Results reported in the same
+    ``pytest ...`` run all share one run id, even when ``$JIRA_RUN_ID``
+    isn't set and a fallback must be generated.
     """
     config = reporting_config_from_env()
-    client: JiraClient | None = None
-    if config.report_results:
-        client = JiraClient(config_from_env())
-    return client, config, derive_run_id(config)
+    client = build_jira_client(config)
+    return client, config, get_session_run_id(config)
 
 
 def _repo_root() -> Path:
@@ -1004,8 +1011,16 @@ def _run_force_full_sanity_dr_flow(
     """Run the full failover → relocate cycle with no resume shortcuts.
 
     Always executes (and reports) both scenarios -- there is no resume logic
-    in this flow, so it's a single contiguous block per scenario and each
-    is reported independently via ``jira_test_case_result``.
+    in this flow. Each scenario is reported independently via
+    ``jira_test_case_result``, using the same manual ``start()`` /
+    ``close_success()`` / ``close_failure()`` pattern as the adaptive/resume
+    flow below (rather than a bare ``with`` block spanning dialog
+    validation too): a boundary is only ever closed with **FAIL** if this
+    invocation actually reached ``initiate_failover_dialog()`` /
+    ``initiate_relocate_dialog()`` -- a precondition/dialog-validation
+    failure *before* that point re-raises normally but never fabricates a
+    Jira Test Result for a DR action that was never actually attempted (see
+    docs/jira-test-result-reporting.md, "Setup/precondition failures").
     """
     jira_client, jira_config, run_id = _jira_reporting_setup()
 
@@ -1020,23 +1035,23 @@ def _run_force_full_sanity_dr_flow(
     drpc_page.assert_failover_dialog_contents()
     drpc_page.cancel_failover_dialog()
 
-    # --- RHELTEST-3600 (failover_primary_to_secondary) Jira boundary starts:
-    # dialog validation through post-failover HammerDB/data validation. Any
-    # exception in this block reports FAIL and re-raises unmodified; success
-    # reports PASS only once every check below has passed.
-    with jira_test_case_result(
+    # --- RHELTEST-3600 (failover_primary_to_secondary) Jira boundary starts.
+    failover_reporter = jira_test_case_result(
         "failover_primary_to_secondary",
         scenario="Failover primary to secondary",
         run_id=run_id,
         client=jira_client,
         config=jira_config,
-    ):
+    ).start()
+    failover_initiated = False
+    try:
         drpc_page.open_failover_dialog(drpc_name)
         drpc_page.assert_failover_dialog_contents()
         _save_hammerdb_baseline_snapshot(phase="failover")
         failover_started_at = time.monotonic()
         failover_initiated_utc = datetime.now(timezone.utc)
         drpc_page.initiate_failover_dialog()
+        failover_initiated = True
 
         try:
             drpc_page.wait_for_failover_progress_state(drpc_name)
@@ -1077,17 +1092,27 @@ def _run_force_full_sanity_dr_flow(
         )
         _assert_managed_clusters_available()
         _run_dr_data_validation(phase="failover", initiated_utc=failover_initiated_utc)
+    except BaseException as exc:
+        # Only report FAIL for a DR action this invocation actually
+        # initiated -- never for a precondition/dialog-validation/baseline
+        # failure that preceded initiate_failover_dialog().
+        if failover_initiated:
+            failover_reporter.close_failure(exc)
+        raise
+    else:
+        failover_reporter.close_success()
     # --- RHELTEST-3600 Jira boundary ends (PASS committed before relocate starts).
 
-    # --- RHELTEST-3610 (relocate_secondary_to_primary) Jira boundary starts:
-    # pre-relocate baseline through post-relocate HammerDB/data validation.
-    with jira_test_case_result(
+    # --- RHELTEST-3610 (relocate_secondary_to_primary) Jira boundary starts.
+    relocate_reporter = jira_test_case_result(
         "relocate_secondary_to_primary",
         scenario="Relocate secondary to primary",
         run_id=run_id,
         client=jira_client,
         config=jira_config,
-    ):
+    ).start()
+    relocate_initiated = False
+    try:
         state_before_relocate = drpc_page.get_drpc_state(drpc_name)
         assert state_before_relocate["cluster"] == "ocp-secondary", (
             "Expected DRPC on ocp-secondary before relocate, got "
@@ -1105,6 +1130,7 @@ def _run_force_full_sanity_dr_flow(
         relocate_started_at = time.monotonic()
         relocate_initiated_utc = datetime.now(timezone.utc)
         drpc_page.initiate_relocate_dialog()
+        relocate_initiated = True
 
         _relocate_best_effort_progress(drpc_page, drpc_name)
         _wait_for_relocate_secondary_cleared(
@@ -1132,6 +1158,15 @@ def _run_force_full_sanity_dr_flow(
         )
         _assert_managed_clusters_available()
         _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
+    except BaseException as exc:
+        # Only report FAIL for a DR action this invocation actually
+        # initiated -- never for a precondition/dialog-validation/baseline
+        # failure that preceded initiate_relocate_dialog().
+        if relocate_initiated:
+            relocate_reporter.close_failure(exc)
+        raise
+    else:
+        relocate_reporter.close_success()
     # --- RHELTEST-3610 Jira boundary ends.
 
 

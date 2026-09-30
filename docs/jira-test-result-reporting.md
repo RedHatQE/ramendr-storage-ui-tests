@@ -1,12 +1,21 @@
 # Jira Test Result reporting
 
-**Status: Phase A, B, and C are all implemented.** This describes the Jira
+**Status: Phase A, B, C, and D are all implemented.** This describes the Jira
 Cloud REST API v3 integration used for RamenDR Test Result reporting: Phase A's
-read-only schema discovery tool for the production `RHELTEST` project, plus
-Phase B/C's gated write support (`create_issue`/`transition_issue`) and its
-pytest/sanity wiring. See
+read-only schema discovery tool for the production `RHELTEST` project, Phase
+B/C's gated write support (`create_issue`/`transition_issue`) and its
+pytest/sanity wiring, and Phase D's move from opt-in pilot reporting to
+**normal-default reporting** for sanity and (once a scenario is approved)
+smoke. See
 [`Ramen_DR_Jira_Test_Result_Integration_Plan.md`](Ramen_DR_Jira_Test_Result_Integration_Plan.md)
 for the full phased plan and rationale.
+
+**Normal usage today:** just run `pytest ...` (with real Jira credentials
+supplied by your environment/CI secret store). Reporting is on by default --
+you do not need to export `JIRA_REPORT_RESULTS` or `JIRA_REPORT_DRY_RUN` for
+an ordinary sanity or smoke run. See
+["Phase D: reporting is now the default"](#phase-d-reporting-is-now-the-default)
+below.
 
 ## What exists today
 
@@ -27,6 +36,16 @@ for the full phased plan and rationale.
     transition ids)
 
 This script performs **zero** Jira writes (no POST/PUT/DELETE).
+
+- `scripts/jira/discover_ramen_dr_test_cases.py` -- a read-only CLI that
+  queries `project = RHELTEST AND labels = "ramen-dr" AND type = "Test
+  Case"` (via `JiraClient.search_issues`) and prints/saves each matching
+  Test Case's key, summary, labels, status, and description (converted from
+  Atlassian Document Format to plain text). Used once to enumerate the 13
+  Ramen DR Test Cases in RHELTEST and inform the smoke-to-Jira mapping
+  below -- it imports no write methods (`create_issue`/`transition_issue`)
+  at all, and never prints credentials. Output is written to
+  `.work/jira/ramen-dr-test-cases.json` (gitignored).
 
 ### Fixed bug: wrong pagination key for createmeta endpoints
 
@@ -153,14 +172,15 @@ python -m pytest tests/reporting -v
 All Jira interaction is mocked (a fake HTTP session / fake client); no test
 contacts a real Jira instance.
 
-## Phase B/C: reporting a Test Result (implemented, gated off by default)
+## Phase B/C: reporting a Test Result
 
-Phase B/C add the ability to create and transition a real Jira Test Result,
-but every default is the safest option and a real write requires **three**
-independent, explicit opt-ins at once. `tests/ui/sanity/test_sanity.py` is
-wired up to report automatically (see "Phase 1 pytest/sanity wiring" below);
-the CLI (`scripts/jira/create_test_result_smoke.py`) is a separate, manual
-entrypoint for ad hoc/smoke reporting outside of pytest.
+Phase B/C add the ability to create and transition a real Jira Test Result.
+`tests/ui/sanity/test_sanity.py` is wired up to report automatically (see
+["Phase 1 pytest/sanity wiring"](#phase-1-pytestsanity-wiring) below, and
+["Phase D"](#phase-d-reporting-is-now-the-default) for today's normal-default
+behavior); the CLI (`scripts/jira/create_test_result_smoke.py`) is a
+separate, manual entrypoint for ad hoc reporting outside of pytest that
+deliberately keeps its own maximally-safe defaults regardless of Phase D.
 
 ### New modules
 
@@ -175,10 +195,14 @@ entrypoint for ad hoc/smoke reporting outside of pytest.
 - `reporting/jira_models.py` -- `TestOutcome` enum (`PASS`/`FAIL`/`BLOCKED`)
   and the `TestResultExecution` dataclass describing one automation run.
 - `reporting/jira_test_cases.py` -- `RAMENDR_JIRA_TEST_CASES`, the
-  **approved-only** scenario-id -> Jira Test Case key mapping. Currently
-  just `failover_primary_to_secondary` (`RHELTEST-3600`) and
-  `relocate_secondary_to_primary` (`RHELTEST-3610`); the other 11 Test
-  Cases are deliberately not mapped yet.
+  **approved-only** scenario-id -> Jira Test Case key mapping. Of the 13
+  Ramen DR Test Cases confirmed to exist in RHELTEST (via
+  `scripts/jira/discover_ramen_dr_test_cases.py`), 3 are mapped:
+  `failover_primary_to_secondary` (`RHELTEST-3600`),
+  `relocate_secondary_to_primary` (`RHELTEST-3610`), and
+  `deployment_smoke_validation` (`RHELTEST-3612`, smoke's aggregate scenario
+  -- see ["Smoke wiring"](#smoke-wiring)); the other 10 are deliberately not
+  mapped yet.
 - `reporting/jira_config.py` -- `reporting_config_from_env()` reads all the
   env vars below into a `JiraReportingConfig` (non-credential, safe to
   log/print).
@@ -192,21 +216,31 @@ entrypoint for ad hoc/smoke reporting outside of pytest.
 
 ### Safety gates
 
-A real Jira write requires two independent, explicit environment opt-ins in
-every caller: `JIRA_REPORT_RESULTS=true` **and** `JIRA_REPORT_DRY_RUN=false`.
-Any other combination is either a pure offline payload build (reporting
-disabled -- zero Jira calls, not even a GET) or a safe preview that validates
-the parent Test Case with a read-only GET but performs no writes.
+`report_test_result()` has three gates, checked in order, each stopping
+strictly before any write: `config.report_results` (off = zero Jira calls,
+not even a GET), `config.dry_run` (on = a read-only parent-validation GET
+only, no write), then the real create/transition/re-verify write path.
 
-- **`scripts/jira/create_test_result_smoke.py` (CLI)** adds a *third*,
-  CLI-specific gate on top of the two env vars: `--confirm` must also be
+**As of Phase D, `report_results` and `dry_run` default to normal-reporting
+values for pytest** (`report_results=True`, `dry_run=False`) -- see
+["Phase D: reporting is now the default"](#phase-d-reporting-is-now-the-default).
+The CLI below deliberately keeps its own historical maximally-safe defaults
+regardless of that change, since it's a manual/ad hoc tool, not "normal
+automation":
+
+- **`scripts/jira/create_test_result_smoke.py` (CLI)** still defaults to
+  `report_results=False`, `dry_run=True` whenever the corresponding env var
+  is not explicitly set, plus its own *third* gate: `--confirm` must also be
   passed. All three (`JIRA_REPORT_RESULTS=true`, `JIRA_REPORT_DRY_RUN=false`,
-  `--confirm`) must be true together before this CLI performs a write.
-- **`tests/ui/sanity/test_sanity.py` (pytest)** has no `--confirm`-equivalent
-  flag -- it is gated purely by the two environment variables above. Setting
-  `JIRA_REPORT_RESULTS=true` and `JIRA_REPORT_DRY_RUN=false` before running
-  pytest is sufficient (and necessary) to enable real Jira writes from the
-  sanity flow; see "Phase 1 pytest/sanity wiring" below.
+  `--confirm`) must be explicitly set/passed together before this CLI
+  performs a write.
+- **`tests/ui/sanity/test_sanity.py` and marker-decorated smoke tests
+  (pytest)** report for real by default -- no environment variables need to
+  be set. Setting `JIRA_REPORT_RESULTS=false` opts a local/dev run out of
+  reporting entirely; setting `JIRA_REPORT_DRY_RUN=true` (with reporting
+  still enabled) does a real credentialed read-only preview without writing.
+  See ["Phase D: reporting is now the default"](#phase-d-reporting-is-now-the-default)
+  and ["Phase 1 pytest/sanity wiring"](#phase-1-pytestsanity-wiring) below.
 
 `report_test_result()` never assumes a newly created issue's initial
 status: after `create_issue`, it re-fetches the issue's current status and
@@ -255,8 +289,12 @@ needing more than one page would require looping on `nextPageToken` until
 ### Environment variables
 
 ```bash
-JIRA_REPORT_RESULTS=false   # default: reporting fully off
-JIRA_REPORT_DRY_RUN=true    # default: even if enabled, no write happens
+# Defaults below are for reporting_config_from_env() (used by pytest --
+# tests/ui/sanity/test_sanity.py and marker-decorated smoke tests). The
+# scripts/jira/create_test_result_smoke.py CLI overrides the first two back
+# to false/true whenever they are not explicitly set -- see "Safety gates".
+JIRA_REPORT_RESULTS=true    # default: real reporting is on
+JIRA_REPORT_DRY_RUN=false   # default: writes actually happen
 JIRA_REPORT_STRICT=false    # reserved for future use
 
 JIRA_BASE_URL=
@@ -279,6 +317,11 @@ GIT_COMMIT=
 
 ### Smoke-test CLI
 
+This CLI is a manual/ad hoc debugging tool, independent of the normal-default
+pytest behavior described in
+["Phase D: reporting is now the default"](#phase-d-reporting-is-now-the-default) --
+it always requires explicit opt-in, regardless of what's set in your shell.
+
 ```bash
 # Safe preview -- no credentials required, no Jira contacted at all:
 python scripts/jira/create_test_result_smoke.py \
@@ -296,9 +339,15 @@ python scripts/jira/create_test_result_smoke.py \
 
 ### Not implemented yet
 
-Adding the remaining 11 Test Case mappings is future work pending review of
-each parent Test Case. Only `failover_primary_to_secondary` (RHELTEST-3600)
-and `relocate_secondary_to_primary` (RHELTEST-3610) are wired up (see below).
+Adding the remaining 10 Test Case mappings (RHELTEST-3601..3611, except the
+mapped RHELTEST-3610) is future work pending real automation and review for
+each -- discovery confirmed these correspond to scenarios not currently
+automated in this repo (e.g. repeated failover/failback cycles, snapshots,
+hotplug disks, VMware-imported/migrated Windows, static networks, dual-NIC
+Windows, primary->secondary relocate as a *standalone* scenario, failed
+failover cleanup/retry). Only `failover_primary_to_secondary`
+(RHELTEST-3600), `relocate_secondary_to_primary` (RHELTEST-3610), and
+`deployment_smoke_validation` (RHELTEST-3612) are wired up (see below).
 `BLOCKED` outcomes are not produced automatically yet -- pytest skips are
 never translated into a Jira `BLOCKED` result.
 
@@ -307,8 +356,9 @@ never translated into a Jira `BLOCKED` result.
 `tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui` reports
 independent Jira Test Results for the two scenarios above via
 `reporting.jira_results.jira_test_case_result()` -- a per-scenario reporting
-boundary. `JIRA_REPORT_RESULTS=false` (the default) means an ordinary
-developer/CI run of this test makes **zero** Jira calls.
+boundary. As of Phase D, reporting is **on by default** (see below) -- an
+ordinary sanity run reports for real; set `JIRA_REPORT_RESULTS=false`
+explicitly to opt a local/dev run out and make zero Jira calls.
 
 ### `jira_test_case_result()` / `JiraScenarioReporter`
 
@@ -343,10 +393,20 @@ adaptive/resume flow below), `.start()` / `.close_success()` /
 
 ### Where the two boundaries live in `test_sanity.py`
 
+Both flows below use the same pattern: construct the reporter and call
+`.start()` immediately, but only call `.close_failure(exc)` if the actual DR
+action (`initiate_failover_dialog()` / `initiate_relocate_dialog()`) already
+succeeded (tracked by a `failover_initiated` / `relocate_initiated` flag). A
+precondition failure -- dialog-contents assertion, baseline-snapshot capture,
+anything **before** the real action is initiated -- re-raises without
+reporting anything, so it can never fabricate a scenario result. This is the
+same rule the marker-based smoke wiring below enforces via pytest's own
+setup/call phase split.
+
 - **`_run_force_full_sanity_dr_flow`** (used whenever
-  `RAMENDR_SANITY_FORCE_FULL=1`, the default): both scenarios are always
-  executed and are each a single contiguous `with jira_test_case_result(...):`
-  block -- failover from the "initiate" dialog validation through
+  `RAMENDR_SANITY_FORCE_FULL=1`, the default): both scenarios always run,
+  each with its own `failover_initiated` / `relocate_initiated` flag as
+  described above -- failover from the "initiate" dialog validation through
   `_run_dr_data_validation(phase="failover", ...)`, then relocate from the
   pre-relocate healthy/protected-state check through
   `_run_dr_data_validation(phase="relocate", ...)`.
@@ -360,8 +420,8 @@ adaptive/resume flow below), `.start()` / `.close_success()` /
   scenario's outcome can never retroactively change an already-closed one.
   A single `try/except BaseException` around the whole adaptive flow is the
   safety net: on any exception, whichever reporter is still open (not yet
-  closed) reports FAIL via `.close_failure(exc)`, then the exception is
-  always re-raised unmodified.
+  closed) and was actually initiated reports FAIL via `.close_failure(exc)`,
+  then the exception is always re-raised unmodified.
 
 ### Resume behavior (adaptive flow only)
 
@@ -380,11 +440,18 @@ never fabricates a result for the phase it's resuming *past*:
 ### Run id and Compose Version
 
 `reporting.jira_results.derive_run_id(config)` returns `$JIRA_RUN_ID` if set,
-otherwise a fresh `sanity-<random>-<epoch>` id -- called **once** per
-`test_sanity_disaster_recovery_ui` invocation, so failover and relocate
-always share one run id. Compose Version follows the existing rule: send
-`customfield_11500` only when `RAMENDR_COMPOSE_VERSION` is set; never
-fabricate `RHEL-9.8.0`/`unknown`/test placeholders.
+otherwise a fresh `sanity-<random>-<epoch>` id every time it's called --
+deliberately uncached, since some callers legitimately want a new id per
+call. `reporting.jira_results.get_session_run_id(config)` wraps it with a
+process-wide cache: it still returns `$JIRA_RUN_ID` immediately when set,
+but otherwise calls `derive_run_id()` **at most once per pytest process** and
+memoizes the fallback, so every reporting call in one pytest execution --
+sanity's failover and relocate boundaries, and every marker-decorated smoke
+test -- shares exactly one run id without `$JIRA_RUN_ID` needing to be set
+manually. `reset_session_run_id_cache()` clears the cache (used by test
+isolation, and safe to ignore otherwise). Compose Version follows the
+existing rule: send `customfield_11500` only when `RAMENDR_COMPOSE_VERSION`
+is set; never fabricate `RHEL-9.8.0`/`unknown`/test placeholders.
 
 ### Tests
 
@@ -395,6 +462,249 @@ fabricate `RHEL-9.8.0`/`unknown`/test placeholders.
 - `tests/ui/sanity/test_sanity_jira_wiring.py` -- calls the real
   `test_sanity_disaster_recovery_ui` method with every DR/Playwright/`oc`
   dependency monkeypatched to a no-op or scripted fake, and a fake Jira
-  client. Covers fresh run, resume after failover, resume after relocate,
-  independent failure attribution (failover PASS + relocate FAIL, and vice
-  versa), reporting-disabled, dry-run, and `JIRA_REPORT_STRICT`.
+  client, for **both** the adaptive/resume flow and (Phase D) the
+  force-full flow. Covers fresh run, resume after failover, resume after
+  relocate, independent failure attribution (failover PASS + relocate FAIL,
+  and vice versa), a precondition failure before either scenario is
+  actually initiated reporting nothing, reporting-disabled, dry-run,
+  `JIRA_REPORT_STRICT`, and one shared run id across both boundaries.
+
+## Phase D: reporting is now the default
+
+Normal Ramen DR automation -- sanity and (once a scenario is approved)
+smoke -- must always publish PASS or FAIL to Jira without the person running
+`pytest` having to opt in manually. Phase D changes two defaults and adds a
+fail-fast credential check; nothing about the write path itself
+(three-gate `report_test_result()`, parent validation, re-verify-after-write)
+changed.
+
+### What changed
+
+- `reporting_config_from_env()`'s defaults flipped: `report_results` is now
+  `True` (was `False`) and `dry_run` is now `False` (was `True`). See
+  ["Environment variables"](#environment-variables) above for the override
+  variables, which still work exactly as before -- only the *default* when
+  they're unset changed.
+- `scripts/jira/create_test_result_smoke.py` explicitly restores its own
+  historical safe defaults (`report_results=False`, `dry_run=True`)
+  whenever the corresponding env var is unset, so this manual CLI's
+  behavior is unaffected by the pytest-facing default change above.
+- `reporting.jira_results.build_jira_client(config)` is the new single
+  place that turns a `JiraReportingConfig` into a `JiraClient | None`:
+  returns `None` immediately when `report_results` is `False` (no
+  credentials needed at all); otherwise calls
+  `reporting.jira_client.config_from_env()` and, if that raises because
+  `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN` aren't all set, re-raises as
+  `JiraCredentialsUnavailableError` with a message that names which
+  variables are missing and how to fix it (set them, or explicitly opt out
+  with `JIRA_REPORT_RESULTS=false`) -- **never** silently skips reporting
+  and never prints the token value itself. Both `test_sanity.py` and the
+  smoke plugin below call this instead of constructing `JiraClient`
+  directly.
+
+### Fail-fast behavior
+
+| Situation | Behavior |
+| --- | --- |
+| `JIRA_REPORT_RESULTS=false` (explicit opt-out) | No credentials required; zero Jira calls. |
+| `JIRA_REPORT_RESULTS` unset (default `true`) + credentials present | Reports for real (writes, unless `JIRA_REPORT_DRY_RUN=true`). |
+| `JIRA_REPORT_RESULTS` unset (default `true`) + credentials **missing** | `JiraCredentialsUnavailableError` raised immediately -- for sanity, when Jira setup runs at the start of the test; for smoke, at collection time (`pytest_collection_modifyitems`), before any test body runs, so the failure is obvious and not buried in one test's report. |
+
+## Smoke wiring
+
+`tests/ui/smoke/test_smoke.py` reports one aggregated Jira Test Result --
+`deployment_smoke_validation` / **RHELTEST-3612** -- per invocation, covering
+every applicable-for-the-active-`PATTERN_VARIANT` smoke check. Confirmed via
+a real, read-only discovery pass
+(`scripts/jira/discover_ramen_dr_test_cases.py`) against production
+RHELTEST; RHELTEST-3612's summary is *"[Ramen Pattern] Deploy Ramen Pattern
+on an Openshift Cluster and verify managed clusters status and protected
+vms"*.
+
+### Two marker shapes: one Test Result per test, or one shared by a group
+
+`reporting/pytest_jira_plugin.py` (the only module under `reporting/` that
+imports `pytest` -- kept isolated so the rest of `reporting/` stays usable
+by the standalone CLI) provides two markers:
+
+**`@pytest.mark.jira_test_case(scenario_id, *, scenario)`** -- one Jira Test
+Result per marked test, reported immediately when that test's `"call"`
+phase finishes (used by sanity's two independent DR scenarios -- see
+["Phase 1 pytest/sanity wiring"](#phase-1-pytestsanity-wiring)):
+
+```python
+@pytest.mark.jira_test_case(
+    "some_approved_scenario_id", scenario="Human-readable scenario label"
+)
+def test_something(...):
+    ...  # no Jira code in the test body at all
+```
+
+**`@pytest.mark.jira_aggregate_test_case(scenario_id, *, scenario)`** -- one
+Jira Test Result *shared* by every test carrying the same `scenario_id`,
+reported exactly once at `pytest_sessionfinish` (used by smoke -- reporting
+one Test Result per constituent smoke check would be noisy and wouldn't
+answer "did deployment validation pass" without reading every row):
+
+```python
+@_jira_deployment_smoke  # = jira_aggregate_test_case("deployment_smoke_validation", ...)
+def test_argocd_apps_synced_healthy(self, hub_kubeconfig):
+    ...
+```
+
+A test must carry at most one of the two markers -- carrying both raises
+`TypeError` at report time (their reporting shapes are mutually exclusive).
+
+Both markers share the same hook infrastructure:
+
+- `pytest_configure` registers both markers (so `--strict-markers` accepts
+  them).
+- `pytest_collection_modifyitems` builds (or fails fast on) the Jira client
+  **once per session**, if at least one collected item carries either
+  marker -- this is the "fail fast at collection time" behavior in the
+  table above.
+- `pytest_runtest_makereport` (a hookwrapper) only ever looks at the
+  `"call"`-phase result, so a `"setup"`/`"teardown"`-phase failure (e.g. a
+  fixture failure) or a skip is **never** turned into a fabricated result
+  for either marker -- matching the sanity rule above.
+- The run id is shared across sanity and smoke in the same pytest
+  invocation via `get_session_run_id()` (see
+  ["Run id and Compose Version"](#run-id-and-compose-version) above) --
+  used by both markers.
+- A Jira reporting failure is only ever logged
+  (`reporting.pytest_jira_plugin` logger, `WARNING`) for either marker -- it
+  never changes the pytest outcome that was already computed.
+
+### Aggregate accounting (`jira_aggregate_test_case`)
+
+For each `scenario_id`, `pytest_runtest_makereport` accumulates (never
+reports directly) as each constituent test's `"call"` phase completes, and
+conditionally as its `"teardown"` phase completes (see below):
+
+- **Skipped tests are never counted** -- neither as a pass nor a failure.
+  This is what makes the aggregate correctly variant-aware for free: a
+  smoke check gated by an existing `@_skip_without_*` marker (e.g.
+  `test_odf_storagecluster_ready` needs ODF) simply isn't counted when that
+  marker skips it, with no extra logic in the plugin itself.
+- If **every** test carrying a `scenario_id` is skipped this invocation
+  (e.g. a hypothetical future variant where none of RHELTEST-3612's checks
+  apply), **nothing is reported at all** -- same "never fabricate a result"
+  rule as `jira_test_case` and as sanity's DR boundaries.
+- A fixture/setup-phase failure for a constituent test is likewise never
+  counted (consistent with the rule above) -- an environment/
+  pre-deployment/provisioning problem that means the test body never
+  started is not a *test* outcome, so it must never create a Jira Test
+  Result. **Known trade-off:** if a shared fixture failure (e.g.
+  `hub_kubeconfig`) causes *every* RHELTEST-3612 test to error out in
+  setup, the result is silence (nothing reported), not a FAIL -- the same
+  "no fabricated result for something that never really ran" principle
+  applied at the group level. A future iteration could choose to treat an
+  all-setup-errors group as a FAIL instead; not done here since it wasn't
+  requested and would need its own review.
+- A **teardown**-phase failure is only counted when that same node id's own
+  `"call"` phase already passed -- i.e. the smoke check's body actually
+  executed and succeeded, and cleanup belonging to *that executed check*
+  then failed. This flips that one test from contributing to PASS to
+  contributing to FAIL (message prefixed `(teardown)`); it does not affect
+  any other constituent test. Every other teardown outcome is ignored:
+  after a skip, after a setup failure (no executed check for it to reflect
+  a failure of -- keeps environment/setup failures out of the dashboard,
+  per the rule above), or after a `"call"`-phase failure (already counted;
+  a second entry for the same node id would be redundant, not a new
+  outcome).
+
+At `pytest_sessionfinish` (after every test in the session has run), each
+scenario with at least one counted test reports **exactly once**:
+
+- **PASS** if every counted test passed.
+- **FAIL** if one or more counted tests failed -- the Jira description's
+  failure line lists every failing pytest node id and a concise message
+  (e.g. `tests/ui/smoke/test_smoke.py::TestInfraSmoke::test_vault_running:
+  AssertionError: ...`), semicolon-joined and truncated by the same
+  `_sanitize_failure_summary` every other Jira description uses -- never
+  one FAIL Test Result per failing test.
+- `duration_seconds` is the sum of every counted test's own duration (a
+  proxy for total smoke-suite execution time, not wall-clock session time).
+
+### Smoke-to-Jira mapping (confirmed via discovery)
+
+`reporting/jira_test_cases.py`'s `RAMENDR_JIRA_TEST_CASES` now includes:
+
+```python
+RAMENDR_JIRA_TEST_CASES = {
+    "failover_primary_to_secondary": "RHELTEST-3600",
+    "relocate_secondary_to_primary": "RHELTEST-3610",
+    "deployment_smoke_validation": "RHELTEST-3612",
+}
+```
+
+16 of the 20 `tests/ui/smoke/test_smoke.py` functions are decorated with
+`@_jira_deployment_smoke` (the module-level `jira_aggregate_test_case`
+marker for `deployment_smoke_validation`):
+
+| Test | Included? |
+| --- | --- |
+| `test_argocd_apps_synced_healthy` | ✅ |
+| `test_managed_clusters_available` | ✅ |
+| `test_odf_storagecluster_ready` | ✅ |
+| `test_vms_running_on_primary` | ✅ |
+| `test_mixed_vm_fleet_composition` | ✅ |
+| `test_windows_vms_have_minimum_os_disk` | ✅ |
+| `test_vms_have_two_data_disks` | ✅ |
+| `test_vm_disks_dr_protected_in_vrg` | ✅ |
+| `test_vm_external_secrets_present` | ✅ |
+| `test_hammerdb_schema_present_on_all_vms` | ✅ |
+| `test_drpolicy_validated` | ✅ |
+| `test_mirrorpeer_setup_complete` | ✅ |
+| `test_drpc_deployed_available` | ✅ |
+| `test_vault_running` | ✅ |
+| `test_external_secrets_synced` | ✅ |
+| `test_disaster_recovery_ui` (`TestUiSmoke`) | ✅ |
+| `test_drpartner_s4_storage_namespace` | ❌ not included |
+| `test_drpartner_s4_drpolicy` | ❌ not included |
+| `test_drpartner_minimal_has_no_s4_storage` | ❌ not included |
+| `test_drpartner_minimal_has_no_drpolicy` | ❌ not included |
+
+The four `test_drpartner_*` checks validate variant-*identity* (does
+`drpartner-s4`/`drpartner-minimal` deploy the right/wrong resources for
+*that specific variant*), which is a different kind of assertion than
+RHELTEST-3612's generic "managed clusters status and protected vms" --
+they're deliberately excluded pending their own review, not merged into
+this mapping.
+
+**RHELTEST-3601 through RHELTEST-3611 (except the mapped RHELTEST-3610) are
+not represented by the smoke suite and are not mapped.** Confirmed via
+discovery to correspond to scenarios with no current automation in this
+repo: repeated failover/failback cycles, snapshots, hotplug disks,
+VMware-imported Windows, migrated Windows, static networks, dual-NIC
+Windows, primary->secondary relocate (as a standalone scenario), and failed
+failover cleanup/retry. `resolve_test_case_key()` deliberately raises
+`KeyError` rather than guessing, so none of these are mapped until real
+automation exists for them and each mapping is reviewed and approved.
+
+### Tests
+
+- `tests/reporting/test_pytest_jira_plugin.py` -- both markers in isolation:
+  marker registration, unmarked/skipped/setup-phase tests report/count
+  nothing, a passing or failing `jira_test_case`-marked test reports
+  PASS/FAIL immediately, an unapproved scenario id raises, a Jira reporting
+  failure is logged and never raised, collection-time fail-fast on missing
+  credentials, one run id shared across tests using either marker in one
+  session, and for `jira_aggregate_test_case`: skipped/setup-failed tests
+  are never counted, an all-skipped group reports nothing, all-passing
+  reports exactly one PASS, one or more failures report exactly one FAIL
+  naming every failing node id (never one FAIL per failing test), carrying
+  both markers on one test raises `TypeError`, and a missing-credentials
+  error at session end is logged, not raised. Also covers teardown-phase
+  handling specifically: a teardown failure after a passing call flips that
+  test to FAIL (with a `(teardown)`-prefixed message); a passing teardown
+  after a passing call stays PASS; a teardown failure after a skip, after a
+  setup failure, or after a call failure is ignored (no duplicate/
+  fabricated entry, and no effect on other constituent tests); and the
+  individual `jira_test_case` marker has no teardown handling at all (a
+  teardown report for it is a no-op). All Jira calls mocked; no real pytest
+  session/subprocess is spawned -- both the hookwrapper and
+  `pytest_sessionfinish` are driven directly.
+- `tests/reporting/test_jira_test_cases.py` -- asserts the exact approved
+  mapping set (guards against silently adding one of the un-reviewed Test
+  Cases).

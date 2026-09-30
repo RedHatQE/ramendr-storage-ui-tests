@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import timezone
 from typing import Any, Mapping
 
-from reporting.jira_client import JiraClient, JiraClientError
+from reporting.jira_client import JiraClient, JiraClientError, config_from_env
 from reporting.jira_config import JiraReportingConfig
 from reporting.jira_models import TestOutcome, TestResultExecution
 from reporting.jira_test_cases import resolve_test_case_key
@@ -63,6 +63,48 @@ class ParentValidationError(RuntimeError):
     ``JiraClientError`` from the GET itself) -- only for a parent that was
     fetched successfully but doesn't qualify.
     """
+
+
+class JiraCredentialsUnavailableError(RuntimeError):
+    """Raised when Jira reporting is enabled but credentials are unavailable.
+
+    Now that reporting defaults to *on* (see ``reporting.jira_config``), an
+    ordinary run with ``JIRA_REPORT_RESULTS`` left at its default must never
+    silently skip reporting just because ``JIRA_BASE_URL``/``JIRA_EMAIL``/
+    ``JIRA_API_TOKEN`` happen to be unset -- that would look identical to a
+    real "everything passed, nothing to report" run in CI. This error
+    surfaces the gap immediately and explains the two legitimate fixes.
+    Never includes the credential values themselves (only names which
+    environment variables are missing, via the wrapped ``ValueError``).
+    """
+
+
+def build_jira_client(config: JiraReportingConfig) -> JiraClient | None:
+    """Build the :class:`JiraClient` this run needs, or ``None`` if disabled.
+
+    - ``config.report_results`` is ``False`` (an explicit, deliberate local
+      opt-out -- it now defaults to ``True``) -> returns ``None``. Reporting
+      makes zero Jira calls in this case, so no credentials are required.
+    - ``config.report_results`` is ``True`` (the default) -> credentials are
+      required, even in dry-run mode (dry-run still performs one real,
+      read-only parent-validation GET; see :func:`report_test_result`).
+      Missing/empty ``JIRA_BASE_URL`` / ``JIRA_EMAIL`` / ``JIRA_API_TOKEN``
+      raises :class:`JiraCredentialsUnavailableError` with a clear,
+      actionable message -- this is a fail-fast check, never a silent skip.
+    """
+    if not config.report_results:
+        return None
+    try:
+        jira_config = config_from_env()
+    except ValueError as exc:
+        raise JiraCredentialsUnavailableError(
+            "Jira reporting is enabled (JIRA_REPORT_RESULTS=true, the "
+            f"default) but Jira credentials are unavailable: {exc}. Supply "
+            "JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN (e.g. from your CI "
+            "secret store), or explicitly opt out for local development "
+            "with JIRA_REPORT_RESULTS=false."
+        ) from exc
+    return JiraClient(jira_config)
 
 
 # --------------------------------------------------------------------------
@@ -444,6 +486,51 @@ def derive_run_id(config: JiraReportingConfig) -> str:
     generate independent ones.
     """
     return config.run_id or f"sanity-{uuid.uuid4().hex[:8]}-{int(time.time())}"
+
+
+#: Process-wide fallback run id, memoized the first time :func:`get_session_run_id`
+#: generates one. See that function's docstring for why this is a separate,
+#: cached wrapper rather than a change to :func:`derive_run_id` itself.
+_session_run_id_cache: str | None = None
+
+
+def get_session_run_id(config: JiraReportingConfig) -> str:
+    """Like :func:`derive_run_id`, but memoized process-wide.
+
+    ``derive_run_id()`` itself is intentionally uncached (a fresh fallback
+    id every call when ``$JIRA_RUN_ID`` is unset -- see its own tests). This
+    wrapper is what every reporting entrypoint sharing one pytest
+    *invocation* should call instead, so "all results belonging to one
+    pytest execution share one run ID" holds even when nobody set
+    ``$JIRA_RUN_ID`` explicitly: the sanity flow's failover/relocate
+    boundaries and every marker-based smoke Test Result all resolve to the
+    exact same generated id within one process, without requiring a shared
+    pytest fixture.
+
+    When ``config.run_id`` (``$JIRA_RUN_ID``) *is* set, this is equivalent
+    to ``derive_run_id`` (and the process-wide cache is never touched) --
+    the explicit value always wins and is never overridden by whatever
+    happened to be cached first.
+    """
+    if config.run_id:
+        return config.run_id
+    global _session_run_id_cache
+    if _session_run_id_cache is None:
+        _session_run_id_cache = derive_run_id(config)
+    return _session_run_id_cache
+
+
+def reset_session_run_id_cache() -> None:
+    """Test-only: clear the process-wide fallback run id cache.
+
+    Production code never calls this -- one pytest process should keep one
+    fallback run id for its whole lifetime. Unit tests that exercise the
+    no-``$JIRA_RUN_ID``-set fallback path call this (via an autouse fixture,
+    see ``tests/reporting/conftest.py``) so one test's generated id can
+    never leak into another's assertions.
+    """
+    global _session_run_id_cache
+    _session_run_id_cache = None
 
 
 class JiraScenarioReporter:

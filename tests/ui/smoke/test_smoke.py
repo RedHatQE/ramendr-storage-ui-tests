@@ -8,6 +8,17 @@ TestInfraSmoke — assertions against live cluster state via oc, plus HammerDB
                  No Playwright.
 TestUiSmoke    — Playwright tests against the ACM hub console UI.
 
+Jira reporting: every test below decorated with ``@_jira_deployment_smoke``
+is one applicable check contributing to the aggregated
+``deployment_smoke_validation`` (RHELTEST-3612) Jira Test Result -- one
+Test Result for the *whole* smoke suite per invocation (PASS only if every
+applicable-for-the-active-PATTERN_VARIANT check below passed), not one per
+test. See ``reporting/pytest_jira_plugin.py``'s ``jira_aggregate_test_case``
+marker. The four ``test_drpartner_*`` variant-identity checks are
+deliberately NOT included -- they represent separate, not-yet-approved
+Jira Test Cases (see ``reporting/jira_test_cases.py``), not
+``deployment_smoke_validation``.
+
 Usage:
     pytest tests/ui/smoke/test_smoke.py -m smoke
 """
@@ -94,6 +105,14 @@ _skip_without_minimal = pytest.mark.skipif(
     reason="Requires PATTERN_VARIANT=drpartner-minimal",
 )
 
+#: Applied to every smoke check that contributes to the aggregated
+#: deployment_smoke_validation (RHELTEST-3612) Jira Test Result -- see the
+#: module docstring. Deliberately NOT applied to the four test_drpartner_*
+#: variant-identity checks below.
+_jira_deployment_smoke = pytest.mark.jira_aggregate_test_case(
+    "deployment_smoke_validation", scenario="ODF deployment smoke validation"
+)
+
 
 def _vm_references_pvc(vm: dict, pvc_name: str) -> bool:
     volumes = vm.get("spec", {}).get("template", {}).get("spec", {}).get("volumes", [])
@@ -118,6 +137,7 @@ class TestInfraSmoke:
     # ArgoCD
     # ------------------------------------------------------------------
 
+    @_jira_deployment_smoke
     def test_argocd_apps_synced_healthy(self, hub_kubeconfig):
         """All ArgoCD Applications in the hub namespace are Synced/Healthy.
 
@@ -161,6 +181,7 @@ class TestInfraSmoke:
     # ACM ManagedClusters
     # ------------------------------------------------------------------
 
+    @_jira_deployment_smoke
     def test_managed_clusters_available(self, hub_kubeconfig):
         """ocp-primary and ocp-secondary ManagedClusters are joined and available."""
         expected = {"ocp-primary", "ocp-secondary"}
@@ -200,6 +221,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_odf
+    @_jira_deployment_smoke
     def test_odf_storagecluster_ready(self, hub_kubeconfig):
         """ocs-storagecluster in openshift-storage on the hub is Ready."""
         raw = run_oc(
@@ -224,6 +246,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_edge_vms
+    @_jira_deployment_smoke
     def test_vms_running_on_primary(self, primary_kubeconfig):
         """All VMs in gitops-vms on ocp-primary are Running and ready."""
         raw = run_oc(
@@ -257,6 +280,7 @@ class TestInfraSmoke:
         )
 
     @_skip_without_qe_fleet
+    @_jira_deployment_smoke
     def test_mixed_vm_fleet_composition(self, primary_kubeconfig):
         """gitops-vms has 2 Linux + 1 Windows 2022 + 1 Windows 2025 edge VMs.
 
@@ -306,6 +330,7 @@ class TestInfraSmoke:
         )
 
     @_skip_without_qe_fleet
+    @_jira_deployment_smoke
     def test_windows_vms_have_minimum_os_disk(self, primary_kubeconfig):
         """Windows VM OS disks are at least 45 Gi (fork chart default)."""
         raw = run_oc(
@@ -367,6 +392,7 @@ class TestInfraSmoke:
         )
 
     @_skip_without_qe_fleet
+    @_jira_deployment_smoke
     def test_vms_have_two_data_disks(
         self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
     ):
@@ -570,6 +596,7 @@ class TestInfraSmoke:
         )
 
     @_skip_without_vm_drpc
+    @_jira_deployment_smoke
     def test_vm_disks_dr_protected_in_vrg(
         self, hub_kubeconfig, primary_kubeconfig, secondary_kubeconfig
     ):
@@ -634,6 +661,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_edge_vms
+    @_jira_deployment_smoke
     def test_vm_external_secrets_present(self, primary_kubeconfig):
         """At least one ExternalSecret exists in gitops-vms on ocp-primary.
 
@@ -661,6 +689,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_qe_fleet
+    @_jira_deployment_smoke
     def test_hammerdb_schema_present_on_all_vms(self, hub_kubeconfig, tmp_path):
         """HammerDB TPC-C schema is present on every edge VM after redeploy.
 
@@ -698,6 +727,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_vm_drpc
+    @_jira_deployment_smoke
     def test_drpolicy_validated(self, hub_kubeconfig):
         """Both DRPolicies (2m-novm, 2m-vm) have Validated=True."""
         expected = {"2m-novm", "2m-vm"}
@@ -733,6 +763,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_odf
+    @_jira_deployment_smoke
     def test_mirrorpeer_setup_complete(self, hub_kubeconfig):
         """MirrorPeer mirrorpeer-resilient has completed peering/setup."""
         raw = run_oc(
@@ -753,6 +784,7 @@ class TestInfraSmoke:
     # ------------------------------------------------------------------
 
     @_skip_without_vm_drpc
+    @_jira_deployment_smoke
     def test_drpc_deployed_available(self, hub_kubeconfig):
         """DRPlacementControl gitops-vm-protection is Deployed (or Relocated) and Available."""
         drpc = wait_for_drpc_protected(hub_kubeconfig)
@@ -821,6 +853,7 @@ class TestInfraSmoke:
     # Vault
     # ------------------------------------------------------------------
 
+    @_jira_deployment_smoke
     def test_vault_running(self, hub_kubeconfig):
         """Pod vault-0 in namespace vault on the hub is Running."""
         raw = run_oc(
@@ -842,6 +875,7 @@ class TestInfraSmoke:
     # ExternalSecrets across all hub namespaces
     # ------------------------------------------------------------------
 
+    @_jira_deployment_smoke
     def test_external_secrets_synced(self, hub_kubeconfig):
         """No ExternalSecret on the hub has a Degraded / non-SecretSynced condition."""
         raw = run_oc(
@@ -903,6 +937,7 @@ class TestUiSmoke:
     """Verify the RamenDR ACM hub console UI after deployment."""
 
     @_skip_without_vm_drpc
+    @_jira_deployment_smoke
     def test_disaster_recovery_ui(self, page, hub_kubeconfig):
         """Full DR UI walkthrough: login → policy validated → DRPC healthy.
 

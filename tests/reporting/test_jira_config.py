@@ -8,11 +8,34 @@ from reporting.jira_config import reporting_config_from_env
 from reporting.jira_models import TestOutcome
 
 
-def test_defaults_are_maximally_safe_when_env_is_empty():
+def test_defaults_are_normal_reporting_when_env_is_empty():
+    """Phase 2 (normal-default) behavior: reporting is on and writes are
+    real by default -- an ordinary ``pytest ...`` invocation (with Jira
+    credentials supplied by the environment/CI secret store) reports every
+    result automatically, without exporting any reporting flags."""
     config = reporting_config_from_env({})
-    assert config.report_results is False
-    assert config.dry_run is True
+    assert config.report_results is True
+    assert config.dry_run is False
     assert config.strict is False
+
+
+def test_report_results_can_be_explicitly_disabled_for_local_dev():
+    """A developer without Jira credentials can still opt out explicitly --
+    the default changed, but the override still works."""
+    config = reporting_config_from_env({"JIRA_REPORT_RESULTS": "false"})
+    assert config.report_results is False
+
+
+def test_dry_run_can_be_explicitly_enabled_for_local_dev():
+    """A developer who wants reporting "on" (parent Test Case still
+    validated with a real read-only GET) but no real write can still opt
+    into dry-run explicitly -- the default changed, but the override still
+    works."""
+    config = reporting_config_from_env(
+        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "true"}
+    )
+    assert config.report_results is True
+    assert config.dry_run is True
 
 
 def test_defaults_match_phase_a_discovered_production_schema():

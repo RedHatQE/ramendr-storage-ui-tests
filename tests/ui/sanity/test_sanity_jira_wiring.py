@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import test_sanity as sanity
 
+import reporting.jira_results as jira_results
 from reporting.jira_client import JiraWriteError
 
 _HEALTHY_PRIMARY_FRESH = {
@@ -250,11 +251,20 @@ def _make_save_hammerdb_baseline_snapshot(raise_for_phase: str | None = None):
     return fn
 
 
-def _patch_common(monkeypatch, *, initial_state: dict, backend_phase: str, client):
+def _patch_common(
+    monkeypatch, *, initial_state: dict, backend_phase: str, client, force_full=False
+):
     """Patch every DR/Playwright/oc-touching dependency of test_sanity.py's
-    adaptive flow to a no-op or scripted fake, and force RAMENDR_SANITY_FORCE_FULL
-    off so the resume-aware branch (not _run_force_full_sanity_dr_flow) runs."""
-    monkeypatch.setattr(sanity, "_FORCE_FULL_SANITY", False)
+    DR flow to a no-op or scripted fake.
+
+    ``force_full=False`` (default) forces RAMENDR_SANITY_FORCE_FULL off so
+    the resume-aware adaptive branch runs; ``force_full=True`` leaves
+    ``_FORCE_FULL_SANITY`` at its real default (``True``) so
+    ``_run_force_full_sanity_dr_flow`` runs instead -- both flows share the
+    same ``DRPCPage`` method surface, so the same ``_FakeDRPCPage`` covers
+    either one.
+    """
+    monkeypatch.setattr(sanity, "_FORCE_FULL_SANITY", force_full)
     monkeypatch.setattr(sanity, "_require_ui_credentials", lambda: None)
     monkeypatch.setattr(sanity, "LoginPage", _FakeLoginPage)
     monkeypatch.setattr(sanity, "DashboardPage", _FakeDashboardPage)
@@ -293,7 +303,11 @@ def _patch_common(monkeypatch, *, initial_state: dict, backend_phase: str, clien
         sanity, "_wait_for_relocate_secondary_cleared", lambda *a, **kw: None
     )
     monkeypatch.setattr(sanity, "_relocate_best_effort_progress", lambda *a, **kw: None)
-    monkeypatch.setattr(sanity, "JiraClient", lambda config: client)
+    # _jira_reporting_setup() now builds its client via
+    # reporting.jira_results.build_jira_client() rather than instantiating
+    # JiraClient directly in test_sanity.py -- patch it where it's actually
+    # constructed.
+    monkeypatch.setattr(jira_results, "JiraClient", lambda config: client)
 
 
 def _enable_jira_env(monkeypatch, **overrides):
@@ -634,3 +648,176 @@ def test_jira_reporting_failure_after_pass_is_swallowed_by_default(monkeypatch):
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
     assert client.outcome_for_parent("RHELTEST-3610") == "3"  # relocate still PASS
+
+
+# --------------------------------------------------------------------------
+# _run_force_full_sanity_dr_flow (RAMENDR_SANITY_FORCE_FULL=1, the DEFAULT
+# flow) -- mirrors the adaptive-flow coverage above. Both flows share the
+# same DRPCPage method surface, so the same _FakeDRPCPage covers either.
+# --------------------------------------------------------------------------
+
+
+def test_force_full_fresh_run_reports_failover_pass_and_relocate_pass(monkeypatch):
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_PRIMARY_FRESH,
+        backend_phase="Deployed",
+        client=client,
+        force_full=True,
+    )
+    _enable_jira_env(monkeypatch)
+
+    _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
+
+    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS
+    assert client.outcome_for_parent("RHELTEST-3610") == "3"  # PASS
+
+
+def test_force_full_failover_and_relocate_share_one_run_id(monkeypatch):
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_PRIMARY_FRESH,
+        backend_phase="Deployed",
+        client=client,
+        force_full=True,
+    )
+    _enable_jira_env(monkeypatch, JIRA_RUN_ID="shared-run-force-full")
+
+    _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
+
+    failover_summary = client.summary_for_parent("RHELTEST-3600")
+    relocate_summary = client.summary_for_parent("RHELTEST-3610")
+    assert failover_summary.endswith("| shared-run-force-full")
+    assert relocate_summary.endswith("| shared-run-force-full")
+
+
+def test_force_full_failure_during_failover_reports_only_failover_fail(monkeypatch):
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_PRIMARY_FRESH,
+        backend_phase="Deployed",
+        client=client,
+        force_full=True,
+    )
+    _enable_jira_env(monkeypatch)
+
+    import pytest
+
+    with pytest.raises(AssertionError, match="failover"):
+        _run_sanity_test(
+            monkeypatch,
+            run_dr_data_validation=_make_run_dr_data_validation(
+                raise_for_phase="failover"
+            ),
+        )
+
+    assert client.outcome_for_parent("RHELTEST-3600") == "4"  # FAIL
+    assert client.outcome_for_parent("RHELTEST-3610") is None  # never even started
+
+
+def test_force_full_failover_pass_then_relocate_fail_reported_independently(
+    monkeypatch,
+):
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_PRIMARY_FRESH,
+        backend_phase="Deployed",
+        client=client,
+        force_full=True,
+    )
+    _enable_jira_env(monkeypatch)
+
+    import pytest
+
+    with pytest.raises(AssertionError, match="relocate"):
+        _run_sanity_test(
+            monkeypatch,
+            run_dr_data_validation=_make_run_dr_data_validation(
+                raise_for_phase="relocate"
+            ),
+        )
+
+    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS
+    assert client.outcome_for_parent("RHELTEST-3610") == "4"  # FAIL
+
+
+# --------------------------------------------------------------------------
+# Regression coverage: _run_force_full_sanity_dr_flow previously wrapped
+# dialog validation/baseline-snapshot steps INSIDE the `with
+# jira_test_case_result(...)` block, so a precondition failure before
+# initiate_failover_dialog()/initiate_relocate_dialog() would have
+# fabricated a Jira FAIL for a DR action that was never actually attempted
+# -- the same bug the adaptive flow's *_initiated-flag gating (tested
+# above) already avoided. _run_force_full_sanity_dr_flow now uses the same
+# manual start()/close_success()/close_failure() pattern, gated on
+# failover_initiated/relocate_initiated.
+# --------------------------------------------------------------------------
+
+
+def test_force_full_failure_before_failover_initiation_reports_no_jira_result(
+    monkeypatch,
+):
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_PRIMARY_FRESH,
+        backend_phase="Deployed",
+        client=client,
+        force_full=True,
+    )
+    monkeypatch.setattr(
+        sanity,
+        "_save_hammerdb_baseline_snapshot",
+        _make_save_hammerdb_baseline_snapshot(raise_for_phase="failover"),
+    )
+    _enable_jira_env(monkeypatch)
+
+    import pytest
+
+    with pytest.raises(AssertionError, match="baseline snapshot"):
+        _run_sanity_test(
+            monkeypatch, run_dr_data_validation=_make_run_dr_data_validation()
+        )
+
+    # initiate_failover_dialog() was never reached -> failover_initiated
+    # stayed False -> no Jira Test Result may exist for either scenario.
+    assert client.created == []
+    assert client.outcome_for_parent("RHELTEST-3600") is None
+    assert client.outcome_for_parent("RHELTEST-3610") is None
+
+
+def test_force_full_failure_before_relocate_initiation_reports_no_jira_result(
+    monkeypatch,
+):
+    """Failover genuinely passes and closes PASS; the baseline snapshot for
+    relocate then raises before initiate_relocate_dialog() runs, so
+    relocate_initiated stays False and RHELTEST-3610 must get no Jira Test
+    Result. RHELTEST-3600 keeps its already-committed PASS."""
+    client = FakeSanityJiraClient()
+    _patch_common(
+        monkeypatch,
+        initial_state=_HEALTHY_PRIMARY_FRESH,
+        backend_phase="Deployed",
+        client=client,
+        force_full=True,
+    )
+    monkeypatch.setattr(
+        sanity,
+        "_save_hammerdb_baseline_snapshot",
+        _make_save_hammerdb_baseline_snapshot(raise_for_phase="relocate"),
+    )
+    _enable_jira_env(monkeypatch)
+
+    import pytest
+
+    with pytest.raises(AssertionError, match="baseline snapshot"):
+        _run_sanity_test(
+            monkeypatch, run_dr_data_validation=_make_run_dr_data_validation()
+        )
+
+    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS, unaffected
+    assert client.outcome_for_parent("RHELTEST-3610") is None  # never initiated

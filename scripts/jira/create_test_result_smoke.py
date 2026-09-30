@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """Controlled smoke-test CLI: report ONE Ramen DR Test Result to Jira (Phase B/C).
 
-Defaults are maximally safe:
+This is a manual, ad hoc debugging tool -- distinct from "normal RamenDR
+automation" (the pytest smoke/sanity suites), which now reports by default
+(see ``reporting/jira_config.py``). This CLI deliberately keeps its OWN
+historical, maximally-safe defaults regardless of that change, since an
+operator reaching for a manual one-off smoke/debug tool should never be
+surprised by a real write just because the shared config default flipped:
 
-- ``JIRA_REPORT_RESULTS`` defaults to ``false`` -- with it unset/false, this
-  never even reads from Jira; it just builds and prints the payload.
-- ``JIRA_REPORT_DRY_RUN`` defaults to ``true`` -- even with reporting
-  enabled, no write happens unless dry-run is explicitly disabled.
+- ``JIRA_REPORT_RESULTS`` defaults to ``false`` here (even though
+  ``reporting_config_from_env()`` itself now defaults it to ``true``) --
+  with it unset/false, this never even reads from Jira; it just builds and
+  prints the payload.
+- ``JIRA_REPORT_DRY_RUN`` defaults to ``true`` here (likewise overriding
+  the shared ``false`` default) -- even with reporting enabled, no write
+  happens unless dry-run is explicitly disabled.
 - A **real** Jira write additionally requires ``--confirm`` on the command
   line. Without it, the CLI refuses and exits non-zero rather than writing.
+- Explicitly setting ``JIRA_REPORT_RESULTS`` / ``JIRA_REPORT_DRY_RUN`` in
+  the environment always overrides these CLI-specific safe defaults, same
+  as before.
 
 So a real write only happens when ALL of these are true at once:
 ``JIRA_REPORT_RESULTS=true`` and ``JIRA_REPORT_DRY_RUN=false`` and
@@ -34,6 +45,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
 import time
 import uuid
@@ -105,6 +117,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> int:
     config = reporting_config_from_env()
+    # This CLI's own historical, maximally-safe defaults always win over
+    # reporting_config_from_env()'s "normal automation" defaults when the
+    # corresponding env var was never set -- see the module docstring for
+    # why a manual smoke/debug tool must never silently inherit a real-write
+    # default just because the shared pytest-facing default changed.
+    if os.environ.get("JIRA_REPORT_RESULTS") is None:
+        config = dataclasses.replace(config, report_results=False)
+    if os.environ.get("JIRA_REPORT_DRY_RUN") is None:
+        config = dataclasses.replace(config, dry_run=True)
     if args.dry_run:
         config = dataclasses.replace(config, dry_run=True)
 

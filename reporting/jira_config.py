@@ -1,11 +1,27 @@
-"""Environment-driven configuration for Jira Test Result reporting (Phase B/C).
+"""Environment-driven configuration for Jira Test Result reporting.
 
-Every flag defaults to the safest option: reporting is disabled
-(``JIRA_REPORT_RESULTS=false``), and even once enabled, dry-run is the
-default (``JIRA_REPORT_DRY_RUN=true``) so a real Jira write requires two
-deliberate, explicit opt-ins. None of the values here are credentials --
-this config is safe to log/print (unlike ``reporting.jira_client.JiraConfig``,
-which must never be printed as a whole).
+**Phase 2 (normal-default) behavior:** every supported RamenDR automation
+execution reports its result to Jira, PASS or FAIL, without anyone having to
+export reporting flags -- ``JIRA_REPORT_RESULTS`` and ``JIRA_REPORT_DRY_RUN``
+both now default to the *real-write* setting (``true`` / ``false``
+respectively). This is a deliberate reversal of the Phase B/C pilot's
+opt-in-only defaults (see git history / ``docs/jira-test-result-reporting.md``
+"Migration: pilot opt-in -> normal default" for the rationale): the pilot is
+over, and RamenDR's Jira dashboard requires every real execution -- including
+failures -- to be visible.
+
+Both flags remain fully overridable via the environment for development/
+debugging: set ``JIRA_REPORT_RESULTS=false`` to make a local run perform
+*zero* Jira calls (no credentials needed), or ``JIRA_REPORT_DRY_RUN=true`` to
+keep reporting "on" (still validates the parent Test Case with a real
+read-only GET) while deliberately skipping every write. See
+``reporting.jira_results.build_jira_client()`` for what happens when
+reporting is enabled but credentials are missing: a clear, fail-fast error,
+never a silent skip.
+
+None of the values here are credentials -- this config is safe to log/print
+(unlike ``reporting.jira_client.JiraConfig``, which must never be printed as
+a whole).
 """
 
 from __future__ import annotations
@@ -95,11 +111,19 @@ class JiraReportingConfig:
 def reporting_config_from_env(
     env: Mapping[str, str] | None = None,
 ) -> JiraReportingConfig:
-    """Build a :class:`JiraReportingConfig` from environment variables."""
+    """Build a :class:`JiraReportingConfig` from environment variables.
+
+    Defaults are the *normal* (real-reporting) behavior: ``report_results``
+    defaults to ``True`` and ``dry_run`` defaults to ``False``, so an
+    ordinary ``pytest ...`` invocation -- with Jira credentials supplied by
+    the environment/CI secret store -- reports every result automatically.
+    Set ``JIRA_REPORT_RESULTS=false`` or ``JIRA_REPORT_DRY_RUN=true``
+    explicitly to opt out for local development/debugging.
+    """
     source = env if env is not None else os.environ
     return JiraReportingConfig(
-        report_results=_bool_env(source, "JIRA_REPORT_RESULTS", False),
-        dry_run=_bool_env(source, "JIRA_REPORT_DRY_RUN", True),
+        report_results=_bool_env(source, "JIRA_REPORT_RESULTS", True),
+        dry_run=_bool_env(source, "JIRA_REPORT_DRY_RUN", False),
         strict=_bool_env(source, "JIRA_REPORT_STRICT", False),
         project_key=source.get("JIRA_PROJECT_KEY") or DEFAULT_PROJECT_KEY,
         test_result_issue_type_id=(
