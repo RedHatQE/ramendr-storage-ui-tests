@@ -45,6 +45,14 @@ class TestResultExecution:
     ``scenario`` is a short human-readable label (e.g. the pytest scenario
     name) used in the Jira summary/description -- distinct from
     ``test_case_key``.
+
+    ``test_function`` identifies the actual pytest test(s) that produced
+    this result (e.g. a nodeid, or a module path for an aggregate result
+    covering many tests) -- shown verbatim in the "Test function" line of
+    the Jira description. Falls back to ``"unknown"`` when not supplied;
+    never guessed or hard-coded by the reporting layer itself, since a
+    wrong value here would misattribute a real Jira issue to the wrong
+    test.
     """
 
     #: Not a pytest test class despite the name -- silence collection warnings.
@@ -60,6 +68,7 @@ class TestResultExecution:
     ci_job_url: str | None = None
     duration_seconds: float | None = None
     failure_summary: str | None = None
+    test_function: str | None = None
 
     def __post_init__(self) -> None:
         missing = [

@@ -202,6 +202,48 @@ EOF
   fi
   echo ""
 
+  # --- Scenario 6: negative case - mssql-hammerdb (nested 2 spaces under
+  #     clusterGroup.secrets) is genuinely missing its password field, and
+  #     is immediately followed by an UNRELATED, LOWER-indentation (root
+  #     level) secret list whose own nested fields use standard (+2 deeper
+  #     than their "fields:" key, not the "compact" same-column style)
+  #     indentation, so NONE of its lines land at exactly mssql-hammerdb's
+  #     own 2-space anchor indentation. A boundary that only recognizes a
+  #     SAME-indentation sibling (never "indentation decreased") finds no
+  #     match anywhere in the rest of the file and falls back to "block
+  #     extends to end of file" -- silently combining mssql-hammerdb's
+  #     fields with the unrelated root-level secret's "password". Must fail
+  #     cleanly instead (and never combine fields across the boundary). ---
+  echo "--- Scenario 6: negative case, password missing + lower-indentation secret supplies one ---"
+  cat >"$tmpdir/case6.yaml" <<'EOF'
+clusterGroup:
+  secrets:
+  - name: mssql-hammerdb
+    fields:
+      - name: sa_password
+        value: BrokenSaPass555
+      - name: user
+        value: hammerdb
+- name: root-level-secret
+  fields:
+    - name: password
+      value: ShouldNotLeakPass666
+EOF
+  reset_env
+  if VALUES_SECRET="$tmpdir/case6.yaml" load_mssql_credentials; then
+    echo "  FAIL Scenario 6: expected failure (missing password field) but load_mssql_credentials returned 0"
+    TOTAL_FAIL=$((TOTAL_FAIL + 1))
+  elif [[ "${DR_VALIDATION_MSSQL_PASSWORD:-}" == "ShouldNotLeakPass666" ]]; then
+    echo "  FAIL Scenario 6: leaked root-level-secret's password across the mssql-hammerdb block boundary"
+    TOTAL_FAIL=$((TOTAL_FAIL + 1))
+  elif [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" || -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
+    echo "  FAIL Scenario 6: expected no partial credentials set, but some were populated"
+    TOTAL_FAIL=$((TOTAL_FAIL + 1))
+  else
+    echo "  OK   Scenario 6: correctly failed without combining fields across the lower-indentation boundary"
+  fi
+  echo ""
+
   if [[ $TOTAL_FAIL -gt 0 ]]; then
     echo "=== RESULT: $TOTAL_FAIL scenario(s) failed ==="
     exit 1

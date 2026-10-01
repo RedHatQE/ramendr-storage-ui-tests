@@ -40,7 +40,6 @@ RAMEN_DR_LABELS: list[str] = ["ramen-dr", "automation"]
 #: Fixed lines/values for the ADF description, per the Phase B/C spec.
 _AUTOMATION_LINE = "Automation: pytest + Playwright"
 _REPOSITORY_LINE = "Repository: ramendr-storage-ui-tests"
-_TEST_FUNCTION = "tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui"
 
 #: Keep any sanitized failure text short -- never put a full stack trace in Jira.
 MAX_FAILURE_SUMMARY_LENGTH = 500
@@ -153,7 +152,7 @@ def build_description_adf(execution: TestResultExecution) -> dict[str, Any]:
         _REPOSITORY_LINE,
         f"Test Case: {execution.test_case_key}",
         f"Scenario: {execution.scenario}",
-        f"Test function: {_TEST_FUNCTION}",
+        f"Test function: {execution.test_function or _UNKNOWN}",
         f"Compose Version: {execution.compose_version or _COMPOSE_NOT_SUPPLIED_DESCRIPTION}",
         f"Git commit: {execution.git_commit or _UNKNOWN}",
         f"CI run: {execution.ci_job_url or _UNKNOWN}",
@@ -344,10 +343,10 @@ def report_test_result(
 
     Three gates, checked in order, each stopping strictly before any *write*:
 
-    1. ``config.report_results`` is False (default) -> returns immediately.
-       The payload is still built and returned, but **zero** Jira calls are
-       made (not even a GET).
-    2. ``config.dry_run`` is True (default once reporting is enabled) ->
+    1. ``config.report_results`` is False (explicit opt-out; the default is
+       True) -> returns immediately. The payload is still built and
+       returned, but **zero** Jira calls are made (not even a GET).
+    2. ``config.dry_run`` is True (explicit opt-in; the default is False) ->
        validates the parent Test Case with a real (read-only) GET, but
        issues no writes.
     3. Otherwise -> creates the issue, re-fetches it to observe its *actual*
@@ -388,7 +387,7 @@ def report_test_result(
         )
 
     issue_key = client.create_issue(fields)
-    logger.info(
+    logger.warning(
         "Jira issue %s created for test case %s (run_id=%s) -- logged immediately "
         "in case a later step (snapshot fetch, transition lookup, validation) "
         "raises before the final ReportResult is returned",
@@ -397,23 +396,33 @@ def report_test_result(
         execution.run_id,
     )
 
-    # Never assume the initial status -- observe it, and the transitions
-    # Jira actually offers, before attempting to move it anywhere.
-    initial_snapshot = _fetch_issue_snapshot(
-        client, issue_key, config.compose_version_field_id
-    )
-    transitions = client.get_transitions(issue_key)
-    transition_id = config.transition_id_for(execution.outcome)
-    _require_transition_available(transitions, transition_id)
+    try:
+        # Never assume the initial status -- observe it, and the transitions
+        # Jira actually offers, before attempting to move it anywhere.
+        initial_snapshot = _fetch_issue_snapshot(
+            client, issue_key, config.compose_version_field_id
+        )
+        transitions = client.get_transitions(issue_key)
+        transition_id = config.transition_id_for(execution.outcome)
+        _require_transition_available(transitions, transition_id)
 
-    client.transition_issue(issue_key, transition_id)
+        client.transition_issue(issue_key, transition_id)
 
-    # Re-fetch once more: record the *actual* final status, and confirm --
-    # from a fresh read, not from the payload we sent -- that the parent,
-    # labels, and Compose Version were really stored as intended.
-    final_snapshot = _fetch_issue_snapshot(
-        client, issue_key, config.compose_version_field_id
-    )
+        # Re-fetch once more: record the *actual* final status, and confirm --
+        # from a fresh read, not from the payload we sent -- that the parent,
+        # labels, and Compose Version were really stored as intended.
+        final_snapshot = _fetch_issue_snapshot(
+            client, issue_key, config.compose_version_field_id
+        )
+    except Exception as exc:
+        # The issue was already created (and logged above) -- every caller
+        # that only shows the exception text (the CLI's "Jira request
+        # failed: <exc>", JiraScenarioReporter's warning log) must still be
+        # able to find the real issue in Jira, so the key travels with the
+        # error. The original exception is preserved as __cause__.
+        raise type(exc)(
+            f"issue {issue_key} was created but a post-create step failed: {exc}"
+        ) from exc
 
     return ReportResult(
         dry_run=False,
@@ -576,12 +585,14 @@ class JiraScenarioReporter:
         run_id: str,
         client: JiraClient | None,
         config: JiraReportingConfig,
+        test_function: str | None = None,
     ) -> None:
         self.scenario_key = scenario_key
         self.scenario = scenario
         self.run_id = run_id
         self.client = client
         self.config = config
+        self.test_function = test_function
         self.last_result: ReportResult | None = None
         self._started_at: float | None = None
         self._closed = False
@@ -671,6 +682,7 @@ class JiraScenarioReporter:
             ci_job_url=self.config.ci_job_url,
             duration_seconds=duration_seconds,
             failure_summary=failure_summary,
+            test_function=self.test_function,
         )
         return report_test_result(execution, client=self.client, config=self.config)
 
@@ -682,6 +694,7 @@ def jira_test_case_result(
     run_id: str,
     client: JiraClient | None,
     config: JiraReportingConfig,
+    test_function: str | None = None,
 ) -> JiraScenarioReporter:
     """Build a per-scenario Jira reporting boundary. See :class:`JiraScenarioReporter`.
 
@@ -690,6 +703,11 @@ def jira_test_case_result(
     key raises ``KeyError`` only once the boundary is actually closed (i.e.
     reporting is attempted), not at construction time, so building one
     eagerly (e.g. before deciding whether it will ever be used) is safe.
+
+    ``test_function`` is shown verbatim in the Jira description's "Test
+    function" line (falls back to "unknown" when omitted) -- pass the
+    actual pytest test identifying this scenario's caller (e.g. its
+    nodeid), never a different test's.
     """
     return JiraScenarioReporter(
         scenario_key,
@@ -697,4 +715,5 @@ def jira_test_case_result(
         run_id=run_id,
         client=client,
         config=config,
+        test_function=test_function,
     )

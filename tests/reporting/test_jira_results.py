@@ -37,6 +37,7 @@ def _execution(**overrides) -> TestResultExecution:
         compose_version="RHEL-9.8.0",
         git_commit="abc1234",
         ci_job_url="https://ci.example.com/job/1",
+        test_function="tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui",
     )
     defaults.update(overrides)
     return TestResultExecution(**defaults)
@@ -175,7 +176,12 @@ def test_adf_description_never_embeds_a_full_stack_trace():
 def test_adf_description_missing_optional_facts_render_as_unknown():
     lines = _adf_lines(
         build_description_adf(
-            _execution(compose_version=None, git_commit=None, ci_job_url=None)
+            _execution(
+                compose_version=None,
+                git_commit=None,
+                ci_job_url=None,
+                test_function=None,
+            )
         )
     )
     joined = "\n".join(lines)
@@ -185,6 +191,7 @@ def test_adf_description_missing_optional_facts_render_as_unknown():
     assert "Compose Version: unknown" not in joined
     assert "Git commit: unknown" in joined
     assert "CI run: unknown" in joined
+    assert "Test function: unknown" in joined
 
 
 def test_adf_description_compose_not_supplied_never_shows_a_placeholder_value():
@@ -569,6 +576,30 @@ def test_report_test_result_refuses_transition_not_currently_available():
             _execution(outcome=TestOutcome.PASS), client=client, config=config
         )
     assert client.transitioned is None  # never attempted
+
+
+def test_report_test_result_post_create_failure_includes_the_created_issue_key():
+    """The issue is already created (and real) by the time any post-create
+    step (snapshot fetch, transition lookup, validation, transition) can
+    fail -- every caller that only shows the exception text must still be
+    able to find it, so the key must travel with the error, and the
+    original exception must be preserved as the cause (never discarded)."""
+    config = reporting_config_from_env(
+        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
+    )
+    # No transition id matches TestOutcome.PASS's "3" -- _require_transition_available
+    # raises after the issue has already been created.
+    client = FakeReportingClient(transitions=[{"id": "2", "name": "New"}])
+
+    with pytest.raises(JiraClientError) as exc_info:
+        report_test_result(
+            _execution(outcome=TestOutcome.PASS), client=client, config=config
+        )
+
+    assert client.created_fields is not None  # the write genuinely happened
+    assert "RHELTEST-9001" in str(exc_info.value)  # the real, created key
+    assert exc_info.value.__cause__ is not None  # original exception preserved
+    assert "not currently available" in str(exc_info.value.__cause__)
 
 
 def test_report_test_result_write_flow_validates_parent_first():

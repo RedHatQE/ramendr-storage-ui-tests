@@ -470,6 +470,38 @@ def test_aggregate_all_passing_reports_exactly_one_pass(monkeypatch):
     assert client.transitioned == [(client.transitioned[0][0], "3")]  # PASS
 
 
+def test_aggregate_test_function_is_the_module_path_of_the_first_counted_test(
+    monkeypatch,
+):
+    """The aggregate's "Test function" must reflect the real smoke module
+    that was actually run -- derived generically from the nodeid, never a
+    different module hard-coded in the plugin itself."""
+    _enable_jira_env(monkeypatch)
+    client = FakeClient()
+    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
+
+    shared_config = _FakeConfig()
+    item_a = _FakeItem(
+        marker=_aggregate_marker(),
+        nodeid="tests/ui/smoke/test_smoke.py::TestInfraSmoke::test_a",
+        config=shared_config,
+    )
+    item_b = _FakeItem(
+        marker=_aggregate_marker(),
+        nodeid="tests/ui/smoke/test_smoke.py::TestInfraSmoke::test_b",
+        config=shared_config,
+    )
+    _drive_makereport(item_a, _FakeCall(when="call"), _FakeReport(passed=True))
+    _drive_makereport(item_b, _FakeCall(when="call"), _FakeReport(passed=True))
+    _finish_session(shared_config)
+
+    description_text = str(client.created[0]["description"])
+    assert "Test function: tests/ui/smoke/test_smoke.py" in description_text
+    # Never the full nodeid of whichever individual test happened to be
+    # considered first -- just the shared module path.
+    assert "TestInfraSmoke" not in description_text
+
+
 def test_aggregate_one_failure_reports_exactly_one_fail_naming_the_node_id(
     monkeypatch,
 ):
@@ -685,7 +717,10 @@ def test_aggregate_teardown_failure_after_call_failure_is_not_duplicated(monkeyp
     client = FakeClient()
     monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
 
-    item = _FakeItem(marker=_aggregate_marker(), nodeid="test_a")
+    # Module path ("mod.py") deliberately differs from the bare nodeid used
+    # elsewhere in this file: it is shown separately as "Test function", so
+    # it must not collide with the "test_a" substring being counted below.
+    item = _FakeItem(marker=_aggregate_marker(), nodeid="mod.py::test_a")
     _drive_makereport(
         item,
         _FakeCall(when="call", excinfo=_FakeExcInfo(RuntimeError("call boom"))),

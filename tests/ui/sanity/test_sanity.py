@@ -112,6 +112,12 @@ _HAMMERDB_OLTP_FRESHNESS_MAX_AGE_SECONDS = float(
 )
 _hammerdb_oltp_started = False
 
+#: Shown verbatim in every Jira Test Result's "Test function" line reported
+#: from this module -- both DR scenarios (failover, relocate) are reported
+#: from inside this one pytest test, regardless of which internal flow
+#: (force-full or adaptive/resume) drives them.
+_JIRA_TEST_FUNCTION = "tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui"
+
 
 def _jira_reporting_setup() -> tuple[JiraClient | None, JiraReportingConfig, str]:
     """Build the (client, config, run_id) shared by both DR scenarios reported
@@ -1042,6 +1048,7 @@ def _run_force_full_sanity_dr_flow(
         run_id=run_id,
         client=jira_client,
         config=jira_config,
+        test_function=_JIRA_TEST_FUNCTION,
     ).start()
     failover_initiated = False
     try:
@@ -1110,6 +1117,7 @@ def _run_force_full_sanity_dr_flow(
         run_id=run_id,
         client=jira_client,
         config=jira_config,
+        test_function=_JIRA_TEST_FUNCTION,
     ).start()
     relocate_initiated = False
     try:
@@ -1482,6 +1490,7 @@ class TestUiSanity:
                     run_id=run_id,
                     client=jira_client,
                     config=jira_config,
+                    test_function=_JIRA_TEST_FUNCTION,
                 ).start()
 
                 _save_hammerdb_baseline_snapshot(phase="failover")
@@ -1589,6 +1598,7 @@ class TestUiSanity:
                     run_id=run_id,
                     client=jira_client,
                     config=jira_config,
+                    test_function=_JIRA_TEST_FUNCTION,
                 ).start()
 
                 # --- Relocate from secondary back to primary ---

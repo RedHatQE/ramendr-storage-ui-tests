@@ -133,6 +133,11 @@ class _AggregateScenarioState:
     #: executed scenario (vs. cleanup of a test that was skipped or never
     #: started, or a teardown failure piled on top of an already-failed call).
     passed_nodeids: set[str] = field(default_factory=set)
+    #: The module path (nodeid before "::") of the first counted test --
+    #: shown as this aggregate's "Test function" in Jira, since it covers
+    #: many individual test functions, not just one. Set once, from
+    #: whichever test is considered first.
+    module_path: str | None = None
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -285,6 +290,7 @@ def _report_individual(
         ci_job_url=config.ci_job_url,
         duration_seconds=report.duration,
         failure_summary=failure_summary,
+        test_function=item.nodeid,
     )
 
     # Mirrors reporting.jira_results.JiraScenarioReporter.close_success() /
@@ -332,6 +338,8 @@ def _accumulate_aggregate(
         _AGGREGATE_STASH_KEY, {}
     )
     state = states.setdefault(scenario_id, _AggregateScenarioState(scenario=scenario))
+    if state.module_path is None:
+        state.module_path = item.nodeid.split("::", 1)[0]
     state.considered += 1
     state.total_duration_seconds += report.duration or 0.0
     if report.failed:
@@ -435,6 +443,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             ci_job_url=reporting_config.ci_job_url,
             duration_seconds=state.total_duration_seconds,
             failure_summary=failure_summary,
+            test_function=state.module_path,
         )
 
         try:

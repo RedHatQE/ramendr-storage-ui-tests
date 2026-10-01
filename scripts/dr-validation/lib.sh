@@ -684,21 +684,39 @@ for key, pattern in (
     if m:
         values[key] = m.group(1)
 if len(values) < 3:
-    def secret_block(secret: str) -> str:
-        # The boundary that ends this secret's block must be a *sibling* list
-        # item (a new "- name:"/"- fields:" entry at the SAME indentation as
-        # the entry we anchored on), not one of this secret's own nested
-        # "fields:" list items. PyYAML's default dumper (and hand-written
-        # values-secret.yaml files, e.g. ExternalSecrets-style
-        # "fields: [{name:, value:}, ...]") commonly render nested field
-        # entries at the SAME column as the parent "fields:" key, which is
-        # only 2 spaces deeper than the secret's own "- name:" line - so a
-        # fixed "0 or 2 spaces" boundary pattern can accidentally match a
-        # nested field (e.g. "- name: sa_password") and truncate the block
-        # right after "fields:", before any fields are captured. Anchoring
-        # the boundary to the *exact* indentation of the matched line avoids
-        # that collision, since nested fields are always indented deeper
+    def _block_end(rest: str, indent: str) -> int:
+        # The boundary that ends this secret's block is either a *sibling*
+        # list item (a new "- name:"/"- fields:" entry at the SAME
+        # indentation as the entry we anchored on) or ANY line at a LOWER
+        # indentation than that anchor (e.g. a different top-level key, or a
+        # sibling list one level up) -- never one of this secret's own
+        # nested "fields:" list items, which are always indented DEEPER
         # than their own secret's "- name:" line.
+        #
+        # A same-indentation-only check is not enough: a same-indentation
+        # sibling list elsewhere in the file (reached only via a
+        # lower-indentation line in between) would never be seen, so
+        # scanning could run past the real boundary into an unrelated
+        # secret's nested fields -- e.g. a lower-indentation
+        # "- name: <other-secret>" followed by its own 2-space-deeper
+        # "- name: password" would otherwise be misread as THIS secret's
+        # sibling/field and silently donate its password.
+        indent_width = len(indent)
+        pos = 0
+        for line in rest.splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped:  # ignore blank lines when measuring indentation
+                width = len(line) - len(line.lstrip(" "))
+                if width < indent_width:
+                    return pos
+                if width == indent_width and re.match(
+                    r"- (?:name:|fields:)", stripped
+                ):
+                    return pos
+            pos += len(line)
+        return len(rest)
+
+    def secret_block(secret: str) -> str:
         m = re.search(
             rf"^( *)- name:\s*{re.escape(secret)}\s*$",
             text,
@@ -707,18 +725,12 @@ if len(values) < 3:
         if m:
             indent = m.group(1)
             rest = text[m.end() :]
-            n = re.search(
-                rf"^{re.escape(indent)}- (?:name:|fields:)", rest, re.MULTILINE
-            )
-            end = m.end() + (n.start() if n else len(rest))
+            end = m.end() + _block_end(rest, indent)
             return text[m.start() : end]
         for m in re.finditer(r"^( *)- fields:", text, re.MULTILINE):
             indent = m.group(1)
             rest = text[m.end() :]
-            n = re.search(
-                rf"^{re.escape(indent)}- (?:name:|fields:)", rest, re.MULTILINE
-            )
-            block = text[m.start() : m.end() + (n.start() if n else len(rest))]
+            block = text[m.start() : m.end() + _block_end(rest, indent)]
             if re.search(rf"name:\s*{re.escape(secret)}\s*$", block, re.MULTILINE):
                 return block
         return ""
