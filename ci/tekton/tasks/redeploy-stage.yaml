@@ -1,0 +1,151 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ramendr-redeploy-stage
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  description: >
+    Run one scripts/redeploy.sh stage (--destroy-only, --install-only,
+    --pattern-only, or --dr-bootstrap-only) against a shared data PVC.
+  params:
+    - name: stage-arg
+      type: string
+      description: "redeploy.sh flag, e.g. --destroy-only | --install-only | --pattern-only"
+    - name: pattern-variant
+      type: string
+      default: odf
+    - name: hub-ocp-version
+      type: string
+      default: "4.22.1"
+    - name: base-domain
+      type: string
+    - name: hosted-zone-id
+      type: string
+    - name: git-url
+      type: string
+      default: https://github.com/RedHatQE/ramendr-storage-ui-tests.git
+    - name: git-revision
+      type: string
+      default: main
+    - name: image
+      type: string
+      description: >
+        Image with oc, openshift-install, aws, podman, git, python3, virtctl.
+        Replace with your QE CI image.
+      default: quay.io/example/ramendr-ci:latest
+  workspaces:
+    - name: data
+      description: Persistent workspace for install dirs and .work/
+      mountPath: /workspace/data
+    - name: secrets
+      description: Read-only secrets (values-secret.yaml, install-config.bak, optional AWS files)
+      mountPath: /workspace/secrets
+      readOnly: true
+  steps:
+    - name: prepare-workspace
+      image: "$(params.image)"
+      workingDir: /workspace
+      env:
+        - name: HOME
+          value: /workspace/data/home
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        mkdir -p /workspace/data/{.work,home,install/hub,install/primary,install/secondary,src,artifacts}
+
+        # Copy install-config backups from the secrets workspace when present.
+        for pair in hub:hub primary:primary secondary:secondary; do
+          name="${pair%%:*}"
+          dest="${pair##*:}"
+          src="/workspace/secrets/install/${name}/install-config.yaml.bak"
+          if [[ -f "$src" ]]; then
+            cp -f "$src" "/workspace/data/install/${dest}/install-config.yaml.bak"
+            echo "Installed install-config backup for ${dest}"
+          elif [[ -f "/workspace/data/install/${dest}/install-config.yaml.bak" ]]; then
+            echo "Reusing existing install-config backup for ${dest}"
+          else
+            echo "WARNING: missing install-config.yaml.bak for ${dest}" >&2
+          fi
+        done
+
+        if [[ ! -f /workspace/secrets/values-secret.yaml ]]; then
+          echo "ERROR: /workspace/secrets/values-secret.yaml is required" >&2
+          exit 1
+        fi
+
+    - name: clone-repo
+      image: "$(params.image)"
+      workingDir: /workspace/data
+      env:
+        - name: HOME
+          value: /workspace/data/home
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        SRC=/workspace/data/src
+        if [[ -d "$SRC/.git" ]]; then
+          git -C "$SRC" fetch --depth=1 origin "$(params.git-revision)"
+          git -C "$SRC" checkout -f FETCH_HEAD
+        else
+          rm -rf "$SRC"
+          git clone --depth=1 --branch "$(params.git-revision)" "$(params.git-url)" "$SRC" \
+            || git clone --depth=1 "$(params.git-url)" "$SRC" \
+            && git -C "$SRC" checkout "$(params.git-revision)"
+        fi
+        echo "Repo at $(git -C "$SRC" rev-parse --short HEAD)"
+
+    - name: run-stage
+      image: "$(params.image)"
+      workingDir: /workspace/data/src
+      # pattern.sh / podman often needs privileged on OpenShift Pipelines
+      securityContext:
+        privileged: true
+      env:
+        - name: HOME
+          value: /workspace/data/home
+        - name: CI
+          value: "1"
+        - name: PATTERN_VARIANT
+          value: "$(params.pattern-variant)"
+        - name: HUB_OCP_VERSION
+          value: "$(params.hub-ocp-version)"
+        - name: BASE_DOMAIN
+          value: "$(params.base-domain)"
+        - name: HOSTED_ZONE_ID
+          value: "$(params.hosted-zone-id)"
+        - name: WORK_DIR
+          value: /workspace/data/.work
+        - name: HUB_INSTALL_DIR
+          value: /workspace/data/install/hub
+        - name: PRIMARY_INSTALL_DIR
+          value: /workspace/data/install/primary
+        - name: SECONDARY_INSTALL_DIR
+          value: /workspace/data/install/secondary
+        - name: VALUES_SECRET
+          value: /workspace/secrets/values-secret.yaml
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        # AWS credentials: mount Secret keys under secrets/aws/ (see ci/tekton/secrets/README.md)
+        if [[ -f /workspace/secrets/aws/AWS_ACCESS_KEY_ID ]]; then
+          export AWS_ACCESS_KEY_ID
+          AWS_ACCESS_KEY_ID="$(cat /workspace/secrets/aws/AWS_ACCESS_KEY_ID)"
+        fi
+        if [[ -f /workspace/secrets/aws/AWS_SECRET_ACCESS_KEY ]]; then
+          export AWS_SECRET_ACCESS_KEY
+          AWS_SECRET_ACCESS_KEY="$(cat /workspace/secrets/aws/AWS_SECRET_ACCESS_KEY)"
+        fi
+        if [[ -f /workspace/secrets/aws/AWS_DEFAULT_REGION ]]; then
+          export AWS_DEFAULT_REGION
+          AWS_DEFAULT_REGION="$(cat /workspace/secrets/aws/AWS_DEFAULT_REGION)"
+        fi
+        if [[ -f /workspace/secrets/aws/credentials ]]; then
+          export AWS_SHARED_CREDENTIALS_FILE=/workspace/secrets/aws/credentials
+        fi
+        if [[ -z "${AWS_ACCESS_KEY_ID:-}" && -z "${AWS_SHARED_CREDENTIALS_FILE:-}" ]]; then
+          echo "ERROR: AWS credentials not found under /workspace/secrets/aws/" >&2
+          exit 1
+        fi
+        echo "Running ./scripts/redeploy.sh --ci $(params.stage-arg)"
+        ./scripts/redeploy.sh --ci "$(params.stage-arg)"

@@ -51,12 +51,22 @@ Customizations are **not** copied from this repo into the upstream checkout. The
 - Upstream template link: `[values-secret.yaml.template](https://github.com/validatedpatterns/ramendr-starter-kit/blob/main/values-secret.yaml.template)`.
 - Workspace rule: see repo `**CLAUDE.md`**.
 
-## CI / QE context (discussion only; not all implemented)
+## CI / QE context (OpenShift Pipelines)
 
-- **Prow / OpenShift CI:** PR-centric; secrets via cluster profiles + Vault/bootstrap; artifacts often public for public repos; on-demand via Gangway; job types are presubmit/postsubmit/periodic even for “manual” triggers.
-- **Virt QE private Jenkins:** good fit for **on-demand**, multi-hour **hub + 2 spokes**, private vendor images; must enforce teardown and artifacts discipline.
-- **User direction:** second repo (this one) decouples automation from fork; **on-demand** runs preferred over PR-only CI for the heavy suite.
-- **Future:** vendor **VSA** image on AWS; **non-ODF CSI** via profile-based installs.
+- **Implemented path:** OpenShift Pipelines (Tekton) on a shared QE/management cluster.
+  See [`ci/tekton/README.md`](ci/tekton/README.md).
+  - CI image: [`ci/tekton/Containerfile`](ci/tekton/Containerfile) (`oc`, `openshift-install`,
+    `aws`, `podman`, pytest/Playwright, `virtctl`).
+  - ODF Pipeline: **destroy → install → pattern → pytest** (`ramendr-odf-e2e`).
+  - **Teardown** is a separate Pipeline (`ramendr-teardown`) so failed runs can be inspected.
+  - Secrets: Vault → External Secrets → K8s Secrets → projected Task mounts
+    ([`ci/tekton/secrets/README.md`](ci/tekton/secrets/README.md)).
+  - `scripts/redeploy.sh` stages: `--destroy-only`, `--install-only`, `--pattern-only`
+    (plus `--ci` / `CI=1` for plain logs and strict Windows secrets).
+  - Future vendor / partner flows: same Tasks with `skip-destroy=true` + `skip-install=true`
+    to reuse an existing AWS env.
+- **On-demand** multi-hour hub + 2 spokes preferred over PR-triggered full AWS e2e.
+- **Non-goals (first cut):** Konflux, in-pipeline teardown, Jira result reporting.
 
 ## Project skill for Cursor
 
@@ -70,5 +80,7 @@ Customizations are **not** copied from this repo into the upstream checkout. The
 | `README.md`                   | User-facing overview, install-config, fork pinning   |
 | `CLAUDE.md`                   | Security + deployment contract, mixed fleet          |
 | `scripts/redeploy.sh`         | Full orchestration                                   |
+| `ci/tekton/README.md`         | OpenShift Pipelines ODF e2e + teardown               |
+| `ci/tekton/Containerfile`     | QE CI image for Tekton Tasks                         |
 | `scripts/stabilize-windows-vms.sh` | Windows VM wait, stabilize, OpenSSH ensure      |
 | `install-config-examples/`    | Example `install-config.yaml.bak` templates          |

@@ -1,0 +1,92 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ramendr-run-pytest
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  description: >
+    Run Playwright/pytest UI tests against an environment whose kubeconfigs
+    live on the shared data PVC (after redeploy --install-only / --pattern-only).
+  params:
+    - name: pytest-args
+      type: string
+      default: tests/ui/smoke -v --junitxml=/workspace/data/artifacts/junit-smoke.xml
+    - name: pattern-variant
+      type: string
+      default: odf
+    - name: git-url
+      type: string
+      default: https://github.com/RedHatQE/ramendr-storage-ui-tests.git
+    - name: git-revision
+      type: string
+      default: main
+    - name: image
+      type: string
+      default: quay.io/example/ramendr-ci:latest
+  workspaces:
+    - name: data
+      mountPath: /workspace/data
+    - name: secrets
+      mountPath: /workspace/secrets
+      readOnly: true
+  steps:
+    - name: clone-repo
+      image: "$(params.image)"
+      workingDir: /workspace/data
+      env:
+        - name: HOME
+          value: /workspace/data/home
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        mkdir -p /workspace/data/{home,src,artifacts}
+        SRC=/workspace/data/src
+        if [[ -d "$SRC/.git" ]]; then
+          git -C "$SRC" fetch --depth=1 origin "$(params.git-revision)"
+          git -C "$SRC" checkout -f FETCH_HEAD
+        else
+          rm -rf "$SRC"
+          git clone --depth=1 --branch "$(params.git-revision)" "$(params.git-url)" "$SRC" \
+            || { git clone --depth=1 "$(params.git-url)" "$SRC" && git -C "$SRC" checkout "$(params.git-revision)"; }
+        fi
+
+    - name: pytest
+      image: "$(params.image)"
+      workingDir: /workspace/data/src
+      env:
+        - name: HOME
+          value: /workspace/data/home
+        - name: CI
+          value: "1"
+        - name: PATTERN_VARIANT
+          value: "$(params.pattern-variant)"
+        - name: HUB_INSTALL_DIR
+          value: /workspace/data/install/hub
+        - name: PRIMARY_INSTALL_DIR
+          value: /workspace/data/install/primary
+        - name: SECONDARY_INSTALL_DIR
+          value: /workspace/data/install/secondary
+        - name: KUBECONFIG
+          value: /workspace/data/install/hub/auth/kubeconfig
+        - name: VALUES_SECRET
+          value: /workspace/secrets/values-secret.yaml
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        if [[ ! -f "$KUBECONFIG" ]]; then
+          echo "ERROR: hub kubeconfig missing at $KUBECONFIG — run install/pattern stages first" >&2
+          exit 1
+        fi
+        mkdir -p /workspace/data/artifacts
+        # Prefer uv/pip project install if present; image may already have deps.
+        if [[ -f pyproject.toml ]]; then
+          python3 -m pip install -q -e ".[dev]" 2>/dev/null || python3 -m pip install -q -e . || true
+        fi
+        # Playwright browsers may be preinstalled in the CI image.
+        if command -v playwright &>/dev/null; then
+          playwright install --with-deps chromium 2>/dev/null || true
+        fi
+        echo "pytest $(params.pytest-args)"
+        # shellcheck disable=SC2086
+        python3 -m pytest $(params.pytest-args)

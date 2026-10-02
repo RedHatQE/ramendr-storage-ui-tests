@@ -1,0 +1,116 @@
+# Example: reuse an existing env (future vendor / partner flows).
+# Skips destroy + install; runs pattern (optional refresh) then tests.
+# For tests-only, change the pipeline or set a Pipeline that starts at tests.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ramendr-odf-reuse-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  pipelineRef:
+    name: ramendr-odf-e2e
+  timeouts:
+    pipeline: "6h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: EXAMPLE.devcluster.openshift.com
+    - name: hosted-zone-id
+      value: ZXXXXXXXXXXXXX
+    - name: skip-destroy
+      value: "true"
+    - name: skip-install
+      value: "true"
+    - name: git-revision
+      value: main
+    - name: image
+      value: quay.io/example/ramendr-ci:latest
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      projected:
+        sources:
+          - secret:
+              name: ramendr-values-secret
+              items:
+                - key: values-secret.yaml
+                  path: values-secret.yaml
+          - secret:
+              name: ramendr-aws-creds
+              items:
+                - key: AWS_ACCESS_KEY_ID
+                  path: aws/AWS_ACCESS_KEY_ID
+                - key: AWS_SECRET_ACCESS_KEY
+                  path: aws/AWS_SECRET_ACCESS_KEY
+                - key: AWS_DEFAULT_REGION
+                  path: aws/AWS_DEFAULT_REGION
+          - secret:
+              name: ramendr-install-configs
+              items:
+                - key: hub-install-config.yaml.bak
+                  path: install/hub/install-config.yaml.bak
+                - key: primary-install-config.yaml.bak
+                  path: install/primary/install-config.yaml.bak
+                - key: secondary-install-config.yaml.bak
+                  path: install/secondary/install-config.yaml.bak
+  taskRunTemplate:
+    serviceAccountName: ramendr-ci-pipeline
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ramendr-teardown-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  pipelineRef:
+    name: ramendr-teardown
+  timeouts:
+    pipeline: "2h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: EXAMPLE.devcluster.openshift.com
+    - name: hosted-zone-id
+      value: ZXXXXXXXXXXXXX
+    - name: git-revision
+      value: main
+    - name: image
+      value: quay.io/example/ramendr-ci:latest
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      projected:
+        sources:
+          - secret:
+              name: ramendr-values-secret
+              items:
+                - key: values-secret.yaml
+                  path: values-secret.yaml
+          - secret:
+              name: ramendr-aws-creds
+              items:
+                - key: AWS_ACCESS_KEY_ID
+                  path: aws/AWS_ACCESS_KEY_ID
+                - key: AWS_SECRET_ACCESS_KEY
+                  path: aws/AWS_SECRET_ACCESS_KEY
+                - key: AWS_DEFAULT_REGION
+                  path: aws/AWS_DEFAULT_REGION
+          - secret:
+              name: ramendr-install-configs
+              items:
+                - key: hub-install-config.yaml.bak
+                  path: install/hub/install-config.yaml.bak
+                - key: primary-install-config.yaml.bak
+                  path: install/primary/install-config.yaml.bak
+                - key: secondary-install-config.yaml.bak
+                  path: install/secondary/install-config.yaml.bak
+  taskRunTemplate:
+    serviceAccountName: ramendr-ci-pipeline

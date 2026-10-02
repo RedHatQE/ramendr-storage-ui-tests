@@ -1,0 +1,61 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ramendr-teardown
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  description: >
+    Separate teardown Pipeline: destroy AWS hub + spokes via
+    scripts/redeploy.sh --destroy-only. Not part of ramendr-odf-e2e so
+    failed runs can be inspected before cleanup.
+  params:
+    - name: pattern-variant
+      type: string
+      default: odf
+    - name: hub-ocp-version
+      type: string
+      default: "4.22.1"
+    - name: base-domain
+      type: string
+    - name: hosted-zone-id
+      type: string
+    - name: git-url
+      type: string
+      default: https://github.com/RedHatQE/ramendr-storage-ui-tests.git
+    - name: git-revision
+      type: string
+      default: main
+    - name: image
+      type: string
+      default: quay.io/epassaro/ramendr-ci:latest
+  workspaces:
+    - name: data
+    - name: secrets
+  tasks:
+    - name: destroy
+      taskRef:
+        name: ramendr-redeploy-stage
+      timeout: "2h"
+      params:
+        - name: stage-arg
+          value: "--destroy-only"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: hub-ocp-version
+          value: "$(params.hub-ocp-version)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: hosted-zone-id
+          value: "$(params.hosted-zone-id)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: image
+          value: "$(params.image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets

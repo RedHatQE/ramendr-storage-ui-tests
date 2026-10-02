@@ -62,12 +62,39 @@ HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.22.1}"
 # Windows edge VMs are part of the protected gitops-vms fleet; fail redeploy if stabilize/OpenSSH fails.
 : "${REQUIRE_WINDOWS_VMS:=1}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+# CI=1 (or --ci): plain logs, fail-fast on missing Windows secrets, write .work/ci-status.json.
+CI="${CI:-0}"
+
+if [[ "$CI" == "1" ]]; then
+  RED=''
+  GREEN=''
+  YELLOW=''
+  NC=''
+else
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[1;33m'
+  NC='\033[0m'
+fi
 
 log() { echo -e "${GREEN}[$(date +%H:%M:%S)]${NC} $*"; }
+
+write_ci_status() {
+  local phase="${1:-unknown}"
+  mkdir -p "$WORK_DIR"
+  python3 - "$WORK_DIR/ci-status.json" "$phase" <<'PY'
+import json, sys, time
+path, phase = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+data["phase"] = phase
+data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+json.dump(data, open(path, "w"), indent=2)
+print("", end="")
+PY
+}
 
 # Strip https://user:token@host/... userinfo so logs never print repo credentials.
 sanitize_upstream_repo_url() {
@@ -154,6 +181,10 @@ PY
     if [[ -n "${missing_windows_secrets:-}" ]]; then
       warn "VALUES_SECRET missing Windows VM secrets: $(tr '\n' ' ' <<<"$missing_windows_secrets")"
       warn "Add privatevm-credentials and windows-admin before redeploy (see dr-validation/examples/values-secret-v2-windows.fragment.yaml)."
+      if [[ "$CI" == "1" ]]; then
+        err "CI=1: refusing to continue without Windows VM secrets."
+        missing=1
+      fi
     fi
   fi
   if [[ "${PATTERN_VARIANT:-}" == "drpartner-s4" ]]; then
@@ -1108,14 +1139,9 @@ show_status() {
   echo ""
 }
 
-full_redeploy() {
-  check_prerequisites
-  prepare_upstream
-
-  destroy_existing_clusters
-  release_cluster_orphaned_eips
-  cleanup_dns
-
+# Install hub + spokes (no pattern). Used by --install-only and full_redeploy.
+install_clusters() {
+  write_ci_status "install"
   ensure_openshift_install_version
   log "Starting parallel install of hub + ocp-primary + ocp-secondary..."
   local install_failed=0
@@ -1134,45 +1160,93 @@ full_redeploy() {
   create_spoke_metal_machinesets
   scale_hub_workers
   wait_for_spoke_metal_nodes
+  write_ci_status "install-complete"
+}
 
+full_redeploy() {
+  check_prerequisites
+  prepare_upstream
+  write_ci_status "destroy"
+
+  destroy_existing_clusters
+  release_cluster_orphaned_eips
+  cleanup_dns
+
+  install_clusters
+
+  write_ci_status "pattern"
   deploy_pattern
   run_post_pattern_steps
+  write_ci_status "complete"
   log "Full redeploy complete!"
 }
+
+# Parse optional leading --ci before the stage flag.
+if [[ "${1:-}" == "--ci" ]]; then
+  CI=1
+  # Re-apply plain log colors after late --ci (CI may have been 0 at script top).
+  RED=''
+  GREEN=''
+  YELLOW=''
+  NC=''
+  shift
+fi
 
 case "${1:-}" in
   --destroy-only)
     check_prerequisites
+    write_ci_status "destroy"
     [[ -x "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" ]] && \
       "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" || true
     destroy_existing_clusters
     release_cluster_orphaned_eips
+    write_ci_status "destroyed"
     log "Environment destroyed (Route53 hosted zone preserved)."
+    ;;
+  --install-only)
+    check_prerequisites
+    prepare_upstream
+    install_clusters
+    log "Cluster install complete (pattern not deployed)."
     ;;
   --pattern-only)
     check_prerequisites
     prepare_upstream
+    write_ci_status "pattern"
     create_spoke_metal_machinesets
     scale_hub_workers
     wait_for_spoke_metal_nodes
     deploy_pattern
     run_post_pattern_steps
+    write_ci_status "complete"
     ;;
   --dr-bootstrap-only)
     check_prerequisites
+    write_ci_status "dr-bootstrap"
     run_post_pattern_steps
+    write_ci_status "complete"
     ;;
   --status)
     show_status
     ;;
   --help|-h)
-    echo "Usage: ./scripts/redeploy.sh [--destroy-only|--pattern-only|--dr-bootstrap-only|--status|--help]"
+    echo "Usage: ./scripts/redeploy.sh [--ci] [--destroy-only|--install-only|--pattern-only|--dr-bootstrap-only|--status|--help]"
     echo ""
     echo " (no args) Full redeploy: destroy clusters in current AWS account + install all 3 + deploy pinned upstream pattern"
     echo " --destroy-only Destroy clusters that exist in the current AWS account (hosted zone preserved)"
-    echo " --pattern-only Deploy pattern on an existing hub cluster"
+    echo " --install-only Install hub + two spokes (openshift-install), metal nodes, hub workers; no pattern"
+    echo " --pattern-only Deploy pattern on an existing hub cluster (includes DR bootstrap / Windows / HammerDB)"
     echo " --dr-bootstrap-only Wait for convergence + automatic DR validation bootstrap (existing env)"
     echo " --status Show current environment status"
+    echo " --ci              Same as CI=1: plain logs, fail-fast missing Windows secrets, write WORK_DIR/ci-status.json"
+    echo ""
+    echo "Tekton / CI workspace paths (override defaults):"
+    echo " WORK_DIR=/workspace/data/.work"
+    echo " HUB_INSTALL_DIR=/workspace/data/install/hub"
+    echo " PRIMARY_INSTALL_DIR=/workspace/data/install/primary"
+    echo " SECONDARY_INSTALL_DIR=/workspace/data/install/secondary"
+    echo " VALUES_SECRET=/workspace/secrets/values-secret.yaml"
+    echo " See ci/tekton/README.md for OpenShift Pipelines wiring."
     echo ""
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
@@ -1183,6 +1257,8 @@ case "${1:-}" in
     echo "                         Preview RHDR (rhdr-catalog) is committed in the fork; partner BOMs differ in variants/<name>/."
     echo ""
     echo "Environment variables:"
+    echo " CI                    Set to 1 for CI mode (plain logs, strict Windows secrets, ci-status.json)"
+    echo " WORK_DIR              Working directory for .work/upstream and BYOC values-secret (default: <repo>/.work)"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
     echo " PRIMARY_INSTALL_DIR   Primary spoke install directory (default: ~/git/ocp-primary-install)"
     echo " SECONDARY_INSTALL_DIR Secondary spoke install directory (default: ~/git/ocp-secondary-install)"

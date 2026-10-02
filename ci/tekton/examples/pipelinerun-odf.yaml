@@ -1,0 +1,77 @@
+# Example PVC for the shared data workspace (RWO — Tasks run sequentially).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ramendr-ci-data
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # install dirs + .work upstream clone + artifacts; size to suit your storage class
+      storage: 100Gi
+  # storageClassName: <your-rwo-storageclass>
+---
+# Example PipelineRun: ODF destroy → install → pattern → smoke tests.
+# Replace BASE_DOMAIN / HOSTED_ZONE_ID / image / git-revision before applying.
+# Secrets must already exist in the namespace (see ../secrets/README.md).
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ramendr-odf-e2e-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  pipelineRef:
+    name: ramendr-odf-e2e
+  timeouts:
+    pipeline: "12h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: EXAMPLE.devcluster.openshift.com
+    - name: hosted-zone-id
+      value: ZXXXXXXXXXXXXX
+    - name: skip-destroy
+      value: "false"
+    - name: skip-install
+      value: "false"
+    - name: git-revision
+      value: main
+    - name: image
+      value: quay.io/example/ramendr-ci:latest
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      projected:
+        sources:
+          - secret:
+              name: ramendr-values-secret
+              items:
+                - key: values-secret.yaml
+                  path: values-secret.yaml
+          - secret:
+              name: ramendr-aws-creds
+              items:
+                - key: AWS_ACCESS_KEY_ID
+                  path: aws/AWS_ACCESS_KEY_ID
+                - key: AWS_SECRET_ACCESS_KEY
+                  path: aws/AWS_SECRET_ACCESS_KEY
+                - key: AWS_DEFAULT_REGION
+                  path: aws/AWS_DEFAULT_REGION
+          - secret:
+              name: ramendr-install-configs
+              items:
+                - key: hub-install-config.yaml.bak
+                  path: install/hub/install-config.yaml.bak
+                - key: primary-install-config.yaml.bak
+                  path: install/primary/install-config.yaml.bak
+                - key: secondary-install-config.yaml.bak
+                  path: install/secondary/install-config.yaml.bak
+  taskRunTemplate:
+    serviceAccountName: ramendr-ci-pipeline
