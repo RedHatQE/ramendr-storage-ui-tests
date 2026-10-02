@@ -8,34 +8,30 @@ from reporting.jira_config import reporting_config_from_env
 from reporting.jira_models import TestOutcome
 
 
-def test_defaults_are_normal_reporting_when_env_is_empty():
-    """Phase 2 (normal-default) behavior: reporting is on and writes are
-    real by default -- an ordinary ``pytest ...`` invocation (with Jira
-    credentials supplied by the environment/CI secret store) reports every
-    result automatically, without exporting any reporting flags."""
+def test_defaults_are_opt_in_when_env_is_empty():
+    """Opt-in-by-default behavior: an ordinary ``pytest ...`` invocation
+    makes zero Jira calls and needs zero credentials unless reporting is
+    explicitly turned on via the environment/CI secret store."""
     config = reporting_config_from_env({})
-    assert config.report_results is True
-    assert config.dry_run is False
+    assert config.report_results is False
+    assert config.dry_run is True
     assert config.strict is False
 
 
-def test_report_results_can_be_explicitly_disabled_for_local_dev():
-    """A developer without Jira credentials can still opt out explicitly --
-    the default changed, but the override still works."""
-    config = reporting_config_from_env({"JIRA_REPORT_RESULTS": "false"})
-    assert config.report_results is False
+def test_report_results_can_be_explicitly_enabled():
+    config = reporting_config_from_env({"JIRA_REPORT_RESULTS": "true"})
+    assert config.report_results is True
+    # dry_run still defaults to True even once report_results is enabled --
+    # a real write additionally requires disabling dry_run explicitly.
+    assert config.dry_run is True
 
 
-def test_dry_run_can_be_explicitly_enabled_for_local_dev():
-    """A developer who wants reporting "on" (parent Test Case still
-    validated with a real read-only GET) but no real write can still opt
-    into dry-run explicitly -- the default changed, but the override still
-    works."""
+def test_dry_run_can_be_explicitly_disabled_for_a_real_write():
     config = reporting_config_from_env(
-        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "true"}
+        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
     )
     assert config.report_results is True
-    assert config.dry_run is True
+    assert config.dry_run is False
 
 
 def test_defaults_match_phase_a_discovered_production_schema():
@@ -62,8 +58,6 @@ def test_env_overrides_every_flag_and_id():
             "JIRA_BLOCKED_TRANSITION_ID": "51",
             "RAMENDR_COMPOSE_VERSION": "RHEL-9.9.0",
             "JIRA_RUN_ID": "run-123",
-            "CI_JOB_URL": "https://ci.example.com/job/1",
-            "GIT_COMMIT": "abc1234",
         }
     )
     assert config.report_results is True
@@ -77,8 +71,6 @@ def test_env_overrides_every_flag_and_id():
     assert config.blocked_transition_id == "51"
     assert config.compose_version == "RHEL-9.9.0"
     assert config.run_id == "run-123"
-    assert config.ci_job_url == "https://ci.example.com/job/1"
-    assert config.git_commit == "abc1234"
 
 
 def test_bool_env_accepts_common_truthy_spellings():

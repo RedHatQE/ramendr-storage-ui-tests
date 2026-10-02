@@ -64,8 +64,6 @@ class TestResultExecution:
     run_id: str
     executed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     compose_version: str | None = None
-    git_commit: str | None = None
-    ci_job_url: str | None = None
     duration_seconds: float | None = None
     failure_summary: str | None = None
     test_function: str | None = None

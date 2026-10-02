@@ -1,6 +1,5 @@
-"""Unit tests for reporting.pytest_jira_plugin: the marker-based automatic
-Jira Test Result reporting hook used by smoke (and available to any other
-pytest suite).
+"""Unit tests for reporting.pytest_jira_plugin: the jira_aggregate_test_case
+marker-based automatic Jira Test Result reporting hook used by smoke.
 
 ``pytest_runtest_makereport`` is a ``hookwrapper`` -- pluggy normally drives
 it, not a direct caller -- so these tests drive the generator manually
@@ -18,13 +17,12 @@ import logging
 import pytest
 
 import reporting.pytest_jira_plugin as plugin
-from reporting.jira_client import JiraWriteError
-from reporting.jira_results import JiraCredentialsUnavailableError
+from reporting.jira_results import JiraCredentialsUnavailableError, _generated_run_id
 
 
 class FakeClient:
-    """Minimal fake JiraClient -- same shape as the fakes in
-    test_jira_scenario_reporter.py / test_sanity_jira_wiring.py."""
+    """Minimal fake JiraClient -- same shape as the fake in
+    test_jira_scenario_reporter.py."""
 
     def __init__(self, *, fail_create: bool = False):
         self.calls: list[str] = []
@@ -32,34 +30,14 @@ class FakeClient:
         self.transitioned: list[tuple[str, str]] = []
         self._fail_create = fail_create
         self._next_seq = 9000
-        self._status_by_key: dict[str, str] = {}
-
-    def get_issue(self, issue_key, *, expand=None):
-        self.calls.append("get_issue")
-        return {
-            "key": issue_key,
-            "fields": {
-                "project": {"key": "RHELTEST"},
-                "issuetype": {"name": "Test Case"},
-                "labels": ["ramen-dr", "automation"],
-            },
-        }
-
-    def get_transitions(self, issue_key):
-        self.calls.append("get_transitions")
-        return [
-            {"id": "3", "name": "PASS"},
-            {"id": "4", "name": "FAIL"},
-        ]
 
     def create_issue(self, fields):
         self.calls.append("create_issue")
         if self._fail_create:
-            raise JiraWriteError("simulated create failure")
+            raise RuntimeError("simulated create failure")
         self._next_seq += 1
         key = f"RHELTEST-{self._next_seq}"
         self.created.append(fields)
-        self._status_by_key[key] = "New"
         return key
 
     def transition_issue(self, issue_key, transition_id):
@@ -77,7 +55,7 @@ class _FakeItem:
         self,
         *,
         marker=None,
-        nodeid="tests/ui/smoke/test_x.py::test_x",
+        nodeid="tests/ui/smoke/test_smoke.py::test_x",
         config=None,
     ):
         self._marker = marker
@@ -136,11 +114,6 @@ def _drive_makereport(item, call, report):
         raise AssertionError("hookwrapper did not stop after being resumed")
 
 
-def _jira_marker(scenario_id: str = "failover_primary_to_secondary", **kwargs):
-    kwargs.setdefault("scenario", "Some scenario label")
-    return pytest.mark.jira_test_case(scenario_id, **kwargs).mark
-
-
 def _aggregate_marker(scenario_id: str = "deployment_smoke_validation", **kwargs):
     kwargs.setdefault("scenario", "ODF deployment smoke validation")
     return pytest.mark.jira_aggregate_test_case(scenario_id, **kwargs).mark
@@ -162,12 +135,21 @@ def _enable_jira_env(monkeypatch, **overrides):
             monkeypatch.setenv(key, value)
 
 
+class _FakeSession:
+    def __init__(self, config):
+        self.config = config
+
+
+def _finish_session(config):
+    plugin.pytest_sessionfinish(_FakeSession(config), exitstatus=0)
+
+
 # --------------------------------------------------------------------------
 # pytest_configure -- marker registration
 # --------------------------------------------------------------------------
 
 
-def test_pytest_configure_registers_the_marker():
+def test_aggregate_marker_registered_in_pytest_configure():
     lines: list[tuple[str, str]] = []
 
     class _Config:
@@ -175,14 +157,14 @@ def test_pytest_configure_registers_the_marker():
             lines.append((section, line))
 
     plugin.pytest_configure(_Config())
-    assert lines
+    assert len(lines) == 1
     section, line = lines[0]
     assert section == "markers"
-    assert line.startswith("jira_test_case(")
+    assert line.startswith("jira_aggregate_test_case(")
 
 
 # --------------------------------------------------------------------------
-# Never reports: unmarked, skipped, or non-"call"-phase
+# Never reports: unmarked, skipped, or non-"call"/"teardown"-phase
 # --------------------------------------------------------------------------
 
 
@@ -199,107 +181,30 @@ def test_unmarked_test_makes_zero_jira_calls(monkeypatch):
     assert plugin._CLIENT_STASH_KEY not in item.config.stash
 
 
-def test_skipped_marked_test_reports_nothing(monkeypatch):
+def test_aggregate_skipped_tests_are_never_counted(monkeypatch):
     _enable_jira_env(monkeypatch)
     client = FakeClient()
     monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
 
-    item = _FakeItem(marker=_jira_marker())
+    item = _FakeItem(marker=_aggregate_marker())
     _drive_makereport(item, _FakeCall(when="call"), _FakeReport(skipped=True))
+    _finish_session(item.config)
 
     assert client.calls == []
 
 
-def test_setup_phase_failure_reports_nothing_even_with_marker(monkeypatch):
+def test_aggregate_setup_phase_failure_is_never_counted(monkeypatch):
     """A fixture/setup failure means the scenario body never ran -- never
     fabricate a Jira result for it (same rule as the sanity DR boundaries)."""
     _enable_jira_env(monkeypatch)
     client = FakeClient()
     monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
 
-    item = _FakeItem(marker=_jira_marker())
+    item = _FakeItem(marker=_aggregate_marker())
     _drive_makereport(item, _FakeCall(when="setup"), _FakeReport(failed=True))
+    _finish_session(item.config)
 
     assert client.calls == []
-
-
-# --------------------------------------------------------------------------
-# PASS / FAIL automatic reporting for the "call" phase
-# --------------------------------------------------------------------------
-
-
-def test_passing_marked_test_reports_pass(monkeypatch):
-    _enable_jira_env(monkeypatch)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(marker=_jira_marker("failover_primary_to_secondary"))
-    _drive_makereport(item, _FakeCall(when="call"), _FakeReport(passed=True))
-
-    assert client.created[0]["parent"] == {"key": "RHELTEST-3600"}
-    assert client.transitioned == [(client.transitioned[0][0], "3")]  # PASS
-
-
-def test_failing_marked_test_reports_fail_with_summary(monkeypatch):
-    _enable_jira_env(monkeypatch)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(marker=_jira_marker("relocate_secondary_to_primary"))
-    exc = RuntimeError("smoke check boom")
-    _drive_makereport(
-        item,
-        _FakeCall(when="call", excinfo=_FakeExcInfo(exc)),
-        _FakeReport(failed=True, duration=4.5),
-    )
-
-    assert client.created[0]["parent"] == {"key": "RHELTEST-3610"}
-    assert client.transitioned == [(client.transitioned[0][0], "4")]  # FAIL
-    description_text = str(client.created[0]["description"])
-    assert "smoke check boom" in description_text
-
-
-def test_scenario_kwarg_is_used_in_the_created_summary(monkeypatch):
-    _enable_jira_env(monkeypatch)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(
-        marker=_jira_marker("failover_primary_to_secondary", scenario="My Smoke Check")
-    )
-    _drive_makereport(item, _FakeCall(when="call"), _FakeReport(passed=True))
-
-    assert "My Smoke Check" in client.created[0]["summary"]
-
-
-def test_unapproved_scenario_id_raises_keyerror(monkeypatch):
-    """Never invents a Jira Test Case mapping -- an unapproved scenario id
-    must raise, never silently fall back to guessing a parent key."""
-    _enable_jira_env(monkeypatch)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(marker=_jira_marker("totally_unapproved_scenario"))
-    with pytest.raises(KeyError, match="not an approved"):
-        _drive_makereport(item, _FakeCall(when="call"), _FakeReport(passed=True))
-
-
-# --------------------------------------------------------------------------
-# Reporting failures are logged, never raised (never affect the real
-# pytest outcome that was already computed by the time this hook runs).
-# --------------------------------------------------------------------------
-
-
-def test_jira_reporting_failure_is_logged_not_raised(monkeypatch, caplog):
-    _enable_jira_env(monkeypatch)
-    client = FakeClient(fail_create=True)
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(marker=_jira_marker())
-    with caplog.at_level(logging.WARNING, logger="reporting.pytest_jira_plugin"):
-        _drive_makereport(item, _FakeCall(when="call"), _FakeReport(passed=True))
-
-    assert "Jira reporting failed" in caplog.text
 
 
 # --------------------------------------------------------------------------
@@ -321,57 +226,33 @@ def test_collection_modifyitems_noop_when_no_item_is_marked(monkeypatch):
     assert plugin._CLIENT_STASH_KEY not in config.stash
 
 
-def test_collection_modifyitems_fails_fast_when_credentials_missing(monkeypatch):
-    # report_results defaults to True; no credentials configured at all.
-    monkeypatch.delenv("JIRA_REPORT_RESULTS", raising=False)
+def test_collection_modifyitems_fails_fast_when_a_real_write_is_requested_but_credentials_missing(
+    monkeypatch,
+):
+    monkeypatch.setenv("JIRA_REPORT_RESULTS", "true")
+    monkeypatch.setenv("JIRA_REPORT_DRY_RUN", "false")
     monkeypatch.delenv("JIRA_BASE_URL", raising=False)
     monkeypatch.delenv("JIRA_EMAIL", raising=False)
     monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     config = _FakeConfig()
-    items = [_FakeItem(marker=None), _FakeItem(marker=_jira_marker())]
+    items = [_FakeItem(marker=None), _FakeItem(marker=_aggregate_marker())]
 
     with pytest.raises(JiraCredentialsUnavailableError):
         plugin.pytest_collection_modifyitems(config, items)
 
 
-def test_collection_modifyitems_passes_when_reporting_explicitly_disabled(
-    monkeypatch,
-):
-    monkeypatch.setenv("JIRA_REPORT_RESULTS", "false")
+def test_collection_modifyitems_passes_with_default_opt_in_config(monkeypatch):
+    monkeypatch.delenv("JIRA_REPORT_RESULTS", raising=False)
+    monkeypatch.delenv("JIRA_REPORT_DRY_RUN", raising=False)
     monkeypatch.delenv("JIRA_BASE_URL", raising=False)
     monkeypatch.delenv("JIRA_EMAIL", raising=False)
     monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
     config = _FakeConfig()
-    items = [_FakeItem(marker=_jira_marker())]
+    items = [_FakeItem(marker=_aggregate_marker())]
     plugin.pytest_collection_modifyitems(config, items)  # must not raise
     assert config.stash[plugin._CLIENT_STASH_KEY] is None
-
-
-# --------------------------------------------------------------------------
-# One run id shared across every marked test in one session
-# --------------------------------------------------------------------------
-
-
-def test_two_marked_tests_in_one_session_share_one_run_id(monkeypatch):
-    from reporting.jira_results import reset_session_run_id_cache
-
-    reset_session_run_id_cache()
-    monkeypatch.delenv("JIRA_RUN_ID", raising=False)
-    _enable_jira_env(monkeypatch, JIRA_RUN_ID=None)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item_a = _FakeItem(marker=_jira_marker("failover_primary_to_secondary"))
-    item_b = _FakeItem(marker=_jira_marker("relocate_secondary_to_primary"))
-    _drive_makereport(item_a, _FakeCall(when="call"), _FakeReport(passed=True))
-    _drive_makereport(item_b, _FakeCall(when="call"), _FakeReport(passed=True))
-
-    run_id_a = client.created[0]["summary"].rsplit("| ", 1)[-1]
-    run_id_b = client.created[1]["summary"].rsplit("| ", 1)[-1]
-    assert run_id_a == run_id_b
-    reset_session_run_id_cache()
 
 
 # --------------------------------------------------------------------------
@@ -379,41 +260,6 @@ def test_two_marked_tests_in_one_session_share_one_run_id(monkeypatch):
 # reported once at pytest_sessionfinish (used by the smoke suite ->
 # deployment_smoke_validation / RHELTEST-3612).
 # --------------------------------------------------------------------------
-
-
-class _FakeSession:
-    def __init__(self, config):
-        self.config = config
-
-
-def _finish_session(config):
-    plugin.pytest_sessionfinish(_FakeSession(config), exitstatus=0)
-
-
-def test_aggregate_marker_registered_in_pytest_configure():
-    lines: list[tuple[str, str]] = []
-
-    class _Config:
-        def addinivalue_line(self, section, line):
-            lines.append((section, line))
-
-    plugin.pytest_configure(_Config())
-    assert len(lines) == 2
-    section, line = lines[1]
-    assert section == "markers"
-    assert line.startswith("jira_aggregate_test_case(")
-
-
-def test_aggregate_skipped_tests_are_never_counted(monkeypatch):
-    _enable_jira_env(monkeypatch)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(marker=_aggregate_marker())
-    _drive_makereport(item, _FakeCall(when="call"), _FakeReport(skipped=True))
-    _finish_session(item.config)
-
-    assert client.calls == []
 
 
 def test_aggregate_zero_considered_reports_nothing(monkeypatch):
@@ -433,18 +279,6 @@ def test_aggregate_zero_considered_reports_nothing(monkeypatch):
     _drive_makereport(item_a, _FakeCall(when="call"), _FakeReport(skipped=True))
     _drive_makereport(item_b, _FakeCall(when="call"), _FakeReport(skipped=True))
     _finish_session(shared_config)
-
-    assert client.calls == []
-
-
-def test_aggregate_setup_phase_failure_is_never_counted(monkeypatch):
-    _enable_jira_env(monkeypatch)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(marker=_aggregate_marker())
-    _drive_makereport(item, _FakeCall(when="setup"), _FakeReport(failed=True))
-    _finish_session(item.config)
 
     assert client.calls == []
 
@@ -574,25 +408,11 @@ def test_aggregate_multiple_failures_report_exactly_one_fail_not_several(
     assert "test_b" in description_text and "boom-b" in description_text
 
 
-def test_aggregate_and_individual_marker_together_raises_typeerror():
-    both_marks = {
-        plugin._MARKER_NAME: _jira_marker(),
-        plugin._AGGREGATE_MARKER_NAME: _aggregate_marker(),
-    }
-
-    class _BothMarkersItem(_FakeItem):
-        def get_closest_marker(self, name):
-            return both_marks.get(name)
-
-    item = _BothMarkersItem(marker=None)
-    with pytest.raises(TypeError, match="use exactly one"):
-        _drive_makereport(item, _FakeCall(when="call"), _FakeReport(passed=True))
-
-
 def test_aggregate_credentials_missing_logs_warning_and_does_not_raise(
     monkeypatch, caplog
 ):
-    monkeypatch.delenv("JIRA_REPORT_RESULTS", raising=False)
+    monkeypatch.setenv("JIRA_REPORT_RESULTS", "true")
+    monkeypatch.setenv("JIRA_REPORT_DRY_RUN", "false")
     monkeypatch.delenv("JIRA_BASE_URL", raising=False)
     monkeypatch.delenv("JIRA_EMAIL", raising=False)
     monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
@@ -620,39 +440,36 @@ def test_aggregate_reporting_failure_is_logged_not_raised(monkeypatch, caplog):
     item = _FakeItem(marker=_aggregate_marker())
     _drive_makereport(item, _FakeCall(when="call"), _FakeReport(passed=True))
 
-    with caplog.at_level(logging.WARNING, logger="reporting.pytest_jira_plugin"):
+    with caplog.at_level(logging.WARNING, logger="reporting.jira_results"):
         _finish_session(item.config)  # must not raise
 
-    assert "Aggregate Jira reporting failed" in caplog.text
+    assert "jira reporting failed" in caplog.text.lower()
 
 
-def test_aggregate_shares_session_run_id_with_individual_marker(monkeypatch):
-    from reporting.jira_results import reset_session_run_id_cache
-
-    reset_session_run_id_cache()
+def test_two_aggregate_scenarios_in_one_session_share_one_run_id(monkeypatch):
+    _generated_run_id.cache_clear()
     monkeypatch.delenv("JIRA_RUN_ID", raising=False)
     _enable_jira_env(monkeypatch, JIRA_RUN_ID=None)
     client = FakeClient()
     monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
 
     shared_config = _FakeConfig()
-    individual_item = _FakeItem(
-        marker=_jira_marker("failover_primary_to_secondary"),
-        nodeid="test_sanity",
+    item_a = _FakeItem(
+        marker=_aggregate_marker("deployment_smoke_validation"),
+        nodeid="test_a",
         config=shared_config,
     )
-    aggregate_item = _FakeItem(
-        marker=_aggregate_marker(), nodeid="test_smoke_a", config=shared_config
+    item_b = _FakeItem(
+        marker=_aggregate_marker("deployment_smoke_validation"),
+        nodeid="test_b",
+        config=shared_config,
     )
-    _drive_makereport(individual_item, _FakeCall(when="call"), _FakeReport(passed=True))
-    _drive_makereport(aggregate_item, _FakeCall(when="call"), _FakeReport(passed=True))
+    _drive_makereport(item_a, _FakeCall(when="call"), _FakeReport(passed=True))
+    _drive_makereport(item_b, _FakeCall(when="call"), _FakeReport(passed=True))
     _finish_session(shared_config)
 
-    assert len(client.created) == 2
-    run_id_individual = client.created[0]["summary"].rsplit("| ", 1)[-1]
-    run_id_aggregate = client.created[1]["summary"].rsplit("| ", 1)[-1]
-    assert run_id_individual == run_id_aggregate
-    reset_session_run_id_cache()
+    assert len(client.created) == 1  # one scenario_id -> one Test Result
+    _generated_run_id.cache_clear()
 
 
 # --------------------------------------------------------------------------
@@ -783,27 +600,6 @@ def test_aggregate_teardown_failure_after_setup_failure_is_ignored(monkeypatch):
     _finish_session(item.config)
 
     assert client.calls == []
-
-
-def test_individual_marker_teardown_failure_is_a_noop(monkeypatch):
-    """jira_test_case reports immediately at "call" time and has no
-    teardown handling (it isn't used by any production per-test scenario
-    today) -- a teardown-phase report for an individually-marked test must
-    not raise or report anything additional."""
-    _enable_jira_env(monkeypatch)
-    client = FakeClient()
-    monkeypatch.setattr("reporting.jira_results.JiraClient", lambda config: client)
-
-    item = _FakeItem(marker=_jira_marker())
-    _drive_makereport(item, _FakeCall(when="call"), _FakeReport(passed=True))
-    assert len(client.created) == 1
-
-    _drive_makereport(
-        item,
-        _FakeCall(when="teardown", excinfo=_FakeExcInfo(RuntimeError("cleanup boom"))),
-        _FakeReport(failed=True),
-    )  # must not raise, must not report again
-    assert len(client.created) == 1
 
 
 def test_aggregate_teardown_failure_for_one_test_does_not_affect_others(monkeypatch):

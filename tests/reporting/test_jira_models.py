@@ -80,10 +80,9 @@ def test_execution_optional_fields_default_to_none():
         run_id="run-1",
     )
     assert execution.compose_version is None
-    assert execution.git_commit is None
-    assert execution.ci_job_url is None
     assert execution.duration_seconds is None
     assert execution.failure_summary is None
+    assert execution.test_function is None
 
 
 def test_execution_is_frozen():

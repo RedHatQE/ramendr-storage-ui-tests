@@ -1,5 +1,6 @@
-"""Unit tests for reporting.jira_results: payload building, ADF, parent
-validation, and the report_test_result dry-run/write orchestration.
+"""Unit tests for reporting.jira_results: payload building, ADF, the
+report_test_result dry-run/write orchestration, and the shared
+report_scenario_outcome() policy.
 
 Jira is always mocked (a fake client is injected); no network is ever used,
 and no test in this file allows a real write to happen.
@@ -11,17 +12,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from reporting.jira_client import JiraClientError
 from reporting.jira_config import reporting_config_from_env
 from reporting.jira_models import TestOutcome, TestResultExecution
 from reporting.jira_results import (
-    ParentValidationError,
     build_description_adf,
     build_summary,
     build_test_result_fields,
+    report_scenario_outcome,
     report_test_result,
-    summarize_parent,
-    validate_parent_test_case,
 )
 
 _EXECUTED_AT = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
@@ -35,8 +33,6 @@ def _execution(**overrides) -> TestResultExecution:
         run_id="run-42",
         executed_at=_EXECUTED_AT,
         compose_version="RHEL-9.8.0",
-        git_commit="abc1234",
-        ci_job_url="https://ci.example.com/job/1",
         test_function="tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui",
     )
     defaults.update(overrides)
@@ -94,17 +90,11 @@ def _adf_lines(adf: dict) -> list[str]:
 def test_adf_description_contains_all_required_facts_for_pass():
     lines = _adf_lines(build_description_adf(_execution(outcome=TestOutcome.PASS)))
     joined = "\n".join(lines)
-    assert "Automation: pytest + Playwright" in joined
-    assert "Repository: ramendr-storage-ui-tests" in joined
-    assert "Test Case: RHELTEST-3600" in joined
     assert "Scenario: Failover primary to secondary" in joined
     assert (
         "Test function: tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui"
         in joined
     )
-    assert "Compose Version: RHEL-9.8.0" in joined
-    assert "Git commit: abc1234" in joined
-    assert "CI run: https://ci.example.com/job/1" in joined
     assert "Run ID: run-42" in joined
     assert "Executed at: 2026-09-07T12:00:00Z" in joined
     assert "Outcome: PASS" in joined
@@ -173,28 +163,15 @@ def test_adf_description_never_embeds_a_full_stack_trace():
     assert failure_line.endswith("...")
 
 
-def test_adf_description_missing_optional_facts_render_as_unknown():
-    lines = _adf_lines(
-        build_description_adf(
-            _execution(
-                compose_version=None,
-                git_commit=None,
-                ci_job_url=None,
-                test_function=None,
-            )
-        )
-    )
-    joined = "\n".join(lines)
-    # Compose Version gets its own distinct wording -- it's never fabricated
-    # and must never be confused with a real (if merely unknown) value.
-    assert "Compose Version: not supplied" in joined
-    assert "Compose Version: unknown" not in joined
-    assert "Git commit: unknown" in joined
-    assert "CI run: unknown" in joined
-    assert "Test function: unknown" in joined
+def test_adf_description_missing_test_function_renders_as_unknown():
+    lines = _adf_lines(build_description_adf(_execution(test_function=None)))
+    assert "Test function: unknown" in "\n".join(lines)
 
 
-def test_adf_description_compose_not_supplied_never_shows_a_placeholder_value():
+def test_adf_description_compose_not_shown_as_a_placeholder_value():
+    """Compose Version isn't in the description at all (it's a dedicated
+    custom field -- see build_test_result_fields) -- so a missing value
+    must never surface a stale sample or placeholder there either."""
     lines = _adf_lines(build_description_adf(_execution(compose_version=None)))
     joined = "\n".join(lines)
     assert "RHEL-9.8.0" not in joined
@@ -249,146 +226,19 @@ def test_build_test_result_fields_respects_custom_config_ids():
 
 
 # --------------------------------------------------------------------------
-# Parent validation
-# --------------------------------------------------------------------------
-
-
-def _valid_parent() -> dict:
-    return {
-        "key": "RHELTEST-3586",
-        "fields": {
-            "project": {"key": "RHELTEST"},
-            "issuetype": {"name": "Test Case"},
-            "labels": ["ramen-dr", "some-other-label"],
-        },
-    }
-
-
-def test_validate_parent_test_case_accepts_a_valid_parent():
-    validate_parent_test_case(_valid_parent(), expected_project_key="RHELTEST")
-
-
-def test_validate_parent_test_case_rejects_wrong_project():
-    parent = _valid_parent()
-    parent["fields"]["project"]["key"] = "OTHERPROJ"
-    with pytest.raises(ParentValidationError) as exc_info:
-        validate_parent_test_case(parent, expected_project_key="RHELTEST")
-    assert "OTHERPROJ" in str(exc_info.value)
-
-
-def test_validate_parent_test_case_rejects_wrong_issue_type():
-    parent = _valid_parent()
-    parent["fields"]["issuetype"]["name"] = "Bug"
-    with pytest.raises(ParentValidationError) as exc_info:
-        validate_parent_test_case(parent, expected_project_key="RHELTEST")
-    assert "Bug" in str(exc_info.value)
-
-
-def test_validate_parent_test_case_rejects_missing_ramen_dr_label():
-    parent = _valid_parent()
-    parent["fields"]["labels"] = ["some-other-label"]
-    with pytest.raises(ParentValidationError) as exc_info:
-        validate_parent_test_case(parent, expected_project_key="RHELTEST")
-    assert "ramen-dr" in str(exc_info.value)
-
-
-def test_validate_parent_test_case_rejects_missing_fields_key():
-    with pytest.raises(ParentValidationError):
-        validate_parent_test_case(
-            {"key": "RHELTEST-3586"}, expected_project_key="RHELTEST"
-        )
-
-
-def test_summarize_parent_extracts_expected_keys():
-    summary = summarize_parent(_valid_parent())
-    assert summary == {
-        "key": "RHELTEST-3586",
-        "project_key": "RHELTEST",
-        "issuetype_name": "Test Case",
-        "labels": ["ramen-dr", "some-other-label"],
-        "has_ramen_dr_label": True,
-    }
-
-
-def test_summarize_parent_reports_missing_label():
-    parent = _valid_parent()
-    parent["fields"]["labels"] = ["unrelated"]
-    summary = summarize_parent(parent)
-    assert summary["has_ramen_dr_label"] is False
-
-
-def test_summarize_parent_is_defensive_about_malformed_input():
-    assert summarize_parent({}) == {
-        "key": None,
-        "project_key": None,
-        "issuetype_name": None,
-        "labels": [],
-        "has_ramen_dr_label": False,
-    }
-
-
-# --------------------------------------------------------------------------
 # report_test_result orchestration
 # --------------------------------------------------------------------------
 
 
 class FakeReportingClient:
-    """Fake JiraClient for report_test_result tests. Records every call.
+    """Fake JiraClient for report_test_result tests. Records every call."""
 
-    The created issue's ``get_issue`` reflects whatever ``fields`` were
-    actually passed to ``create_issue`` (parent/labels/Compose Version), and
-    its status advances once ``transition_issue`` is called -- so tests can
-    assert on a genuine before/after status change and on post-creation
-    verification derived from a *fresh read*, same as real Jira.
-    """
-
-    _TRANSITION_STATUS_NAMES = {"2": "New", "3": "PASS", "4": "FAIL", "5": "Blocked"}
-
-    def __init__(
-        self,
-        *,
-        parent=None,
-        transitions=None,
-        created_key="RHELTEST-9001",
-        status_name="New",
-    ):
+    def __init__(self, *, created_key="RHELTEST-9001", fail_transition=False):
         self.calls: list[str] = []
-        self._parent = parent if parent is not None else _valid_parent()
-        self._transitions = (
-            transitions
-            if transitions is not None
-            else [
-                {"id": "2", "name": "New", "to": {"name": "New"}},
-                {"id": "3", "name": "PASS", "to": {"name": "PASS"}},
-                {"id": "4", "name": "FAIL", "to": {"name": "FAIL"}},
-                {"id": "5", "name": "Blocked", "to": {"name": "Blocked"}},
-            ]
-        )
         self._created_key = created_key
-        self._status_name = status_name
+        self._fail_transition = fail_transition
         self.created_fields: dict | None = None
         self.transitioned: tuple[str, str] | None = None
-
-    def get_issue(self, issue_key, *, expand=None):
-        self.calls.append("get_issue")
-        if issue_key == self._created_key:
-            fields = self.created_fields or {}
-            custom_fields = {
-                k: v for k, v in fields.items() if k.startswith("customfield_")
-            }
-            return {
-                "fields": {
-                    "status": {"name": self._status_name},
-                    "parent": fields.get("parent", {}),
-                    "labels": fields.get("labels", []),
-                    **custom_fields,
-                }
-            }
-        return self._parent
-
-    def get_transitions(self, issue_key):
-        self.calls.append("get_transitions")
-        return self._transitions
 
     def create_issue(self, fields):
         self.calls.append("create_issue")
@@ -397,10 +247,9 @@ class FakeReportingClient:
 
     def transition_issue(self, issue_key, transition_id):
         self.calls.append("transition_issue")
-        self.transitioned = (issue_key, transition_id)
-        self._status_name = self._TRANSITION_STATUS_NAMES.get(
-            str(transition_id), self._status_name
-        )
+        if self._fail_transition:
+            raise RuntimeError("simulated transition failure")
+        self.transitioned = (issue_key, str(transition_id))
 
 
 _WRITE_CALLS = {"create_issue", "transition_issue"}
@@ -415,7 +264,7 @@ def test_report_test_result_skips_everything_when_reporting_disabled():
     assert result.dry_run is True
     assert result.skipped_reason == "reporting disabled (JIRA_REPORT_RESULTS=false)"
     assert result.issue_key is None
-    assert client.calls == []  # not even a GET -- reporting is fully off
+    assert client.calls == []  # zero Jira calls -- reporting is fully off
     assert result.fields["parent"] == {"key": "RHELTEST-3600"}
 
 
@@ -425,7 +274,7 @@ def test_report_test_result_never_requires_a_client_when_reporting_disabled():
     assert result.dry_run is True
 
 
-def test_report_test_result_dry_run_validates_parent_but_makes_no_writes():
+def test_report_test_result_dry_run_makes_zero_jira_calls():
     config = reporting_config_from_env(
         {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "true"}
     )
@@ -436,43 +285,32 @@ def test_report_test_result_dry_run_validates_parent_but_makes_no_writes():
     assert result.dry_run is True
     assert result.skipped_reason == "dry-run (JIRA_REPORT_DRY_RUN=true)"
     assert result.issue_key is None
-    assert "get_issue" in client.calls  # parent WAS validated (read-only)
-    assert not (_WRITE_CALLS & set(client.calls))  # but no write happened
-    assert result.parent_summary == {
-        "key": "RHELTEST-3586",
-        "project_key": "RHELTEST",
-        "issuetype_name": "Test Case",
-        "labels": ["ramen-dr", "some-other-label"],
-        "has_ramen_dr_label": True,
-    }
+    assert client.calls == []
 
 
-def test_report_test_result_dry_run_still_raises_on_invalid_parent():
+def test_report_test_result_dry_run_never_requires_a_client():
+    """dry_run makes zero Jira calls, so it needs no client either -- only
+    a real write (report_results and not dry_run) does."""
     config = reporting_config_from_env(
         {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "true"}
     )
-    bad_parent = _valid_parent()
-    bad_parent["fields"]["issuetype"]["name"] = "Bug"
-    client = FakeReportingClient(parent=bad_parent)
-
-    with pytest.raises(ParentValidationError) as exc_info:
-        report_test_result(_execution(), client=client, config=config)
-    assert not (_WRITE_CALLS & set(client.calls))
-    # The observed (safe, non-secret) parent summary is attached even on failure.
-    assert exc_info.value.parent_summary["issuetype_name"] == "Bug"
+    result = report_test_result(_execution(), client=None, config=config)
+    assert result.dry_run is True
 
 
-def test_report_test_result_requires_client_when_reporting_enabled():
-    config = reporting_config_from_env({"JIRA_REPORT_RESULTS": "true"})
+def test_report_test_result_requires_client_for_a_real_write():
+    config = reporting_config_from_env(
+        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
+    )
     with pytest.raises(ValueError):
         report_test_result(_execution(), client=None, config=config)
 
 
-def test_report_test_result_full_write_flow_observes_status_before_transitioning():
+def test_report_test_result_full_write_flow_creates_then_transitions():
     config = reporting_config_from_env(
         {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
     )
-    client = FakeReportingClient(status_name="New")
+    client = FakeReportingClient()
 
     result = report_test_result(
         _execution(outcome=TestOutcome.PASS), client=client, config=config
@@ -480,63 +318,9 @@ def test_report_test_result_full_write_flow_observes_status_before_transitioning
 
     assert result.dry_run is False
     assert result.issue_key == "RHELTEST-9001"
-    assert result.initial_status == "New"  # observed, not assumed
-    assert result.final_status == "PASS"  # re-observed after the transition
     assert result.transition_id_used == "3"
     assert client.transitioned == ("RHELTEST-9001", "3")
-    assert result.parent_summary["has_ramen_dr_label"] is True
-    # Order matters: create, then observe (get_issue + get_transitions), then
-    # transition, then re-observe (a second get_issue) for the final status.
-    assert client.calls.index("create_issue") < client.calls.index("get_transitions")
-    assert client.calls.index("get_transitions") < client.calls.index(
-        "transition_issue"
-    )
-    # 3 get_issue calls total: parent validation, post-create snapshot, and
-    # the final re-fetch after transitioning.
-    assert client.calls.count("get_issue") == 3
-    last_get_issue_index = len(client.calls) - 1 - client.calls[::-1].index("get_issue")
-    assert client.calls.index("transition_issue") < last_get_issue_index
-
-
-def test_report_test_result_post_creation_verification_confirms_parent_and_labels():
-    config = reporting_config_from_env(
-        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
-    )
-    client = FakeReportingClient()
-
-    result = report_test_result(
-        _execution(compose_version="RHEL-9.8.0"), client=client, config=config
-    )
-
-    assert result.post_creation_verification == {
-        "parent_key": "RHELTEST-3600",
-        "parent_matches_expected": True,
-        "labels": ["ramen-dr", "automation"],
-        "labels_match_expected": True,
-        "compose_value": "RHEL-9.8.0",
-        "compose_absent_as_expected": True,
-    }
-
-
-def test_report_test_result_post_creation_verification_confirms_compose_absent():
-    """The pilot scenario: no compose supplied -- verification must confirm
-    it is genuinely absent from a fresh read, not merely absent from what
-    we sent."""
-    config = reporting_config_from_env(
-        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
-    )
-    client = FakeReportingClient()
-
-    result = report_test_result(
-        _execution(compose_version=None), client=client, config=config
-    )
-
-    assert "customfield_11500" not in result.fields
-    verification = result.post_creation_verification
-    assert verification["compose_value"] is None
-    assert verification["compose_absent_as_expected"] is True
-    assert verification["parent_matches_expected"] is True
-    assert verification["labels_match_expected"] is True
+    assert client.calls == ["create_issue", "transition_issue"]  # create first
 
 
 @pytest.mark.parametrize(
@@ -563,35 +347,17 @@ def test_report_test_result_selects_correct_transition_per_outcome(
     assert client.transitioned == ("RHELTEST-9001", expected_transition_id)
 
 
-def test_report_test_result_refuses_transition_not_currently_available():
-    """If the desired transition id isn't actually offered by the freshly
-    created issue, refuse rather than blindly attempting it."""
-    config = reporting_config_from_env(
-        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
-    )
-    client = FakeReportingClient(transitions=[{"id": "2", "name": "New"}])
-
-    with pytest.raises(JiraClientError):
-        report_test_result(
-            _execution(outcome=TestOutcome.PASS), client=client, config=config
-        )
-    assert client.transitioned is None  # never attempted
-
-
 def test_report_test_result_post_create_failure_includes_the_created_issue_key():
-    """The issue is already created (and real) by the time any post-create
-    step (snapshot fetch, transition lookup, validation, transition) can
-    fail -- every caller that only shows the exception text must still be
-    able to find it, so the key must travel with the error, and the
+    """The issue is already created (and real) by the time transition_issue
+    can fail -- every caller that only shows the exception text must still
+    be able to find it, so the key must travel with the error, and the
     original exception must be preserved as the cause (never discarded)."""
     config = reporting_config_from_env(
         {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
     )
-    # No transition id matches TestOutcome.PASS's "3" -- _require_transition_available
-    # raises after the issue has already been created.
-    client = FakeReportingClient(transitions=[{"id": "2", "name": "New"}])
+    client = FakeReportingClient(fail_transition=True)
 
-    with pytest.raises(JiraClientError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         report_test_result(
             _execution(outcome=TestOutcome.PASS), client=client, config=config
         )
@@ -599,17 +365,86 @@ def test_report_test_result_post_create_failure_includes_the_created_issue_key()
     assert client.created_fields is not None  # the write genuinely happened
     assert "RHELTEST-9001" in str(exc_info.value)  # the real, created key
     assert exc_info.value.__cause__ is not None  # original exception preserved
-    assert "not currently available" in str(exc_info.value.__cause__)
+    assert "simulated transition failure" in str(exc_info.value.__cause__)
 
 
-def test_report_test_result_write_flow_validates_parent_first():
+# --------------------------------------------------------------------------
+# report_scenario_outcome -- the one shared policy used by
+# JiraScenarioReporter (sanity) and pytest_jira_plugin (smoke aggregate)
+# --------------------------------------------------------------------------
+
+
+def test_report_scenario_outcome_reports_pass():
     config = reporting_config_from_env(
         {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
     )
-    bad_parent = _valid_parent()
-    bad_parent["fields"]["project"]["key"] = "OTHERPROJ"
-    client = FakeReportingClient(parent=bad_parent)
+    client = FakeReportingClient()
 
-    with pytest.raises(ParentValidationError):
-        report_test_result(_execution(), client=client, config=config)
-    assert not (_WRITE_CALLS & set(client.calls))
+    result = report_scenario_outcome(
+        "failover_primary_to_secondary",
+        "Failover primary to secondary",
+        TestOutcome.PASS,
+        run_id="run-1",
+        client=client,
+        config=config,
+    )
+
+    assert result.issue_key == "RHELTEST-9001"
+    assert client.transitioned == ("RHELTEST-9001", "3")
+
+
+def test_report_scenario_outcome_rejects_unapproved_scenario_but_does_not_raise():
+    """An unapproved scenario_key must never be reported -- but (matching
+    every other Jira-reporting-failure path) it is logged and swallowed,
+    not allowed to crash the caller, unless raise_on_error=True."""
+    config = reporting_config_from_env(
+        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
+    )
+    client = FakeReportingClient()
+
+    result = report_scenario_outcome(
+        "not_an_approved_scenario",
+        "Some scenario",
+        TestOutcome.PASS,
+        run_id="run-1",
+        client=client,
+        config=config,
+    )
+
+    assert result is None
+    assert client.calls == []
+
+
+def test_report_scenario_outcome_raise_on_error_propagates_the_jira_failure():
+    config = reporting_config_from_env(
+        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
+    )
+    client = FakeReportingClient(fail_transition=True)
+
+    with pytest.raises(RuntimeError):
+        report_scenario_outcome(
+            "failover_primary_to_secondary",
+            "Failover primary to secondary",
+            TestOutcome.PASS,
+            run_id="run-1",
+            client=client,
+            config=config,
+            raise_on_error=True,
+        )
+
+
+def test_report_scenario_outcome_swallows_by_default():
+    config = reporting_config_from_env(
+        {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
+    )
+    client = FakeReportingClient(fail_transition=True)
+
+    result = report_scenario_outcome(
+        "failover_primary_to_secondary",
+        "Failover primary to secondary",
+        TestOutcome.PASS,
+        run_id="run-1",
+        client=client,
+        config=config,
+    )
+    assert result is None

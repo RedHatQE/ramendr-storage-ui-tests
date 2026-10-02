@@ -1,23 +1,13 @@
 """Environment-driven configuration for Jira Test Result reporting.
 
-**Phase 2 (normal-default) behavior:** every supported RamenDR automation
-execution reports its result to Jira, PASS or FAIL, without anyone having to
-export reporting flags -- ``JIRA_REPORT_RESULTS`` and ``JIRA_REPORT_DRY_RUN``
-both now default to the *real-write* setting (``true`` / ``false``
-respectively). This is a deliberate reversal of the Phase B/C pilot's
-opt-in-only defaults (see git history / ``docs/jira-test-result-reporting.md``
-"Migration: pilot opt-in -> normal default" for the rationale): the pilot is
-over, and RamenDR's Jira dashboard requires every real execution -- including
-failures -- to be visible.
-
-Both flags remain fully overridable via the environment for development/
-debugging: set ``JIRA_REPORT_RESULTS=false`` to make a local run perform
-*zero* Jira calls (no credentials needed), or ``JIRA_REPORT_DRY_RUN=true`` to
-keep reporting "on" (still validates the parent Test Case with a real
-read-only GET) while deliberately skipping every write. See
-``reporting.jira_results.build_jira_client()`` for what happens when
-reporting is enabled but credentials are missing: a clear, fail-fast error,
-never a silent skip.
+**Opt-in by default:** ``JIRA_REPORT_RESULTS`` defaults to ``false`` and
+``JIRA_REPORT_DRY_RUN`` defaults to ``true`` -- an ordinary local or CI
+``pytest`` invocation makes **zero** Jira calls and needs **zero**
+credentials unless reporting is explicitly turned on. To actually write to
+Jira: set ``JIRA_REPORT_RESULTS=true`` (and leave ``JIRA_REPORT_DRY_RUN``
+unset/``true`` to preview the payload with still-zero writes, or set it to
+``false`` for a real write, which then requires real credentials -- see
+``reporting.jira_results.build_jira_client()``).
 
 None of the values here are credentials -- this config is safe to log/print
 (unlike ``reporting.jira_client.JiraConfig``, which must never be printed as
@@ -32,9 +22,8 @@ from typing import Mapping
 
 from reporting.jira_models import TestOutcome
 
-#: RHELTEST production values discovered in Phase A. Used as defaults so the
-#: tool works out of the box against the reviewed schema; every value is
-#: still overridable via the matching environment variable.
+#: RHELTEST production values. Every value is still overridable via the
+#: matching environment variable.
 DEFAULT_PROJECT_KEY = "RHELTEST"
 DEFAULT_TEST_RESULT_ISSUE_TYPE_ID = "10272"
 DEFAULT_COMPOSE_VERSION_FIELD_ID = "customfield_11500"
@@ -54,9 +43,7 @@ def _bool_env(source: Mapping[str, str], name: str, default: bool) -> bool:
     Unset or empty returns ``default``. An explicit truthy/falsy spelling
     (see ``_TRUE_VALUES``/``_FALSE_VALUES``) returns the matching bool. Any
     other value raises ``ValueError`` rather than silently treating a typo
-    (e.g. ``JIRA_REPORT_DRY_RUN=ture``) as falsy -- for a safety flag like
-    ``JIRA_REPORT_DRY_RUN`` (default ``True``), silently coercing a typo to
-    ``False`` would disable a write-safety gate without any indication.
+    as falsy.
     """
     raw = source.get(name)
     if raw is None or raw == "":
@@ -90,8 +77,6 @@ class JiraReportingConfig:
 
     compose_version: str | None
     run_id: str | None
-    ci_job_url: str | None
-    git_commit: str | None
 
     def transition_id_for(self, outcome: TestOutcome) -> str:
         """Return the configured workflow transition id for an outcome."""
@@ -113,17 +98,14 @@ def reporting_config_from_env(
 ) -> JiraReportingConfig:
     """Build a :class:`JiraReportingConfig` from environment variables.
 
-    Defaults are the *normal* (real-reporting) behavior: ``report_results``
-    defaults to ``True`` and ``dry_run`` defaults to ``False``, so an
-    ordinary ``pytest ...`` invocation -- with Jira credentials supplied by
-    the environment/CI secret store -- reports every result automatically.
-    Set ``JIRA_REPORT_RESULTS=false`` or ``JIRA_REPORT_DRY_RUN=true``
-    explicitly to opt out for local development/debugging.
+    Defaults are opt-in: ``report_results`` defaults to ``False`` and
+    ``dry_run`` defaults to ``True``. Set ``JIRA_REPORT_RESULTS=true``
+    (CI secret store / explicit env) to turn reporting on.
     """
     source = env if env is not None else os.environ
     return JiraReportingConfig(
-        report_results=_bool_env(source, "JIRA_REPORT_RESULTS", True),
-        dry_run=_bool_env(source, "JIRA_REPORT_DRY_RUN", False),
+        report_results=_bool_env(source, "JIRA_REPORT_RESULTS", False),
+        dry_run=_bool_env(source, "JIRA_REPORT_DRY_RUN", True),
         strict=_bool_env(source, "JIRA_REPORT_STRICT", False),
         project_key=source.get("JIRA_PROJECT_KEY") or DEFAULT_PROJECT_KEY,
         test_result_issue_type_id=(
@@ -145,6 +127,4 @@ def reporting_config_from_env(
         ),
         compose_version=source.get("RAMENDR_COMPOSE_VERSION") or None,
         run_id=source.get("JIRA_RUN_ID") or None,
-        ci_job_url=source.get("CI_JOB_URL") or None,
-        git_commit=source.get("GIT_COMMIT") or None,
     )

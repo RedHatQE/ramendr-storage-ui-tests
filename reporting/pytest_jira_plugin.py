@@ -1,31 +1,10 @@
-"""Pytest integration: automatic Jira Test Result reporting via markers.
+"""Pytest integration: aggregate Jira Test Result reporting for smoke.
 
 This is the *only* module in ``reporting/`` that imports ``pytest`` --
-``reporting/jira_*.py`` stay pytest-agnostic so they remain usable from the
-standalone CLI (``scripts/jira/create_test_result_smoke.py``). Everything
-here is glue: it reads outcomes pytest already computed and calls the same
-``reporting.jira_results.report_test_result()`` used everywhere else.
-
-Two markers are provided, for two different reporting shapes:
-
-**``jira_test_case`` -- one Jira Test Result per marked test**::
-
-    @pytest.mark.jira_test_case(
-        "some_approved_scenario_id", scenario="Human-readable scenario label"
-    )
-    def test_something(...):
-        ...
-
-For each marked test, automatically:
-
-- PASS is reported when the test body (the ``"call"`` phase) completes
-  without raising.
-- FAIL is reported when the test body raises, using a sanitized summary of
-  the exception.
-- **Nothing** is reported when the test is skipped, or when it never
-  reaches the ``"call"`` phase at all (e.g. a fixture/setup failure) --
-  matching the sanity flow's rule that a precondition failure must never
-  fabricate a scenario result.
+``reporting/jira_*.py`` stay pytest-agnostic. Everything here is glue: it
+reads outcomes pytest already computed and calls the same
+``reporting.jira_results.report_scenario_outcome()`` used by
+``tests/ui/sanity/test_sanity.py``'s ``JiraScenarioReporter``.
 
 **``jira_aggregate_test_case`` -- one Jira Test Result for a whole group**::
 
@@ -52,15 +31,12 @@ reported **exactly once**, at ``pytest_sessionfinish``:
 - Skipped tests (e.g. a variant-specific ``skipif``) are never counted --
   neither as a pass nor a failure. If *every* test carrying a given
   ``scenario_id`` is skipped this invocation (nothing applicable to the
-  active ``PATTERN_VARIANT`` actually ran), nothing is reported at all --
-  same "never fabricate a result" rule as ``jira_test_case``.
+  active ``PATTERN_VARIANT`` actually ran), nothing is reported at all.
 - A fixture/setup-phase failure for a constituent test is likewise never
   counted -- an environment/pre-deployment/provisioning problem that means
   the test's own body never started is not a *test* failure, and must not
   create a Jira Test Result. If that leaves zero counted tests for a
-  scenario, nothing is reported (see the module's test/docs for this known
-  trade-off: an environment-wide fixture failure that skips every
-  constituent test produces silence, not a FAIL).
+  scenario, nothing is reported.
 - If every counted test passed, the aggregate reports **PASS** exactly
   once. If one or more failed, the aggregate reports **FAIL** exactly
   once, with every failing node id and a concise failure message included
@@ -70,15 +46,12 @@ reported **exactly once**, at ``pytest_sessionfinish``:
   already executed and succeeded, and cleanup belonging to that executed
   scenario then failed. That flips the test from contributing to PASS to
   contributing to FAIL (with a ``"(teardown) ..."``-prefixed message).
-  Teardown outcomes are otherwise ignored: after a skip, or after a setup
-  failure (the body never started -- nothing to reflect), or after a
-  ``"call"``-phase failure (already counted as a failure; not duplicated).
+  Teardown outcomes are otherwise ignored: after a skip, after a setup
+  failure (the body never started), or after a ``"call"``-phase failure
+  (already counted; not duplicated).
 
-In both cases, ``scenario_id`` must already be an approved key in
-``reporting.jira_test_cases.RAMENDR_JIRA_TEST_CASES`` -- see that module's
-docstring for why unapproved keys are refused rather than guessed. A test
-must carry at most one of these two markers; carrying both raises
-``TypeError`` (which marker's reporting shape would apply is ambiguous).
+``scenario_id`` must already be an approved key in
+``reporting.jira_test_cases.RAMENDR_JIRA_TEST_CASES``.
 
 Enable this plugin from the repo's root ``conftest.py`` via
 ``pytest_plugins = ["reporting.pytest_jira_plugin"]`` (pytest only honors
@@ -94,19 +67,16 @@ from typing import Any
 import pytest
 
 from reporting.jira_config import JiraReportingConfig, reporting_config_from_env
-from reporting.jira_models import TestOutcome, TestResultExecution
+from reporting.jira_models import TestOutcome
 from reporting.jira_results import (
     JiraCredentialsUnavailableError,
-    _log_report_result,
     build_jira_client,
     get_session_run_id,
-    report_test_result,
+    report_scenario_outcome,
 )
-from reporting.jira_test_cases import resolve_test_case_key
 
 logger = logging.getLogger(__name__)
 
-_MARKER_NAME = "jira_test_case"
 _AGGREGATE_MARKER_NAME = "jira_aggregate_test_case"
 
 #: ``pytest.Config.stash`` keys -- see https://docs.pytest.org/en/stable/reference/reference.html#stash
@@ -141,13 +111,7 @@ class _AggregateScenarioState:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register both markers so ``--strict-markers`` accepts them."""
-    config.addinivalue_line(
-        "markers",
-        f"{_MARKER_NAME}(scenario_id, *, scenario): automatically report this "
-        "test's PASS/FAIL to Jira under the given approved "
-        "reporting.jira_test_cases.RAMENDR_JIRA_TEST_CASES scenario id.",
-    )
+    """Register the marker so ``--strict-markers`` accepts it."""
     config.addinivalue_line(
         "markers",
         f"{_AGGREGATE_MARKER_NAME}(scenario_id, *, scenario): accumulate this "
@@ -165,32 +129,24 @@ def pytest_collection_modifyitems(
     credentials are unavailable.
 
     Only builds the client/config once per session (cached on
-    ``config.stash``); every other hook in this module reuses that cache
-    rather than re-reading the environment or re-raising independently.
+    ``config.stash``); every other hook in this module reuses that cache.
     """
-    needs_jira = any(
-        _marker_for(item) is not None or _aggregate_marker_for(item) is not None
-        for item in items
-    )
+    needs_jira = any(_aggregate_marker_for(item) is not None for item in items)
     if not needs_jira:
         return
     _get_or_build_client(config)
-
-
-def _marker_for(item: pytest.Item) -> pytest.Mark | None:
-    return item.get_closest_marker(_MARKER_NAME)
 
 
 def _aggregate_marker_for(item: pytest.Item) -> pytest.Mark | None:
     return item.get_closest_marker(_AGGREGATE_MARKER_NAME)
 
 
-def _scenario_id_and_label(marker: pytest.Mark, *, marker_name: str) -> tuple[str, str]:
+def _scenario_id_and_label(marker: pytest.Mark) -> tuple[str, str]:
     try:
         scenario_id = marker.args[0]
     except IndexError:
         raise TypeError(
-            f"@pytest.mark.{marker_name}(...) requires a positional "
+            f"@pytest.mark.{_AGGREGATE_MARKER_NAME}(...) requires a positional "
             "scenario_id argument"
         ) from None
     scenario = marker.kwargs.get("scenario") or scenario_id
@@ -217,99 +173,17 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
         # A fixture/setup-phase result (pass, fail, or skip) means the
         # test's own body hasn't started yet -- an environment/
         # pre-deployment/provisioning problem here is never a test outcome,
-        # so it is never reported/counted for either marker.
+        # so it is never reported/counted.
         return
 
-    individual_marker = _marker_for(item)
-    aggregate_marker = _aggregate_marker_for(item)
+    marker = _aggregate_marker_for(item)
+    if marker is None:
+        return
 
     if call.when == "call":
-        if individual_marker is not None and aggregate_marker is not None:
-            raise TypeError(
-                f"{item.nodeid!r} carries both @pytest.mark.{_MARKER_NAME} and "
-                f"@pytest.mark.{_AGGREGATE_MARKER_NAME} -- use exactly one; "
-                "their reporting shapes (one Test Result per test vs. one "
-                "shared across a group) are mutually exclusive."
-            )
-        if individual_marker is not None:
-            _report_individual(item, call, outcome, individual_marker)
-        elif aggregate_marker is not None:
-            _accumulate_aggregate(item, call, outcome, aggregate_marker)
-        return
-
-    if call.when == "teardown" and aggregate_marker is not None:
-        # Only the aggregate marker distinguishes "cleanup of a scenario
-        # that actually ran" from ordinary teardown noise (see
-        # _accumulate_aggregate_teardown). jira_test_case reports
-        # immediately at "call" time and, being unused by any production
-        # per-test scenario today (sanity uses JiraScenarioReporter's own
-        # manual start()/close_*() boundary instead), has no analogous
-        # teardown handling.
-        _accumulate_aggregate_teardown(item, call, outcome, aggregate_marker)
-
-
-def _report_individual(
-    item: pytest.Item,
-    call: pytest.CallInfo,
-    outcome: Any,
-    marker: pytest.Mark,
-) -> None:
-    """Report one Jira Test Result immediately for one ``jira_test_case``-marked test."""
-    report = outcome.get_result()
-    if report.skipped:
-        # A skip (e.g. a variant-specific skipif) is not a real outcome --
-        # never translated into a fabricated PASS or FAIL.
-        return
-    if not (report.passed or report.failed):
-        return
-
-    scenario_id, scenario = _scenario_id_and_label(marker, marker_name=_MARKER_NAME)
-
-    client = _get_or_build_client(item.config)
-    config = item.config.stash[_CONFIG_STASH_KEY]
-
-    test_case_key = resolve_test_case_key(scenario_id)
-    run_id = get_session_run_id(config)
-
-    failure_summary = None
-    if report.failed:
-        # call.excinfo is the real exception; str() is already a
-        # human-readable summary (report_test_result sanitizes/truncates it
-        # further) -- never a full traceback.
-        failure_summary = (
-            str(call.excinfo.value) if call.excinfo is not None else "test failed"
-        )
-
-    execution = TestResultExecution(
-        test_case_key=test_case_key,
-        scenario=scenario,
-        outcome=TestOutcome.FAIL if report.failed else TestOutcome.PASS,
-        run_id=run_id,
-        compose_version=config.compose_version,
-        git_commit=config.git_commit,
-        ci_job_url=config.ci_job_url,
-        duration_seconds=report.duration,
-        failure_summary=failure_summary,
-        test_function=item.nodeid,
-    )
-
-    # Mirrors reporting.jira_results.JiraScenarioReporter.close_success() /
-    # close_failure(): a Jira reporting failure is only ever logged, never
-    # allowed to turn a genuinely passing/failing pytest test into a
-    # different pytest outcome. report.outcome / report.longrepr (the
-    # actual test result pytest records) are deliberately left untouched
-    # below, regardless of what happens here.
-    try:
-        result = report_test_result(execution, client=client, config=config)
-        _log_report_result(scenario_id, run_id, result)
-    except Exception as jira_exc:  # noqa: BLE001 - never let this affect the test
-        logger.warning(
-            "Jira reporting failed for %r (scenario_id=%r, run_id=%s): %s",
-            item.nodeid,
-            scenario_id,
-            run_id,
-            jira_exc,
-        )
+        _accumulate_aggregate(item, call, outcome, marker)
+    elif call.when == "teardown":
+        _accumulate_aggregate_teardown(item, call, outcome, marker)
 
 
 def _accumulate_aggregate(
@@ -330,9 +204,7 @@ def _accumulate_aggregate(
     if not (report.passed or report.failed):
         return
 
-    scenario_id, scenario = _scenario_id_and_label(
-        marker, marker_name=_AGGREGATE_MARKER_NAME
-    )
+    scenario_id, scenario = _scenario_id_and_label(marker)
 
     states: dict[str, _AggregateScenarioState] = item.config.stash.setdefault(
         _AGGREGATE_STASH_KEY, {}
@@ -369,18 +241,15 @@ def _accumulate_aggregate_teardown(
 
     - the test was skipped or never reached "call" (a setup failure) --
       there's no executed scenario for this teardown to reflect a failure
-      of, so nothing is reported (per the "never fabricate a result" rule);
+      of, so nothing is reported;
     - the "call" phase itself already failed -- already counted as a
-      failure for this node id; a second entry would be redundant, not a
-      *new* outcome.
+      failure for this node id; a second entry would be redundant.
     """
     report = outcome.get_result()
     if not report.failed:
         return
 
-    scenario_id, _scenario = _scenario_id_and_label(
-        marker, marker_name=_AGGREGATE_MARKER_NAME
-    )
+    scenario_id, _scenario = _scenario_id_and_label(marker)
     states: dict[str, _AggregateScenarioState] = item.config.stash.setdefault(
         _AGGREGATE_STASH_KEY, {}
     )
@@ -398,8 +267,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     A scenario with zero counted (non-skipped, ``"call"``-phase) tests --
     every constituent test was skipped for the active variant, or none ever
-    reached the call phase -- reports nothing at all, matching
-    ``jira_test_case``'s "never fabricate a result" rule.
+    reached the call phase -- reports nothing at all.
     """
     config = session.config
     states: dict[str, _AggregateScenarioState] = config.stash.get(
@@ -426,38 +294,21 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         if state.considered == 0:
             continue
 
-        test_case_key = resolve_test_case_key(scenario_id)
         failure_summary = None
         if state.failures:
             failure_summary = "; ".join(
                 f"{nodeid}: {message}" for nodeid, message in state.failures
             )
 
-        execution = TestResultExecution(
-            test_case_key=test_case_key,
-            scenario=state.scenario,
-            outcome=TestOutcome.FAIL if state.failures else TestOutcome.PASS,
+        report_scenario_outcome(
+            scenario_id,
+            state.scenario,
+            TestOutcome.FAIL if state.failures else TestOutcome.PASS,
             run_id=run_id,
-            compose_version=reporting_config.compose_version,
-            git_commit=reporting_config.git_commit,
-            ci_job_url=reporting_config.ci_job_url,
-            duration_seconds=state.total_duration_seconds,
+            client=client,
+            config=reporting_config,
             failure_summary=failure_summary,
+            duration_seconds=state.total_duration_seconds,
             test_function=state.module_path,
+            raise_on_error=False,
         )
-
-        try:
-            result = report_test_result(
-                execution, client=client, config=reporting_config
-            )
-            _log_report_result(scenario_id, run_id, result)
-        except Exception as jira_exc:  # noqa: BLE001 - never let this affect the run
-            logger.warning(
-                "Aggregate Jira reporting failed for scenario_id=%r (run_id=%s, "
-                "%d test(s) considered, %d failure(s)): %s",
-                scenario_id,
-                run_id,
-                state.considered,
-                len(state.failures),
-                jira_exc,
-            )

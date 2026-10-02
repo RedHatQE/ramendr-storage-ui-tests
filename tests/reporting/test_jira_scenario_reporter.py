@@ -12,89 +12,30 @@ import logging
 
 import pytest
 
-from reporting.jira_client import JiraClientError, JiraWriteError
 from reporting.jira_config import reporting_config_from_env
-from reporting.jira_results import derive_run_id, jira_test_case_result
-
-
-def _valid_parent(key: str = "RHELTEST-3600") -> dict:
-    return {
-        "key": key,
-        "fields": {
-            "project": {"key": "RHELTEST"},
-            "issuetype": {"name": "Test Case"},
-            "labels": ["ramen-dr", "automation"],
-        },
-    }
+from reporting.jira_results import jira_test_case_result
 
 
 class FakeClient:
     """Fake JiraClient for JiraScenarioReporter tests. Records every call."""
 
-    def __init__(
-        self,
-        *,
-        parent=None,
-        transitions=None,
-        created_key="RHELTEST-9001",
-        fail_create: bool = False,
-        fail_get_after_create: bool = False,
-    ):
+    def __init__(self, *, created_key="RHELTEST-9001", fail_create=False):
         self.calls: list[str] = []
-        self._parent = parent if parent is not None else _valid_parent()
-        self._transitions = (
-            transitions
-            if transitions is not None
-            else [
-                {"id": "2", "name": "New"},
-                {"id": "3", "name": "PASS"},
-                {"id": "4", "name": "FAIL"},
-                {"id": "5", "name": "Blocked"},
-            ]
-        )
         self._created_key = created_key
         self._fail_create = fail_create
-        self._fail_get_after_create = fail_get_after_create
-        self._status_name = "New"
         self.created_fields: dict | None = None
         self.transitioned: tuple[str, str] | None = None
-
-    def get_issue(self, issue_key, *, expand=None):
-        self.calls.append("get_issue")
-        if issue_key == self._created_key and self.created_fields is not None:
-            if self._fail_get_after_create:
-                raise JiraClientError("transient GET failure after create")
-            fields = self.created_fields
-            custom_fields = {
-                k: v for k, v in fields.items() if k.startswith("customfield_")
-            }
-            return {
-                "fields": {
-                    "status": {"name": self._status_name},
-                    "parent": fields.get("parent", {}),
-                    "labels": fields.get("labels", []),
-                    **custom_fields,
-                }
-            }
-        return self._parent
-
-    def get_transitions(self, issue_key):
-        self.calls.append("get_transitions")
-        return self._transitions
 
     def create_issue(self, fields):
         self.calls.append("create_issue")
         if self._fail_create:
-            raise JiraWriteError("simulated create failure")
+            raise RuntimeError("simulated create failure")
         self.created_fields = fields
         return self._created_key
 
     def transition_issue(self, issue_key, transition_id):
         self.calls.append("transition_issue")
         self.transitioned = (issue_key, str(transition_id))
-        self._status_name = {"3": "PASS", "4": "FAIL", "5": "Blocked"}.get(
-            str(transition_id), self._status_name
-        )
 
 
 class _ScenarioBoom(RuntimeError):
@@ -105,27 +46,6 @@ def _enabled_config(**overrides):
     env = {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "false"}
     env.update(overrides)
     return reporting_config_from_env(env)
-
-
-# --------------------------------------------------------------------------
-# derive_run_id
-# --------------------------------------------------------------------------
-
-
-def test_derive_run_id_uses_configured_run_id_when_set():
-    config = reporting_config_from_env({"JIRA_RUN_ID": "ci-run-42"})
-    assert derive_run_id(config) == "ci-run-42"
-
-
-def test_derive_run_id_generates_a_sanity_prefixed_fallback_when_unset():
-    config = reporting_config_from_env({})
-    run_id = derive_run_id(config)
-    assert run_id.startswith("sanity-")
-
-
-def test_derive_run_id_fallback_is_unique_across_calls():
-    config = reporting_config_from_env({})
-    assert derive_run_id(config) != derive_run_id(config)
 
 
 # --------------------------------------------------------------------------
@@ -233,7 +153,7 @@ def test_manual_close_failure_preserves_original_exception_and_logs_jira_error(
         result = reporter.close_failure(original_exc)
 
     assert result is None  # Jira reporting itself failed
-    assert "original scenario failure is preserved" in caplog.text.lower()
+    assert "jira reporting failed" in caplog.text.lower()
 
 
 def test_double_close_is_a_noop_and_reports_only_once():
@@ -279,8 +199,7 @@ def test_close_success_then_close_success_again_is_a_noop():
 
 
 # --------------------------------------------------------------------------
-# Safety gates (reporting disabled / dry-run) -- reused from report_test_result
-# but verified again at the JiraScenarioReporter level.
+# Safety gates (reporting disabled / dry-run)
 # --------------------------------------------------------------------------
 
 
@@ -297,10 +216,10 @@ def test_reporting_disabled_makes_zero_jira_calls():
     ):
         pass
 
-    assert client.calls == []  # not even a GET
+    assert client.calls == []
 
 
-def test_dry_run_makes_no_writes():
+def test_dry_run_makes_no_jira_calls():
     config = reporting_config_from_env(
         {"JIRA_REPORT_RESULTS": "true", "JIRA_REPORT_DRY_RUN": "true"}
     )
@@ -315,8 +234,7 @@ def test_dry_run_makes_no_writes():
     ) as reporter:
         pass
 
-    assert "create_issue" not in client.calls
-    assert "transition_issue" not in client.calls
+    assert client.calls == []
     assert reporter.last_result.dry_run is True
 
 
@@ -357,7 +275,7 @@ def test_close_success_raises_when_strict_and_jira_write_fails():
         config=config,
     )
     reporter.start()
-    with pytest.raises(JiraWriteError):
+    with pytest.raises(RuntimeError, match="simulated create failure"):
         reporter.close_success()
 
 
@@ -387,10 +305,8 @@ def test_context_manager_with_strict_still_never_masks_a_scenario_failure():
 def test_two_scenarios_share_one_run_id_but_report_independently():
     config = _enabled_config()
     client_failover = FakeClient(created_key="RHELTEST-9001")
-    client_relocate = FakeClient(
-        parent=_valid_parent("RHELTEST-3610"), created_key="RHELTEST-9002"
-    )
-    run_id = derive_run_id(reporting_config_from_env({"JIRA_RUN_ID": "shared-run-1"}))
+    client_relocate = FakeClient(created_key="RHELTEST-9002")
+    run_id = "shared-run-1"
 
     with jira_test_case_result(
         "failover_primary_to_secondary",

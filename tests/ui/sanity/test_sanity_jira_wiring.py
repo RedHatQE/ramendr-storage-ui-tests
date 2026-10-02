@@ -147,42 +147,6 @@ class FakeSanityJiraClient:
         self.transitions_applied: list[tuple[str, str]] = []
         self.fail_create_for: set[str] = set()
         self._next_seq = 9000
-        self._status_by_key: dict[str, str] = {}
-        self._fields_by_key: dict[str, dict] = {}
-
-    def get_issue(self, issue_key, *, expand=None):
-        self.calls.append(("get_issue", issue_key))
-        if issue_key in self._fields_by_key:
-            fields = self._fields_by_key[issue_key]
-            custom_fields = {
-                k: v for k, v in fields.items() if k.startswith("customfield_")
-            }
-            return {
-                "fields": {
-                    "status": {"name": self._status_by_key.get(issue_key, "New")},
-                    "parent": fields.get("parent", {}),
-                    "labels": fields.get("labels", []),
-                    **custom_fields,
-                }
-            }
-        # Parent Test Case lookup (RHELTEST-3600 / RHELTEST-3610).
-        return {
-            "key": issue_key,
-            "fields": {
-                "project": {"key": "RHELTEST"},
-                "issuetype": {"name": "Test Case"},
-                "labels": ["ramen-dr", "automation"],
-            },
-        }
-
-    def get_transitions(self, issue_key):
-        self.calls.append(("get_transitions", issue_key))
-        return [
-            {"id": "2", "name": "New"},
-            {"id": "3", "name": "PASS"},
-            {"id": "4", "name": "FAIL"},
-            {"id": "5", "name": "Blocked"},
-        ]
 
     def create_issue(self, fields):
         parent_key = fields["parent"]["key"]
@@ -191,18 +155,11 @@ class FakeSanityJiraClient:
             raise JiraWriteError("simulated create failure")
         self._next_seq += 1
         key = f"RHELTEST-{self._next_seq}"
-        self._fields_by_key[key] = fields
-        self._status_by_key[key] = "New"
         self.created.append((key, fields))
         return key
 
     def transition_issue(self, issue_key, transition_id):
         self.calls.append(("transition_issue", issue_key, str(transition_id)))
-        self._status_by_key[issue_key] = {
-            "3": "PASS",
-            "4": "FAIL",
-            "5": "Blocked",
-        }.get(str(transition_id), "New")
         self.transitions_applied.append((issue_key, str(transition_id)))
 
     def outcome_for_parent(self, parent_key: str) -> str | None:
@@ -576,11 +533,10 @@ def test_dry_run_makes_no_jira_writes(monkeypatch):
 
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
+    # Dry-run makes zero Jira calls at all -- not even a GET.
+    assert client.calls == []
     assert client.created == []
     assert client.transitions_applied == []
-    # Dry-run still performs the (read-only) parent validation GET.
-    assert ("get_issue", "RHELTEST-3600") in client.calls
-    assert ("get_issue", "RHELTEST-3610") in client.calls
 
 
 # --------------------------------------------------------------------------
