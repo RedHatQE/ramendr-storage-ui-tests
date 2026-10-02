@@ -56,7 +56,12 @@ def has_vm_drpc() -> bool:
 
 
 def hub_argocd_namespace() -> str:
-    """Namespace that holds child Argo Applications for the installed BOM."""
+    """Namespace that holds hub Argo Applications (Validated Patterns GitOps)."""
+    return "vp-gitops"
+
+
+def hub_pattern_app_name() -> str:
+    """Parent Pattern Application name in hub_argocd_namespace()."""
     if PATTERN_VARIANT == "drpartner-minimal":
         return "ramendr-starter-kit-minimal"
     return f"ramendr-starter-kit-{PATTERN_VARIANT}"

@@ -1,0 +1,32 @@
+# Smoke pytest only (reuse PVC kubeconfigs after pattern-finalize).
+# Apply Task first: kubectl apply -n ramendr-ci -f ci/tekton/tasks/run-pytest.yaml
+# Then: kubectl create -n ramendr-ci -f ci/tekton/examples/taskrun-pytest-smoke.yaml
+apiVersion: tekton.dev/v1
+kind: TaskRun
+metadata:
+  generateName: ramendr-pytest-smoke-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  taskRef:
+    name: ramendr-run-pytest
+  serviceAccountName: ramendr-ci-pipeline
+  timeout: "2h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: ecoengverticals-qe.devcluster.openshift.com
+    - name: git-revision
+      value: tekton_ci
+    - name: image
+      value: quay.io/epassaro/ramendr-ci:latest
+    - name: pytest-args
+      value: tests/ui/smoke -v --junitxml=/workspace/data/artifacts/junit-smoke.xml
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      secret:
+        secretName: ramendr-ci-secrets

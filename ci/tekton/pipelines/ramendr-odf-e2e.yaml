@@ -1,0 +1,253 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ramendr-odf-e2e
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  description: >
+    ODF variant: optional destroy → install → pattern-prepare → install-byoc
+    (utility-container) → pattern-finalize → smoke pytest → sanity pytest.
+    Teardown is a separate Pipeline (ramendr-teardown). Set skip-destroy /
+    skip-install to true to reuse an existing AWS env (future vendor flows).
+  params:
+    - name: pattern-variant
+      type: string
+      default: odf
+    - name: hub-ocp-version
+      type: string
+      default: "4.22.1"
+    - name: base-domain
+      type: string
+    - name: hosted-zone-id
+      type: string
+    - name: skip-destroy
+      type: string
+      default: "false"
+      description: "true to skip destroy (reuse existing clusters)"
+    - name: skip-install
+      type: string
+      default: "false"
+      description: "true to skip openshift-install (reuse existing clusters)"
+    - name: pytest-args-smoke
+      type: string
+      default: tests/ui/smoke -v --junitxml=/workspace/data/artifacts/junit-smoke.xml
+    - name: pytest-args-sanity
+      type: string
+      default: tests/ui/sanity -v --junitxml=/workspace/data/artifacts/junit-sanity.xml
+    - name: git-url
+      type: string
+      default: https://github.com/RedHatQE/ramendr-storage-ui-tests.git
+    - name: git-revision
+      type: string
+      default: main
+    - name: image
+      type: string
+      description: QE CI image (destroy/install/prepare/finalize/pytest)
+      default: quay.io/epassaro/ramendr-ci:latest
+    - name: utility-image
+      type: string
+      description: Validated Patterns utility-container for --install-byoc (no privileged)
+      default: quay.io/validatedpatterns/utility-container:v1.0.5
+  workspaces:
+    - name: data
+      description: RWO PVC for install dirs, .work/, src clone, artifacts
+    - name: secrets
+      description: Secret ramendr-ci-secrets (values-secret, AWS, install-configs)
+  tasks:
+    - name: destroy
+      taskRef:
+        name: ramendr-redeploy-stage
+      timeout: "2h"
+      when:
+        - input: "$(params.skip-destroy)"
+          operator: in
+          values: ["false", "0", "no"]
+      params:
+        - name: stage-arg
+          value: "--destroy-only"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: hub-ocp-version
+          value: "$(params.hub-ocp-version)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: hosted-zone-id
+          value: "$(params.hosted-zone-id)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: image
+          value: "$(params.image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets
+
+    - name: install
+      # When destroy is skipped (when), Tekton still treats it as complete for runAfter.
+      runAfter: ["destroy"]
+      taskRef:
+        name: ramendr-redeploy-stage
+      timeout: "4h"
+      when:
+        - input: "$(params.skip-install)"
+          operator: in
+          values: ["false", "0", "no"]
+      params:
+        - name: stage-arg
+          value: "--install-only"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: hub-ocp-version
+          value: "$(params.hub-ocp-version)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: hosted-zone-id
+          value: "$(params.hosted-zone-id)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: image
+          value: "$(params.image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets
+
+    - name: pattern-prepare
+      runAfter: ["install"]
+      taskRef:
+        name: ramendr-redeploy-stage
+      timeout: "1h"
+      params:
+        - name: stage-arg
+          value: "--pattern-prepare"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: hub-ocp-version
+          value: "$(params.hub-ocp-version)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: hosted-zone-id
+          value: "$(params.hosted-zone-id)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: image
+          value: "$(params.image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets
+
+    - name: install-byoc
+      runAfter: ["pattern-prepare"]
+      taskRef:
+        name: ramendr-redeploy-stage
+      timeout: "2h"
+      params:
+        - name: stage-arg
+          value: "--install-byoc"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: hub-ocp-version
+          value: "$(params.hub-ocp-version)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: hosted-zone-id
+          value: "$(params.hosted-zone-id)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        # Utility container: pattern.sh detects K8s and runs make (no nested podman).
+        - name: image
+          value: "$(params.utility-image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets
+
+    - name: pattern-finalize
+      runAfter: ["install-byoc"]
+      taskRef:
+        name: ramendr-redeploy-stage
+      timeout: "4h"
+      params:
+        - name: stage-arg
+          value: "--pattern-finalize"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: hub-ocp-version
+          value: "$(params.hub-ocp-version)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: hosted-zone-id
+          value: "$(params.hosted-zone-id)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: image
+          value: "$(params.image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets
+
+    - name: smoke-tests
+      runAfter: ["pattern-finalize"]
+      taskRef:
+        name: ramendr-run-pytest
+      timeout: "1h"
+      params:
+        - name: pytest-args
+          value: "$(params.pytest-args-smoke)"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: image
+          value: "$(params.image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets
+
+    - name: sanity-tests
+      runAfter: ["smoke-tests"]
+      taskRef:
+        name: ramendr-run-pytest
+      timeout: "6h"
+      params:
+        - name: pytest-args
+          value: "$(params.pytest-args-sanity)"
+        - name: pattern-variant
+          value: "$(params.pattern-variant)"
+        - name: base-domain
+          value: "$(params.base-domain)"
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: image
+          value: "$(params.image)"
+      workspaces:
+        - name: data
+          workspace: data
+        - name: secrets
+          workspace: secrets

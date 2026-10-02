@@ -1,0 +1,168 @@
+# RamenDR QE CI image for OpenShift Pipelines Tasks.
+#
+# Provides: oc, openshift-install, aws, podman, git, jq, curl, python3
+# (pytest/Playwright), virtctl.
+#
+# Build from repo root (needs requirements.txt context):
+#   podman build -f ci/tekton/Containerfile \
+#     -t quay.io/<org>/ramendr-ci:$(date +%Y-%m-%d) .
+#
+# Override pins at build time:
+#   --build-arg OCP_VERSION=4.22.1
+#   --build-arg VIRTCTL_VERSION=v1.5.0
+#   --build-arg PYTHON_PKG=python3.12
+#
+# Runtime: Task steps set privileged=true for nested podman (pattern.sh).
+# On OpenShift, bind SCC privileged to the Pipeline ServiceAccount.
+
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi:latest
+FROM ${BASE_IMAGE}
+
+ARG TARGETARCH=amd64
+ARG OCP_VERSION=4.22.1
+# KubeVirt virtctl release tag (OpenShift Virtualization–compatible CLI).
+ARG VIRTCTL_VERSION=v1.5.0
+# UBI default python3 is 3.9; pytest>=9 needs >=3.10 (match .github 3.12).
+ARG PYTHON_PKG=python3.12
+
+USER root
+
+# dnf: tooling + nested podman + Chromium/Playwright runtime libs (best-effort on UBI).
+# UBI ships curl-minimal (conflicts with curl); do not install curl.
+RUN dnf -y install \
+      podman \
+      crun \
+      fuse-overlayfs \
+      git \
+      jq \
+      tar \
+      gzip \
+      unzip \
+      findutils \
+      which \
+      procps-ng \
+      "${PYTHON_PKG}" \
+      "${PYTHON_PKG}-pip" \
+      "${PYTHON_PKG}-devel" \
+      gcc \
+      make \
+      openssh-clients \
+      ca-certificates \
+      nss \
+      nss-util \
+      atk \
+      at-spi2-atk \
+      gtk3 \
+      libdrm \
+      mesa-libgbm \
+      alsa-lib \
+      libX11 \
+      libXcomposite \
+      libXdamage \
+      libXext \
+      libXfixes \
+      libXrandr \
+      libxcb \
+      pango \
+      cairo \
+      cups-libs \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf \
+    && ln -sf "/usr/bin/${PYTHON_PKG}" /usr/local/bin/python3 \
+    && ln -sf "/usr/bin/${PYTHON_PKG}" /usr/local/bin/python \
+    && python3 --version
+
+# Nested podman in privileged Tekton: vfs avoids overlay/fuse issues in pods.
+RUN mkdir -p /etc/containers /var/lib/containers /run/containers \
+    && printf '%s\n' \
+      '[storage]' \
+      'driver = "vfs"' \
+      'runroot = "/run/containers/storage"' \
+      'graphroot = "/var/lib/containers/storage"' \
+      > /etc/containers/storage.conf \
+    && printf '%s\n' \
+      '[containers]' \
+      'netns = "host"' \
+      'userns = "host"' \
+      'ipcns = "host"' \
+      'utsns = "host"' \
+      'cgroupns = "host"' \
+      'cgroups = "disabled"' \
+      'log_driver = "k8s-file"' \
+      '[engine]' \
+      'cgroup_manager = "cgroupfs"' \
+      'events_logger = "file"' \
+      'runtime = "crun"' \
+      > /etc/containers/containers.conf
+
+# OpenShift client + installer (pinned; redeploy.sh can still re-download if HUB_OCP_VERSION differs).
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64|x86_64) ocp_arch="" ;; \
+      arm64|aarch64) ocp_arch="-arm64" ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    base="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OCP_VERSION}"; \
+    curl -fsSL "${base}/openshift-client-linux${ocp_arch}.tar.gz" \
+      | tar -xz -C /usr/local/bin oc kubectl; \
+    curl -fsSL "${base}/openshift-install-linux${ocp_arch}.tar.gz" \
+      | tar -xz -C /usr/local/bin openshift-install; \
+    oc version --client; \
+    openshift-install version
+
+# AWS CLI v2
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64|x86_64) aws_arch=x86_64 ;; \
+      arm64|aarch64) aws_arch=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/aws /tmp/awscliv2.zip; \
+    aws --version
+
+# virtctl (Windows VM SSH / restart during pattern stage)
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64|x86_64) varch=amd64 ;; \
+      arm64|aarch64) varch=arm64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://github.com/kubevirt/kubevirt/releases/download/${VIRTCTL_VERSION}/virtctl-${VIRTCTL_VERSION}-linux-${varch}" \
+      -o /usr/local/bin/virtctl; \
+    chmod +x /usr/local/bin/virtctl; \
+    virtctl version --client
+
+# Python test deps + Playwright Chromium (browsers under /opt for shared HOME mounts).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install -r /tmp/requirements.txt \
+    && python3 -m playwright install chromium \
+    && (python3 -m playwright install-deps chromium || true) \
+    && rm -f /tmp/requirements.txt \
+    && mkdir -p /workspace \
+    && chmod -R a+rX /opt/ms-playwright
+
+WORKDIR /workspace
+
+# Sanity: fail the image build if a required binary is missing.
+RUN set -eux; \
+    for cmd in oc openshift-install aws podman git python3 curl jq virtctl; do \
+      command -v "$cmd"; \
+    done; \
+    python3 -c "import pytest, playwright"; \
+    podman --version
+
+LABEL \
+  org.opencontainers.image.title="ramendr-ci" \
+  org.opencontainers.image.description="QE CI image for RamenDR OpenShift Pipelines (redeploy + Playwright)" \
+  org.opencontainers.image.source="https://github.com/RedHatQE/ramendr-storage-ui-tests" \
+  io.openshift.tags="ramendr,tekton,ci" \
+  ocp.version="${OCP_VERSION}"

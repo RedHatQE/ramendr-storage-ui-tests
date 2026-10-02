@@ -1,0 +1,89 @@
+# Example PVC for the shared data workspace (same claim as e2e / pytest TaskRuns).
+# Apply once if missing: kubectl apply -n ramendr-ci -f ci/tekton/examples/pipelinerun-teardown.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ramendr-ci-data
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  # storageClassName: <your-rwo-storageclass>
+---
+# Example: reuse an existing env (future vendor / partner flows).
+# Skips destroy + install; runs pattern (optional refresh) then tests.
+# For tests-only, use taskrun-pytest-smoke.yaml / taskrun-pytest-sanity.yaml.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ramendr-odf-reuse-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  pipelineRef:
+    name: ramendr-odf-e2e
+  timeouts:
+    pipeline: "6h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: EXAMPLE.devcluster.openshift.com
+    - name: hosted-zone-id
+      value: ZXXXXXXXXXXXXX
+    - name: skip-destroy
+      value: "true"
+    - name: skip-install
+      value: "true"
+    - name: git-revision
+      value: main
+    - name: image
+      value: quay.io/example/ramendr-ci:latest
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      secret:
+        secretName: ramendr-ci-secrets
+  taskRunTemplate:
+    serviceAccountName: ramendr-ci-pipeline
+---
+# Teardown PipelineRun: destroy AWS hub + spokes (--destroy-only).
+# Console Start: workspace data = PVC ramendr-ci-data; secrets = Secret ramendr-ci-secrets.
+#   kubectl create -n ramendr-ci -f ci/tekton/examples/pipelinerun-teardown.yaml
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ramendr-teardown-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  pipelineRef:
+    name: ramendr-teardown
+  timeouts:
+    pipeline: "2h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: EXAMPLE.devcluster.openshift.com
+    - name: hosted-zone-id
+      value: ZXXXXXXXXXXXXX
+    - name: git-revision
+      value: main
+    - name: image
+      value: quay.io/epassaro/ramendr-ci:latest
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      secret:
+        secretName: ramendr-ci-secrets
+  taskRunTemplate:
+    serviceAccountName: ramendr-ci-pipeline

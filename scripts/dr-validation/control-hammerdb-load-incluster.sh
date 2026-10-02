@@ -32,15 +32,13 @@ cleanup_load_secret() {
 HOSTS="$(get_hammerdb_vm_hosts "$SPOKE_KC")"
 [[ -n "$HOSTS" ]] || exit 1
 
-LINUX_PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
-if [[ -z "$LINUX_PASS" ]]; then
-  LINUX_PASS="$(cloud_init_password_from_vault)"
+NEED_WINDOWS=0
+if echo "$HOSTS" | awk -F '\t' '$4 == "windows" { found=1 } END { exit !found }'; then
+  NEED_WINDOWS=1
 fi
+load_hammerdb_ssh_passwords "$NEED_WINDOWS" || exit 1
+LINUX_PASS="${LINUX_SSH_PASSWORD}"
 WINDOWS_PASS="${WINDOWS_SSH_PASSWORD:-}"
-if [[ -z "$WINDOWS_PASS" ]]; then
-  load_windows_ssh_password || true
-  WINDOWS_PASS="${WINDOWS_SSH_PASSWORD:-}"
-fi
 
 TMP_DIR="$(mktemp -d)"
 printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
@@ -57,19 +55,8 @@ trap load_cleanup EXIT
 LOAD_SECRET_CREATE=(oc create secret generic "$LOAD_SECRET_NAME"
   --from-file=hosts.tsv="$TMP_DIR/hosts.tsv"
   -n "$VM_NAMESPACE" --dry-run=client -o yaml)
-LOAD_SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS:-}")
+LOAD_SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS}")
 LOAD_SECRET_CREATE+=(--from-literal=windows-password="${WINDOWS_PASS:-}")
-SSH_KEY_FILE="${SSH_IDENTITY_FILE:-}"
-if [[ -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ]]; then
-  if [[ -f "$HOME/.ssh/id_ed25519" ]]; then
-    SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
-  elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
-    SSH_KEY_FILE="$HOME/.ssh/id_rsa"
-  fi
-fi
-if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
-  LOAD_SECRET_CREATE+=(--from-file=ssh-privatekey="$SSH_KEY_FILE")
-fi
 KUBECONFIG="$SPOKE_KC" "${LOAD_SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 if [[ "$ACTION" == "start" ]]; then
@@ -108,7 +95,7 @@ spec:
             command -v timeout >/dev/null 2>&1 || { echo "ERROR: timeout(1) is required"; exit 1; }
             LINUX_PASS="\$(tr -d '\n' < /ssh/linux-password 2>/dev/null || true)"
             WINDOWS_PASS="\$(tr -d '\n' < /ssh/windows-password 2>/dev/null || true)"
-            test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
+            [[ -n "\$LINUX_PASS" ]] || { echo "ERROR: linux-password missing from load secret"; exit 1; }
             cp /ssh/hosts.tsv /tmp/hosts.tsv
             ACTION="\${HAMMERDB_LOAD_ACTION}"
             SSH_CMD_TIMEOUT=60
@@ -127,16 +114,9 @@ spec:
             fi
             ssh_linux() {
               local host="\$1" port="\$2" ssh_user="\$3"
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20"
-              if [[ -f /tmp/ssh-privatekey ]]; then
-                timeout -k 5 "\$SSH_CMD_TIMEOUT" ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$LINUX_CMD" && return 0
-              fi
-              if [[ -n "\$LINUX_PASS" ]]; then
-                timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
-                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "\$LINUX_CMD" && return 0
-              fi
-              return 1
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o PreferredAuthentications=password -o PubkeyAuthentication=no"
+              timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
+                "\${ssh_user}@\${host}" "\$LINUX_CMD"
             }
             ssh_windows() {
               local host="\$1" port="\$2" ssh_user="\$3"
@@ -195,12 +175,8 @@ spec:
             path: hosts.tsv
           - key: linux-password
             path: linux-password
-            optional: true
           - key: windows-password
             path: windows-password
-            optional: true
-          - key: ssh-privatekey
-            path: ssh-privatekey
             optional: true
 EOF
 

@@ -59,10 +59,13 @@ Windows VMs receive **SQL Server 2022 Express** (via staged `SQLEXPR_x64_ENU.exe
 `HammerDB-5.0-Prod-Win.tar.gz`. The old `SQL2022-SSEI-Expr.exe` CDN path 404s, and the
 former Express fwlink now redirects to SQL 2025 — do not use those. The in-cluster
 install Job stages installers on the utility container and copies them over SSH — no winget,
-choco, or golden-image changes required. Windows `Administrator` password is read from Vault
-`secret/global/windows-admin` or `windows-admin` in `VALUES_SECRET` (v2.0 `secrets` list form).
-`mssql-hammerdb` in `VALUES_SECRET` (`sa_password`, `user`, `password`) for Windows SQL
-install credentials, or set `DR_VALIDATION_MSSQL_*` in the environment. See
+choco, or golden-image changes required. In-cluster HammerDB Jobs use **password SSH only**
+(no `ssh-privatekey` mount): Linux `cloud-user` from Vault `secret/global/cloud-init`
+(userData `password`), Windows `Administrator` from Vault `secret/global/windows-admin`.
+Env overrides: `DR_VALIDATION_SSH_PASSWORD`, `DR_VALIDATION_WINDOWS_SSH_PASSWORD`.
+`VALUES_SECRET` is a fallback when Vault is unreachable. `mssql-hammerdb` in
+`VALUES_SECRET` (`sa_password`, `user`, `password`) for Windows SQL install credentials,
+or set `DR_VALIDATION_MSSQL_*`. See
 [`examples/values-secret-v2-windows.fragment.yaml`](examples/values-secret-v2-windows.fragment.yaml).
 
 Table reference: [`DATABASE-SCHEMA.md`](DATABASE-SCHEMA.md).
@@ -86,7 +89,7 @@ is detected. Override mount/drive via `DR_VALIDATION_DATA_DISK_MOUNT` /
 DR validation Jobs (`install-hammerdb-incluster.sh`, `collect-db-snapshot-incluster.sh`,
 `start-hammerdb-load-incluster.sh`, `stop-hammerdb-load-incluster.sh`, etc.) use
 `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` from `scripts/dr-validation/lib.sh`.
-The default is the semver tag **`quay.io/validatedpatterns/utility-container:v1.0.4`** (amd64).
+The default is the semver tag **`quay.io/validatedpatterns/utility-container:v1.0.5`** (amd64).
 
 This test harness targets **amd64** hub and spoke workers (AWS `openshift-install` in
 `eu-north-1` / `eu-central-1` / `eu-west-1`). Do not schedule these Jobs on arm64 nodes
@@ -161,7 +164,7 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `DR_VALIDATION_EXPECTED_VMS` | `4` | Full fleet in gitops-vms for post-DR automation |
 | `DR_VALIDATION_BOOTSTRAP_VM_COUNT` | `2` | Running Linux VMs required before HammerDB bootstrap |
 | `DR_VALIDATION_BOOTSTRAP_VM_PATTERN` | `rhel` | Regular expression matched against bootstrap VM / SSH endpoint names during bootstrap wait |
-| `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` | `v1.0.4` in `lib.sh` | Utility container for in-cluster SSH Jobs; **amd64 only** on default AWS workers |
+| `DR_VALIDATION_UTILITY_CONTAINER_IMAGE` | `v1.0.5` in `lib.sh` | Utility container for in-cluster SSH Jobs; **amd64 only** on default AWS workers |
 | `SSH_IDENTITY_FILE` | `~/.ssh/id_rsa` | Private key for direct/laptop SSH (`install-writer.sh`, non-in-cluster collect) |
 | `DR_VALIDATION_SSH_PASSWORD` | (from Vault) | Password for in-cluster install/collect Jobs (private keys are not copied to spokes) |
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |
