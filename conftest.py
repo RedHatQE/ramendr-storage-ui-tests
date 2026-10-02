@@ -12,6 +12,12 @@ from config.settings import (
     SECONDARY_KUBECONFIG,
 )
 
+# pytest only honors `pytest_plugins` declared in the *root* conftest.py.
+# See reporting/pytest_jira_plugin.py for the automatic marker-based Jira
+# Test Result reporting this registers (used by smoke; sanity's independent
+# scenario boundaries continue to use reporting.jira_results directly).
+pytest_plugins = ["reporting.pytest_jira_plugin"]
+
 
 @pytest.fixture(scope="session")
 def browser_context_args(
