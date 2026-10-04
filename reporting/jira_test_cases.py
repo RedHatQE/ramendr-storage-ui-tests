@@ -1,12 +1,11 @@
 """Approved Ramen DR automation scenario -> Jira Test Case key mapping.
 
-Deliberately minimal: only scenarios explicitly approved after a real Jira
-discovery pass (``scripts/jira/discover_ramen_dr_test_cases.py``, read-only
-JQL search for ``project = RHELTEST AND labels = "ramen-dr" AND type = "Test
-Case"``) are listed here. Do **not** add a Test Case until its key/summary
-has actually been retrieved from Jira and matched against real automation --
-adding one prematurely would let automation silently attach real Test
-Results to a parent that was never validated.
+Deliberately minimal: only scenarios explicitly approved after confirming
+the real Jira Test Case's key/summary (``project = RHELTEST AND labels =
+"ramen-dr" AND type = "Test Case"``) match real automation are listed here.
+Do **not** add a Test Case until that's been confirmed -- adding one
+prematurely would let automation silently attach real Test Results to a
+parent that was never validated.
 
 Of the 13 Ramen DR Test Cases confirmed to exist in RHELTEST, 3 are mapped
 so far:
@@ -19,22 +18,20 @@ so far:
   applicable-for-the-active-variant ``tests/ui/smoke/test_smoke.py`` check
   (one Jira Test Result for the *whole* smoke suite per invocation -- PASS
   only if every applicable smoke test passed; see
-  ``reporting.pytest_jira_plugin``'s ``jira_aggregate_test_case`` marker,
-  not the per-test ``jira_test_case`` marker).
+  ``reporting.pytest_jira_plugin``'s ``jira_aggregate_test_case`` marker).
 
 RHELTEST-3601 through RHELTEST-3611 (except RHELTEST-3610 above) are **not**
-mapped yet -- confirmed via discovery to correspond to scenarios with no
-current automation in this repo (e.g. repeated failover/failback cycles,
-snapshots, hotplug disks, VMware-imported/migrated Windows, static
-networks, dual-NIC Windows, failed-failover cleanup/retry). Do not map
-these until real automation exists for them and each mapping is reviewed.
+mapped yet -- they correspond to scenarios with no current automation in
+this repo (e.g. repeated failover/failback cycles, snapshots, hotplug
+disks, VMware-imported/migrated Windows, static networks, dual-NIC
+Windows, failed-failover cleanup/retry). Do not map these until real
+automation exists for them and each mapping is reviewed.
 """
 
 from __future__ import annotations
 
-#: scenario id (as used by --test-case / RamenDR automation, or by the
-#: ``jira_test_case`` / ``jira_aggregate_test_case`` pytest markers) ->
-#: Jira Test Case key.
+#: scenario id (as used by RamenDR automation, or by the
+#: ``jira_aggregate_test_case`` pytest marker) -> Jira Test Case key.
 RAMENDR_JIRA_TEST_CASES: dict[str, str] = {
     "failover_primary_to_secondary": "RHELTEST-3600",
     "relocate_secondary_to_primary": "RHELTEST-3610",
