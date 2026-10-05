@@ -6,6 +6,8 @@
 __pycache__/
 *.pyc
 .env
+.env.*
+jira-token.txt
 playwright-report/
 test-results/
 .DS_Store
