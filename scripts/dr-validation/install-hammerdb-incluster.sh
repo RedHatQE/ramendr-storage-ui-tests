@@ -24,41 +24,18 @@ cleanup_hammerdb_install_resources() {
 }
 trap cleanup_hammerdb_install_resources EXIT INT TERM
 
-LINUX_PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
-if [[ -z "$LINUX_PASS" ]]; then
-  LINUX_PASS="$(cloud_init_password_from_vault)"
-fi
-WINDOWS_PASS="${WINDOWS_SSH_PASSWORD:-}"
-if [[ -z "$WINDOWS_PASS" ]]; then
-  load_windows_ssh_password || true
-  WINDOWS_PASS="${WINDOWS_SSH_PASSWORD:-}"
-fi
-
-SSH_KEY_FILE="${SSH_IDENTITY_FILE:-}"
-if [[ "${DR_VALIDATION_INCLUSTER_SSH_KEY:-1}" == "1" ]]; then
-  if [[ -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ]]; then
-    if [[ -f "$HOME/.ssh/id_ed25519" ]]; then
-      SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
-    elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
-      SSH_KEY_FILE="$HOME/.ssh/id_rsa"
-    fi
-  fi
-else
-  SSH_KEY_FILE=""
-fi
-if [[ -z "$LINUX_PASS" && ( -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ) ]]; then
-  err "In-cluster HammerDB install needs DR_VALIDATION_SSH_PASSWORD, Vault cloud-init password, or a local SSH key."
-  exit 1
-fi
-
 HOSTS="$(get_hammerdb_vm_hosts "$SPOKE_KC")"
 [[ -n "$HOSTS" ]] || exit 1
 TARGET_COUNT="$(echo "$HOSTS" | wc -l | tr -d ' ')"
+NEED_WINDOWS=0
 if echo "$HOSTS" | awk -F '\t' '$4 == "windows" { found=1 } END { exit !found }'; then
-  if [[ -z "$WINDOWS_PASS" ]]; then
-    err "Windows HammerDB target(s) require WINDOWS_SSH_PASSWORD or windows-admin in VALUES_SECRET."
-    exit 1
-  fi
+  NEED_WINDOWS=1
+fi
+# Password-only SSH from Vault (env override → Vault → VALUES_SECRET). No ssh-privatekey.
+load_hammerdb_ssh_passwords "$NEED_WINDOWS" || exit 1
+LINUX_PASS="${LINUX_SSH_PASSWORD}"
+WINDOWS_PASS="${WINDOWS_SSH_PASSWORD:-}"
+if [[ "$NEED_WINDOWS" -eq 1 ]]; then
   ensure_mssql_credentials || exit 1
 fi
 log "Installing HammerDB workload on ${TARGET_COUNT} edge VM(s) (${PRIMARY})..."
@@ -97,15 +74,12 @@ KUBECONFIG="$SPOKE_KC" oc create configmap ramendr-dr-hammerdb-install \
 SECRET_CREATE=(oc create secret generic ramendr-dr-hammerdb-ssh
   --from-file=hosts.tsv="$TMP_DIR/hosts.tsv"
   -n "$VM_NAMESPACE" --dry-run=client -o yaml)
-SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS:-}")
+SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS}")
 SECRET_CREATE+=(--from-literal=windows-password="${WINDOWS_PASS:-}")
 if [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" ]]; then
   SECRET_CREATE+=(--from-literal=mssql-sa-password="${DR_VALIDATION_MSSQL_SA_PASSWORD}")
   SECRET_CREATE+=(--from-literal=mssql-user="${DR_VALIDATION_MSSQL_USER}")
   SECRET_CREATE+=(--from-literal=mssql-password="${DR_VALIDATION_MSSQL_PASSWORD}")
-fi
-if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
-  SECRET_CREATE+=(--from-file=ssh-privatekey="$SSH_KEY_FILE")
 fi
 KUBECONFIG="$SPOKE_KC" "${SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
@@ -154,7 +128,7 @@ spec:
             MSSQL_SA="\$(tr -d '\n' < /ssh/mssql-sa-password 2>/dev/null || true)"
             MSSQL_USER="\$(tr -d '\n' < /ssh/mssql-user 2>/dev/null || true)"
             MSSQL_PASSWORD="\$(tr -d '\n' < /ssh/mssql-password 2>/dev/null || true)"
-            test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
+            [[ -n "\$LINUX_PASS" ]] || { echo "ERROR: linux-password missing from install secret"; exit 1; }
             cp /ssh/hosts.tsv /tmp/hosts.tsv
             mkdir -p /tmp/ramendr-dr-validation-install /tmp/windows-staging
             tar -xzf /payload/payload.tgz -C /tmp/ramendr-dr-validation-install
@@ -223,21 +197,10 @@ spec:
             install_linux_vm() {
               local host="\$1" port="\$2" ssh_user="\$3"
               local scp_opts="-P \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PreferredAuthentications=password -o PubkeyAuthentication=no"
               local remote="mkdir -p /tmp/ramendr-dr-validation-install && tar -xzf /tmp/payload.tgz -C /tmp/ramendr-dr-validation-install && REPO_ROOT=/tmp/ramendr-dr-validation-install bash /tmp/ramendr-dr-validation-install/hammerdb/install-on-vm.sh"
-              if [[ -f /tmp/ssh-privatekey ]]; then
-                scp -i /tmp/ssh-privatekey \$scp_opts /payload/payload.tgz "\${ssh_user}@\${host}:/tmp/payload.tgz" && \
-                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote" && \
-                return 0
-              fi
-              if [[ -n "\$LINUX_PASS" ]]; then
-                sshpass -p "\$LINUX_PASS" scp \$scp_opts /payload/payload.tgz "\${ssh_user}@\${host}:/tmp/payload.tgz" && \
-                sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
-                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "\$remote"
-                return \$?
-              fi
-              return 1
+              SSHPASS="\$LINUX_PASS" sshpass -e scp \$scp_opts /payload/payload.tgz "\${ssh_user}@\${host}:/tmp/payload.tgz" && \
+              SSHPASS="\$LINUX_PASS" sshpass -e ssh -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote"
             }
             install_windows_vm() {
               local name="\$1" host="\$2" port="\$3" ssh_user="\$4"
@@ -266,33 +229,33 @@ spec:
               trap 'rm -f "\$mssql_env_file"' RETURN
               printf 'DR_VALIDATION_MSSQL_SA_PASSWORD=%s\nDR_VALIDATION_MSSQL_USER=%s\nDR_VALIDATION_MSSQL_PASSWORD=%s\nDR_VALIDATION_SQL_INSTALLER=%s\n' \
                 "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" "\$sql_installer" > "\$mssql_env_file"
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$prep" && \
-              sshpass -p "\$WINDOWS_PASS" scp \$scp_opts /payload/payload.tgz /payload/install-remote-windows.cmd \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts /payload/payload.tgz /payload/install-remote-windows.cmd \
                 "\${ssh_user}@\${host}:C:/Temp/" && \
-              sshpass -p "\$WINDOWS_PASS" scp \$scp_opts "\$mssql_env_file" \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts "\$mssql_env_file" \
                 "\${ssh_user}@\${host}:C:/Temp/mssql-install.env" || return 1
               rm -f "\$mssql_env_file"
               trap - RETURN
               { [[ ! -s "/tmp/windows-staging/\${sql_installer}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${sql_installer}" "\${ssh_user}@\${host}:C:/Temp/\${sql_installer}"; } && \
               { [[ ! -s "/tmp/windows-staging/\${python_installer}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${python_installer}" "\${ssh_user}@\${host}:C:/Temp/\${python_installer}"; } && \
               { [[ ! -s "/tmp/windows-staging/\${odbc_installer}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${odbc_installer}" "\${ssh_user}@\${host}:C:/Temp/\${odbc_installer}"; } && \
               { [[ ! -s "/tmp/windows-staging/\${hammer_zip}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${hammer_zip}" "\${ssh_user}@\${host}:C:/Temp/\${hammer_zip}"; } && \
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote" || return 1
               local poll_tries=0 poll_max=240 poll_sleep=60
               while [[ \$poll_tries -lt \$poll_max ]]; do
-                if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                if SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   "\${ssh_user}@\${host}" "if exist C:\\ProgramData\\ramendr-dr-validation\\install.done (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 0) else if exist C:\\ProgramData\\ramendr-dr-validation\\install.failed (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 1) else exit 2" 2>/dev/null; then
                   return 0
@@ -377,7 +340,6 @@ spec:
             path: hosts.tsv
           - key: linux-password
             path: linux-password
-            optional: true
           - key: windows-password
             path: windows-password
             optional: true
@@ -389,9 +351,6 @@ spec:
             optional: true
           - key: mssql-password
             path: mssql-password
-            optional: true
-          - key: ssh-privatekey
-            path: ssh-privatekey
             optional: true
 EOF
 

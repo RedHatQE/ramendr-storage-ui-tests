@@ -62,12 +62,39 @@ HUB_OCP_VERSION="${HUB_OCP_VERSION:-4.22.1}"
 # Windows edge VMs are part of the protected gitops-vms fleet; fail redeploy if stabilize/OpenSSH fails.
 : "${REQUIRE_WINDOWS_VMS:=1}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+# CI=1 (or --ci): plain logs, fail-fast on missing Windows secrets, write .work/ci-status.json.
+CI="${CI:-0}"
+
+if [[ "$CI" == "1" ]]; then
+  RED=''
+  GREEN=''
+  YELLOW=''
+  NC=''
+else
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[1;33m'
+  NC='\033[0m'
+fi
 
 log() { echo -e "${GREEN}[$(date +%H:%M:%S)]${NC} $*"; }
+
+write_ci_status() {
+  local phase="${1:-unknown}"
+  mkdir -p "$WORK_DIR"
+  python3 - "$WORK_DIR/ci-status.json" "$phase" <<'PY'
+import json, sys, time
+path, phase = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+data["phase"] = phase
+data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+json.dump(data, open(path, "w"), indent=2)
+print("", end="")
+PY
+}
 
 # Strip https://user:token@host/... userinfo so logs never print repo credentials.
 sanitize_upstream_repo_url() {
@@ -84,16 +111,86 @@ sanitize_upstream_repo_url() {
 warn() { echo -e "${YELLOW}[$(date +%H:%M:%S)] WARNING:${NC} $*"; }
 err() { echo -e "${RED}[$(date +%H:%M:%S)] ERROR:${NC} $*"; }
 
+running_in_container() {
+  [[ -n "${KUBERNETES_SERVICE_HOST:-}" ]] \
+    || [[ -f /.dockerenv ]] \
+    || [[ -f /run/.containerenv ]]
+}
+
+# kubernetes.core k8s_* modules do not honor KUBECONFIG the way `oc` does.
+# In a Tekton pod they prefer the in-cluster ServiceAccount unless
+# K8S_AUTH_KUBECONFIG (or the module kubeconfig= arg) is set. Upstream
+# validate_byoc.yml passes kubeconfig for spokes but not for "Hub cluster version".
+export_hub_kube_auth() {
+  local kc="${1:-$HUB_INSTALL_DIR/auth/kubeconfig}"
+  export KUBECONFIG="$kc"
+  export K8S_AUTH_KUBECONFIG="$kc"
+  if running_in_container && [[ -f "$kc" ]]; then
+    mkdir -p "${HOME:-/tmp}/.kube"
+    cp -f "$kc" "${HOME:-/tmp}/.kube/config"
+    chmod 600 "${HOME:-/tmp}/.kube/config"
+  fi
+}
+
+# Profiles:
+#   full              — local / full redeploy (default)
+#   destroy|install   — AWS + openshift-install tooling
+#   pattern-prepare   — QE image prep before install-byoc
+#   install-byoc      — utility-container / nested pattern.sh (no AWS install tools)
+#   pattern-finalize  — post-install-byoc + Windows / DR bootstrap
 check_prerequisites() {
-  log "Checking prerequisites..."
+  local profile="${1:-full}"
+  log "Checking prerequisites (profile=${profile})..."
   local missing=0
-  for cmd in oc openshift-install aws podman git python3 curl jq; do
+  local -a cmds=()
+  local need_aws=0 need_install_bak=0 need_values=0 need_virtctl=0 need_zone=0 need_pyyaml=0
+
+  case "$profile" in
+    destroy|install|full)
+      cmds=(oc openshift-install aws git python3 curl jq)
+      if ! running_in_container; then
+        cmds+=(podman)
+      fi
+      need_aws=1
+      need_install_bak=1
+      need_values=1
+      need_zone=1
+      need_pyyaml=1
+      need_virtctl=1
+      ;;
+    pattern-prepare)
+      cmds=(oc git python3 curl jq)
+      if ! running_in_container; then
+        cmds+=(podman)
+      fi
+      need_values=1
+      need_pyyaml=1
+      need_virtctl=0
+      ;;
+    install-byoc)
+      cmds=(oc git python3 curl jq)
+      need_values=0
+      need_pyyaml=0
+      ;;
+    pattern-finalize|dr-bootstrap)
+      cmds=(oc git python3 curl jq)
+      need_virtctl=1
+      ;;
+    *)
+      err "Unknown prerequisite profile: $profile"
+      exit 1
+      ;;
+  esac
+
+  local cmd
+  for cmd in "${cmds[@]}"; do
     if ! command -v "$cmd" &>/dev/null; then
       err "Missing: $cmd"
       missing=1
     fi
   done
-  if ! python3 -c "import yaml" 2>/dev/null; then
+
+  if [[ "$need_pyyaml" -eq 1 ]] && ! python3 -c "import yaml" 2>/dev/null; then
     log "PyYAML not found; installing with pip (user)..."
     if ! python3 -m pip install --user PyYAML >/dev/null 2>&1; then
       err "PyYAML is required for BYOC kubeconfig merge. Install: python3 -m pip install pyyaml"
@@ -103,47 +200,63 @@ check_prerequisites() {
       missing=1
     fi
   fi
-  if [[ "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]] && ! command -v virtctl &>/dev/null; then
+
+  if [[ "$need_virtctl" -eq 1 && "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]] \
+    && ! command -v virtctl &>/dev/null; then
     err "Missing: virtctl (required for Windows VM SSH verification). On macOS: brew install virtctl"
     missing=1
   fi
-  if [[ -z "$HOSTED_ZONE_ID" ]]; then
-    err "HOSTED_ZONE_ID is not set. Export it or set a default in this script."
-    missing=1
+
+  if [[ "$need_zone" -eq 1 ]]; then
+    if [[ -z "$HOSTED_ZONE_ID" ]]; then
+      err "HOSTED_ZONE_ID is not set. Export it or set a default in this script."
+      missing=1
+    fi
+    if [[ -z "$BASE_DOMAIN" ]]; then
+      err "BASE_DOMAIN is not set. Export it or set a default in this script."
+      missing=1
+    fi
   fi
-  if [[ -z "$BASE_DOMAIN" ]]; then
-    err "BASE_DOMAIN is not set. Export it or set a default in this script."
-    missing=1
-  fi
-  if [[ ! -f "$VALUES_SECRET" ]]; then
-    err "Missing secrets file: $VALUES_SECRET"
-    missing=1
-  elif [[ "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]]; then
-    local missing_windows_secrets
-    missing_windows_secrets=$(python3 - "$VALUES_SECRET" <<'PY'
+
+  if [[ "$need_values" -eq 1 ]]; then
+    if [[ ! -f "$VALUES_SECRET" ]]; then
+      err "Missing secrets file: $VALUES_SECRET"
+      missing=1
+    elif [[ "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]]; then
+      local missing_windows_secrets
+      missing_windows_secrets=$(python3 - "$VALUES_SECRET" <<'PY'
 import re, sys
 
 text = open(sys.argv[1]).read()
 
 def has_secret(text: str, secret: str) -> bool:
+    try:
+        import yaml
+        data = yaml.safe_load(text) or {}
+        if isinstance(data, dict):
+            if secret in data:
+                return True
+            secrets = data.get("secrets")
+            if isinstance(secrets, list):
+                for item in secrets:
+                    if isinstance(item, dict) and item.get("name") == secret:
+                        return True
+    except Exception:
+        pass
     if re.search(rf"^{re.escape(secret)}:", text, re.MULTILINE):
         return True
     if re.search(
-        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
+        rf"^\s*- name:\s*{re.escape(secret)}\s*$",
         text,
         re.MULTILINE,
     ):
         return True
-    for m in re.finditer(r"^- fields:", text, re.MULTILINE):
-        rest = text[m.end() :]
-        n = re.search(r"^- (?:name:|fields:)", rest, re.MULTILINE)
-        block = text[m.start() : m.end() + (n.start() if n else len(rest))]
-        if re.search(
-            rf"^\s*- name:\s*{re.escape(secret)}\s*$",
-            block,
-            re.MULTILINE,
-        ):
-            return True
+    if re.search(
+        rf"^\s+name:\s*{re.escape(secret)}\s*$",
+        text,
+        re.MULTILINE,
+    ):
+        return True
     return False
 
 for name in ("privatevm-credentials", "windows-admin"):
@@ -151,26 +264,41 @@ for name in ("privatevm-credentials", "windows-admin"):
         print(name)
 PY
 )
-    if [[ -n "${missing_windows_secrets:-}" ]]; then
-      warn "VALUES_SECRET missing Windows VM secrets: $(tr '\n' ' ' <<<"$missing_windows_secrets")"
-      warn "Add privatevm-credentials and windows-admin before redeploy (see dr-validation/examples/values-secret-v2-windows.fragment.yaml)."
+      if [[ -n "${missing_windows_secrets:-}" ]]; then
+        warn "VALUES_SECRET missing Windows VM secrets: $(tr '\n' ' ' <<<"$missing_windows_secrets")"
+        warn "Add privatevm-credentials and windows-admin before redeploy (see dr-validation/examples/values-secret-v2-windows.fragment.yaml)."
+        if [[ "$CI" == "1" ]]; then
+          err "CI=1: refusing to continue without Windows VM secrets."
+          missing=1
+        fi
+      fi
     fi
-  fi
-  if [[ "${PATTERN_VARIANT:-}" == "drpartner-s4" ]]; then
-    local missing_s4_secrets
-    missing_s4_secrets=$(python3 - "$VALUES_SECRET" <<'PY'
+    if [[ "${PATTERN_VARIANT:-}" == "drpartner-s4" && -f "$VALUES_SECRET" ]]; then
+      local missing_s4_secrets
+      missing_s4_secrets=$(python3 - "$VALUES_SECRET" <<'PY'
 import re, sys
 
 text = open(sys.argv[1]).read()
 
 def has_secret(text: str, secret: str) -> bool:
+    try:
+        import yaml
+        data = yaml.safe_load(text) or {}
+        if isinstance(data, dict):
+            if secret in data:
+                return True
+            secrets = data.get("secrets")
+            if isinstance(secrets, list):
+                for item in secrets:
+                    if isinstance(item, dict) and item.get("name") == secret:
+                        return True
+    except Exception:
+        pass
     if re.search(rf"^{re.escape(secret)}:", text, re.MULTILINE):
         return True
-    if re.search(
-        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
-        text,
-        re.MULTILINE,
-    ):
+    if re.search(rf"^\s*- name:\s*{re.escape(secret)}\s*$", text, re.MULTILINE):
+        return True
+    if re.search(rf"^\s+name:\s*{re.escape(secret)}\s*$", text, re.MULTILINE):
         return True
     return False
 
@@ -179,34 +307,64 @@ for name in ("s4-ui-credentials", "s4-api-credentials"):
         print(name)
 PY
 )
-    if [[ -n "${missing_s4_secrets:-}" ]]; then
-      warn "VALUES_SECRET missing S4 secrets: $(tr '\n' ' ' <<<"$missing_s4_secrets")"
-      warn "Add s4-ui-credentials and s4-api-credentials (see dr-validation/examples/values-secret-v2-s4.fragment.yaml)."
+      if [[ -n "${missing_s4_secrets:-}" ]]; then
+        warn "VALUES_SECRET missing S4 secrets: $(tr '\n' ' ' <<<"$missing_s4_secrets")"
+        warn "Add s4-ui-credentials and s4-api-credentials (see dr-validation/examples/values-secret-v2-s4.fragment.yaml)."
+      fi
     fi
   fi
-  for dir_var in HUB_INSTALL_DIR PRIMARY_INSTALL_DIR SECONDARY_INSTALL_DIR; do
-    local dir="${!dir_var}"
-    if [[ ! -f "$dir/install-config.yaml.bak" ]]; then
-      err "Missing install-config backup: $dir/install-config.yaml.bak"
+
+  if [[ "$need_install_bak" -eq 1 ]]; then
+    local dir_var dir
+    for dir_var in HUB_INSTALL_DIR PRIMARY_INSTALL_DIR SECONDARY_INSTALL_DIR; do
+      dir="${!dir_var}"
+      if [[ ! -f "$dir/install-config.yaml.bak" ]]; then
+        err "Missing install-config backup: $dir/install-config.yaml.bak"
+        missing=1
+      fi
+    done
+  fi
+
+  if [[ "$profile" == "install-byoc" ]]; then
+    if [[ ! -d "$UPSTREAM_DIR" || ! -f "$UPSTREAM_DIR/pattern.sh" ]]; then
+      err "Upstream pattern checkout missing at $UPSTREAM_DIR — run --pattern-prepare first."
       missing=1
     fi
-  done
+    if [[ ! -f "$HUB_INSTALL_DIR/auth/kubeconfig" ]]; then
+      err "Hub kubeconfig missing: $HUB_INSTALL_DIR/auth/kubeconfig"
+      missing=1
+    fi
+  fi
+
   [[ $missing -eq 1 ]] && { err "Prerequisites not met. Aborting."; exit 1; }
 
-  local account_id
-  account_id=$(current_aws_account_id) || { err "Cannot determine AWS account (check credentials)."; exit 1; }
-  log "Using AWS account: $account_id"
+  if [[ "$need_aws" -eq 1 ]]; then
+    local account_id
+    account_id=$(current_aws_account_id) || { err "Cannot determine AWS account (check credentials)."; exit 1; }
+    log "Using AWS account: $account_id"
 
-  if ! verify_hosted_zone_in_account; then
-    err "HOSTED_ZONE_ID ($HOSTED_ZONE_ID) is not accessible in the current AWS account."
-    exit 1
+    if ! verify_hosted_zone_in_account; then
+      err "HOSTED_ZONE_ID ($HOSTED_ZONE_ID) is not accessible in the current AWS account."
+      exit 1
+    fi
+    log "Route53 hosted zone $HOSTED_ZONE_ID verified in current account (zone will be preserved)."
   fi
-  log "Route53 hosted zone $HOSTED_ZONE_ID verified in current account (zone will be preserved)."
   log "All prerequisites met."
 }
 
 current_aws_account_id() {
-  aws sts get-caller-identity --query Account --output text 2>/dev/null
+  local err
+  err="$(mktemp)"
+  # Do not hide STS errors: "Unable to locate credentials", InvalidClientTokenId,
+  # SignatureDoesNotMatch, and endpoint/DNS failures all used to look identical.
+  if ! aws sts get-caller-identity --query Account --output text 2>"$err"; then
+    err "aws sts get-caller-identity failed (region=${AWS_DEFAULT_REGION:-${AWS_REGION:-unset}} access_key=${AWS_ACCESS_KEY_ID:+set} credentials_file=${AWS_SHARED_CREDENTIALS_FILE:-unset})"
+    # AWS CLI does not print the secret key; strip any access-key-shaped tokens.
+    sed -E 's/AKIA[A-Z0-9]{16}/AKIA****************/g' "$err" >&2 || true
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
 }
 
 verify_hosted_zone_in_account() {
@@ -802,12 +960,30 @@ scale_hub_workers() {
   done
 }
 
-deploy_pattern() {
-  ensure_podman_ready || exit 1
-  log "Deploying RamenDR pattern (BYOC: install-byoc with spoke kubeconfigs in values-secret)..."
+# Prepare BYOC values-secret + early spoke import secrets (before install-byoc).
+prepare_pattern() {
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
-
+  log "Preparing BYOC values-secret and spoke import bootstrap..."
   prepare_byoc_values_secret || exit 1
+  bootstrap_byoc_spoke_import || warn "BYOC spoke bootstrap incomplete (will retry after install-byoc)."
+}
+
+# Run upstream pattern.sh make install-byoc only.
+# In a Tekton/utility container, pattern.sh detects the container and execs make
+# directly (no nested podman). Locally it still uses podman + the utility image.
+run_install_byoc() {
+  export_hub_kube_auth "$HUB_INSTALL_DIR/auth/kubeconfig"
+
+  if [[ -z "${BYOC_VALUES_SECRET:-}" || ! -f "${BYOC_VALUES_SECRET}" ]]; then
+    log "BYOC values-secret not ready — preparing now..."
+    prepare_byoc_values_secret || exit 1
+  fi
+
+  if running_in_container; then
+    log "Running inside a container — pattern.sh will exec make install-byoc (no nested podman)."
+  else
+    ensure_podman_ready || exit 1
+  fi
 
   log "Running upstream pattern install-byoc (loads secrets to Vault, validates BYOC, deploys pattern)..."
   local pattern_exit=0 target_variant="$PATTERN_VARIANT"
@@ -816,11 +992,13 @@ deploy_pattern() {
     target_variant=""
   fi
 
+  # Local/podman path: keep parallel bootstrap + early-exit watcher.
+  # Container path: bootstrap already ran in prepare_pattern; still start watcher.
   bootstrap_byoc_spoke_import &
   local bootstrap_pid=$!
   (
     cd "$UPSTREAM_DIR"
-    export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+    export_hub_kube_auth "$HUB_INSTALL_DIR/auth/kubeconfig"
     export VALUES_SECRET="$BYOC_VALUES_SECRET"
     export TARGET_ORIGIN="${TARGET_ORIGIN:-origin}"
     export TARGET_BRANCH="${UPSTREAM_BRANCH}"
@@ -849,6 +1027,12 @@ deploy_pattern() {
       exit 1
     fi
   fi
+  log "install-byoc complete."
+}
+
+# Hub/spoke GitOps follow-up after install-byoc (before Windows / DR bootstrap).
+finalize_pattern() {
+  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
   clear_legacy_cluster_group_name
   if oc get application.argoproj.io "$(hub_pattern_app_name)" -n vp-gitops &>/dev/null; then
@@ -870,6 +1054,12 @@ deploy_pattern() {
   ensure_resilient_spoke_gitops || warn "[placement] resilient-placement did not converge; spoke ODF may be delayed."
   prepare_spoke_argo_appprojects_on_all_spokes || true
   recover_all_spoke_resilient_apps || true
+}
+
+deploy_pattern() {
+  prepare_pattern
+  run_install_byoc
+  finalize_pattern
 }
 
 
@@ -1108,14 +1298,9 @@ show_status() {
   echo ""
 }
 
-full_redeploy() {
-  check_prerequisites
-  prepare_upstream
-
-  destroy_existing_clusters
-  release_cluster_orphaned_eips
-  cleanup_dns
-
+# Install hub + spokes (no pattern). Used by --install-only and full_redeploy.
+install_clusters() {
+  write_ci_status "install"
   ensure_openshift_install_version
   log "Starting parallel install of hub + ocp-primary + ocp-secondary..."
   local install_failed=0
@@ -1134,45 +1319,121 @@ full_redeploy() {
   create_spoke_metal_machinesets
   scale_hub_workers
   wait_for_spoke_metal_nodes
+  write_ci_status "install-complete"
+}
 
+full_redeploy() {
+  check_prerequisites full
+  prepare_upstream
+  write_ci_status "destroy"
+
+  destroy_existing_clusters
+  release_cluster_orphaned_eips
+  cleanup_dns
+
+  install_clusters
+
+  write_ci_status "pattern"
   deploy_pattern
   run_post_pattern_steps
+  write_ci_status "complete"
   log "Full redeploy complete!"
 }
 
+# Parse optional leading --ci before the stage flag.
+if [[ "${1:-}" == "--ci" ]]; then
+  CI=1
+  # Re-apply plain log colors after late --ci (CI may have been 0 at script top).
+  RED=''
+  GREEN=''
+  YELLOW=''
+  NC=''
+  shift
+fi
+
 case "${1:-}" in
   --destroy-only)
-    check_prerequisites
+    check_prerequisites destroy
+    write_ci_status "destroy"
     [[ -x "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" ]] && \
       "$REPO_ROOT/scripts/dr-validation/stop-snapshot-daemon.sh" || true
     destroy_existing_clusters
     release_cluster_orphaned_eips
+    write_ci_status "destroyed"
     log "Environment destroyed (Route53 hosted zone preserved)."
     ;;
-  --pattern-only)
-    check_prerequisites
+  --install-only)
+    check_prerequisites install
     prepare_upstream
+    install_clusters
+    log "Cluster install complete (pattern not deployed)."
+    ;;
+  --pattern-prepare)
+    check_prerequisites pattern-prepare
+    prepare_upstream
+    write_ci_status "pattern-prepare"
+    create_spoke_metal_machinesets
+    scale_hub_workers
+    wait_for_spoke_metal_nodes
+    prepare_pattern
+    write_ci_status "pattern-prepared"
+    log "Pattern prepare complete (BYOC values-secret ready; run --install-byoc next)."
+    ;;
+  --install-byoc)
+    check_prerequisites install-byoc
+    write_ci_status "install-byoc"
+    run_install_byoc
+    write_ci_status "install-byoc-complete"
+    ;;
+  --pattern-finalize)
+    check_prerequisites pattern-finalize
+    write_ci_status "pattern-finalize"
+    finalize_pattern
+    run_post_pattern_steps
+    write_ci_status "complete"
+    log "Pattern finalize complete."
+    ;;
+  --pattern-only)
+    check_prerequisites full
+    prepare_upstream
+    write_ci_status "pattern"
     create_spoke_metal_machinesets
     scale_hub_workers
     wait_for_spoke_metal_nodes
     deploy_pattern
     run_post_pattern_steps
+    write_ci_status "complete"
     ;;
   --dr-bootstrap-only)
-    check_prerequisites
+    check_prerequisites dr-bootstrap
+    write_ci_status "dr-bootstrap"
     run_post_pattern_steps
+    write_ci_status "complete"
     ;;
   --status)
     show_status
     ;;
   --help|-h)
-    echo "Usage: ./scripts/redeploy.sh [--destroy-only|--pattern-only|--dr-bootstrap-only|--status|--help]"
+    echo "Usage: ./scripts/redeploy.sh [--ci] [--destroy-only|--install-only|--pattern-prepare|--install-byoc|--pattern-finalize|--pattern-only|--dr-bootstrap-only|--status|--help]"
     echo ""
     echo " (no args) Full redeploy: destroy clusters in current AWS account + install all 3 + deploy pinned upstream pattern"
-    echo " --destroy-only Destroy clusters that exist in the current AWS account (hosted zone preserved)"
-    echo " --pattern-only Deploy pattern on an existing hub cluster"
+    echo " --destroy-only      Destroy clusters that exist in the current AWS account (hosted zone preserved)"
+    echo " --install-only      Install hub + two spokes (openshift-install), metal nodes, hub workers; no pattern"
+    echo " --pattern-prepare   Upstream checkout + metal/workers + BYOC values-secret (before install-byoc)"
+    echo " --install-byoc      Run pattern.sh make install-byoc only (utility-container friendly; no nested podman in K8s)"
+    echo " --pattern-finalize  GitOps follow-up + Windows stabilize + DR validation bootstrap"
+    echo " --pattern-only      pattern-prepare + install-byoc + pattern-finalize (local one-shot)"
     echo " --dr-bootstrap-only Wait for convergence + automatic DR validation bootstrap (existing env)"
-    echo " --status Show current environment status"
+    echo " --status            Show current environment status"
+    echo " --ci                Same as CI=1: plain logs, fail-fast missing Windows secrets, write WORK_DIR/ci-status.json"
+    echo ""
+    echo "Tekton / CI workspace paths (override defaults):"
+    echo " WORK_DIR=/workspace/data/.work"
+    echo " HUB_INSTALL_DIR=/workspace/data/install/hub"
+    echo " PRIMARY_INSTALL_DIR=/workspace/data/install/primary"
+    echo " SECONDARY_INSTALL_DIR=/workspace/data/install/secondary"
+    echo " VALUES_SECRET=/workspace/secrets/values-secret.yaml"
+    echo " See ci/tekton/README.md for OpenShift Pipelines wiring."
     echo ""
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
@@ -1183,6 +1444,8 @@ case "${1:-}" in
     echo "                         Preview RHDR (rhdr-catalog) is committed in the fork; partner BOMs differ in variants/<name>/."
     echo ""
     echo "Environment variables:"
+    echo " CI                    Set to 1 for CI mode (plain logs, strict Windows secrets, ci-status.json)"
+    echo " WORK_DIR              Working directory for .work/upstream and BYOC values-secret (default: <repo>/.work)"
     echo " HUB_INSTALL_DIR       Hub cluster install directory (default: ~/git/hub-cluster-install)"
     echo " PRIMARY_INSTALL_DIR   Primary spoke install directory (default: ~/git/ocp-primary-install)"
     echo " SECONDARY_INSTALL_DIR Secondary spoke install directory (default: ~/git/ocp-secondary-install)"

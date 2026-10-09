@@ -25,15 +25,13 @@ cleanup_collect_secret() {
 HOSTS="$(get_hammerdb_vm_hosts "$SPOKE_KC")"
 [[ -n "$HOSTS" ]] || exit 1
 
-LINUX_PASS="${DR_VALIDATION_SSH_PASSWORD:-}"
-if [[ -z "$LINUX_PASS" ]]; then
-  LINUX_PASS="$(cloud_init_password_from_vault)"
+NEED_WINDOWS=0
+if echo "$HOSTS" | awk -F '\t' '$4 == "windows" { found=1 } END { exit !found }'; then
+  NEED_WINDOWS=1
 fi
+load_hammerdb_ssh_passwords "$NEED_WINDOWS" || exit 1
+LINUX_PASS="${LINUX_SSH_PASSWORD}"
 WINDOWS_PASS="${WINDOWS_SSH_PASSWORD:-}"
-if [[ -z "$WINDOWS_PASS" ]]; then
-  load_windows_ssh_password || true
-  WINDOWS_PASS="${WINDOWS_SSH_PASSWORD:-}"
-fi
 
 TMP_DIR="$(mktemp -d)"
 printf '%s\n' "$HOSTS" > "$TMP_DIR/hosts.tsv"
@@ -50,15 +48,8 @@ trap collect_db_cleanup EXIT
 COLLECT_SECRET_CREATE=(oc create secret generic "$COLLECT_SECRET_NAME"
   --from-file=hosts.tsv="$TMP_DIR/hosts.tsv"
   -n "$VM_NAMESPACE" --dry-run=client -o yaml)
-COLLECT_SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS:-}")
+COLLECT_SECRET_CREATE+=(--from-literal=linux-password="${LINUX_PASS}")
 COLLECT_SECRET_CREATE+=(--from-literal=windows-password="${WINDOWS_PASS:-}")
-SSH_KEY_FILE="${SSH_IDENTITY_FILE:-}"
-if [[ -z "$SSH_KEY_FILE" || ! -f "$SSH_KEY_FILE" ]]; then
-  [[ -f "$HOME/.ssh/id_ed25519" ]] && SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
-fi
-if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" ]]; then
-  COLLECT_SECRET_CREATE+=(--from-file=ssh-privatekey="$SSH_KEY_FILE")
-fi
 KUBECONFIG="$SPOKE_KC" "${COLLECT_SECRET_CREATE[@]}" | KUBECONFIG="$SPOKE_KC" oc apply -f -
 
 KUBECONFIG="$SPOKE_KC" oc apply -f - <<EOF
@@ -92,23 +83,13 @@ spec:
             dnf install -y sshpass openssh-clients >/dev/null 2>&1 || true
             LINUX_PASS="\$(tr -d '\n' < /ssh/linux-password 2>/dev/null || true)"
             WINDOWS_PASS="\$(tr -d '\n' < /ssh/windows-password 2>/dev/null || true)"
-            test -f /ssh/ssh-privatekey && cp /ssh/ssh-privatekey /tmp/ssh-privatekey && chmod 600 /tmp/ssh-privatekey || true
+            [[ -n "\$LINUX_PASS" ]] || { echo "ERROR: linux-password missing from collect secret"; exit 1; }
             cp /ssh/hosts.tsv /tmp/hosts.tsv
             refresh_linux_audit() {
               local host="\$1" port="\$2" ssh_user="\$3"
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PreferredAuthentications=password -o PubkeyAuthentication=no"
               local cmd="sudo systemctl restart ramendr-dr-db-audit.service"
-              if [[ -f /tmp/ssh-privatekey ]]; then
-                ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$cmd" || return 1
-                return 0
-              fi
-              if [[ -n "\$LINUX_PASS" ]]; then
-                sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
-                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "\$cmd" || return 1
-                return 0
-              fi
-              return 1
+              SSHPASS="\$LINUX_PASS" sshpass -e ssh -n \$ssh_opts "\${ssh_user}@\${host}" "\$cmd"
             }
             refresh_windows_audit() {
               local host="\$1" port="\$2" ssh_user="\$3"
@@ -117,7 +98,7 @@ spec:
               if [[ -z "\$WINDOWS_PASS" ]]; then
                 return 1
               fi
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$cmd" || return 1
             }
@@ -127,20 +108,13 @@ spec:
               if [[ "\${DR_VALIDATION_SNAPSHOT_STATUS_ONLY:-0}" == "1" ]]; then
                 remote_cmd="\${remote_cmd} --status-only"
               fi
-              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+              local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PreferredAuthentications=password -o PubkeyAuthentication=no"
               if [[ "\${DR_VALIDATION_SKIP_AUDIT_REFRESH:-0}" != "1" ]]; then
                 refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
                 sleep 15
               fi
-              if [[ -f /tmp/ssh-privatekey ]] && ssh -i /tmp/ssh-privatekey -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null; then
-                return 0
-              fi
-              if [[ -n "\$LINUX_PASS" ]]; then
-                sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
-                  -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                  "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
-              fi
-              return 1
+              SSHPASS="\$LINUX_PASS" sshpass -e ssh -n \$ssh_opts \
+                "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null
             }
             collect_windows() {
               local name="\$1" host="\$2" port="\$3" ssh_user="\$4"
@@ -157,7 +131,7 @@ spec:
                 refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
                 sleep 15
               fi
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
             }
@@ -180,12 +154,8 @@ spec:
             path: hosts.tsv
           - key: linux-password
             path: linux-password
-            optional: true
           - key: windows-password
             path: windows-password
-            optional: true
-          - key: ssh-privatekey
-            path: ssh-privatekey
             optional: true
 EOF
 

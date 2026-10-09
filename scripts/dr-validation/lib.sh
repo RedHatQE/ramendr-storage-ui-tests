@@ -44,7 +44,7 @@ DR_VALIDATION_BOOTSTRAP_VM_PATTERN="${DR_VALIDATION_BOOTSTRAP_VM_PATTERN:-rhel}"
 DR_VALIDATION_DB_SNAPSHOT_ROOT="${DR_VALIDATION_DB_SNAPSHOT_ROOT:-${REPO_ROOT}/.work/dr-validation-db/auto}"
 # Semver-tagged utility container for in-cluster DR validation Jobs (override via env).
 # Spokes are amd64-only; bump the tag when intentionally upgrading utility-container.
-DR_VALIDATION_UTILITY_CONTAINER_IMAGE="${DR_VALIDATION_UTILITY_CONTAINER_IMAGE:-quay.io/validatedpatterns/utility-container:v1.0.4}"
+DR_VALIDATION_UTILITY_CONTAINER_IMAGE="${DR_VALIDATION_UTILITY_CONTAINER_IMAGE:-quay.io/validatedpatterns/utility-container:v1.0.5}"
 DR_VALIDATION_INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
 DR_VALIDATION_SNAPSHOT_INTERVAL="${DR_VALIDATION_SNAPSHOT_INTERVAL:-300}"
 DR_VALIDATION_SNAPSHOT_KEEP="${DR_VALIDATION_SNAPSHOT_KEEP:-1}"
@@ -173,14 +173,182 @@ for svc in services:
 "
 }
 
+# Password line from a cloud-init userData blob (VALUES_SECRET / Vault).
+password_from_cloud_init_userdata() {
+  local userdata="${1:-}"
+  [[ -n "$userdata" ]] || return 1
+  python3 -c "
+import re, sys
+m = re.search(r'(?m)^password:\s*(\S+)\s*$', sys.argv[1])
+sys.exit(1) if not m else print(m.group(1))
+" "$userdata" 2>/dev/null
+}
+
 cloud_init_password_from_vault() {
   ensure_hub_kubeconfig
-  oc exec -n vault vault-0 -- vault kv get -field=userData secret/global/cloud-init 2>/dev/null | python3 -c "
+  local userdata
+  userdata="$(oc exec -n vault vault-0 -- vault kv get -field=userData secret/global/cloud-init 2>/dev/null || true)"
+  password_from_cloud_init_userdata "$userdata" 2>/dev/null || true
+}
+
+windows_admin_password_from_vault() {
+  ensure_hub_kubeconfig
+  oc exec -n vault vault-0 -- vault kv get -field=password secret/global/windows-admin 2>/dev/null || true
+}
+
+# Print one field from VALUES_SECRET for secret <name> / field <field>.
+# Supports flat "name:\n  field: value" and v2.0 nested fields list (same
+# secret_block boundary rules exercised by test-lib.sh).
+values_secret_field() {
+  local secret_name="$1" field_name="$2"
+  [[ -f "$VALUES_SECRET" ]] || return 1
+  python3 - "$VALUES_SECRET" "$secret_name" "$field_name" <<'PY'
 import re, sys
-text = sys.stdin.read()
-m = re.search(r'^password:\\s*(\\S+)\\s*$', text, re.M)
-print(m.group(1) if m else '')
-" 2>/dev/null || true
+
+text = open(sys.argv[1]).read()
+secret, field = sys.argv[2], sys.argv[3]
+
+# Flat form: only search inside this secret's indented block (do not
+# leak into a later top-level secret's same-named field, e.g. password).
+flat = re.search(rf"(?m)^( *){re.escape(secret)}:\s*$", text)
+if flat:
+    indent, start = flat.group(1), flat.end()
+    if text[start:start + 1] == "\n":
+        start += 1
+    pos, base_width = start, len(indent)
+    for line in text[start:].splitlines(keepends=True):
+        if line.strip():
+            width = len(line) - len(line.lstrip(" "))
+            if width <= base_width:
+                break
+        pos += len(line)
+    section = text[start:pos]
+    child_indent = None
+    for line in section.splitlines():
+        if line.strip():
+            child_indent = len(line) - len(line.lstrip(" "))
+            break
+    if child_indent is not None:
+        fm = re.search(
+            rf"(?m)^{' ' * child_indent}{re.escape(field)}:\s*(.*)$",
+            section,
+        )
+        if fm:
+            raw = fm.group(1).rstrip()
+            if raw.startswith(("|", ">")):
+                after = section[fm.end() :]
+                if after.startswith("\n"):
+                    after = after[1:]
+                lines = []
+                content_indent = None
+                for line in after.splitlines(keepends=True):
+                    if line.strip():
+                        width = len(line) - len(line.lstrip(" "))
+                        if width <= child_indent:
+                            break
+                        if content_indent is None:
+                            content_indent = width
+                        lines.append(
+                            line[content_indent:] if content_indent <= len(line) else ""
+                        )
+                    else:
+                        lines.append("\n" if line.endswith("\n") else "")
+                print("".join(lines).rstrip("\n"))
+                raise SystemExit(0)
+            val = raw.strip()
+            if val[:1] in "'\"" and val[-1:] == val[:1]:
+                val = val[1:-1]
+            else:
+                val = val.split("#", 1)[0].strip().strip("'\"")
+            if val:
+                print(val)
+                raise SystemExit(0)
+
+def _block_end(rest: str, indent: str) -> int:
+    indent_width = len(indent)
+    pos = 0
+    for line in rest.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped:
+            width = len(line) - len(line.lstrip(" "))
+            if width < indent_width:
+                return pos
+            if width == indent_width and re.match(r"- (?:name:|fields:)", stripped):
+                return pos
+        pos += len(line)
+    return len(rest)
+
+def secret_block(name: str) -> str:
+    m = re.search(rf"^( *)- name:\s*{re.escape(name)}\s*$", text, re.MULTILINE)
+    if m:
+        indent = m.group(1)
+        rest = text[m.end() :]
+        return text[m.start() : m.end() + _block_end(rest, indent)]
+    for m in re.finditer(r"^( *)- fields:", text, re.MULTILINE):
+        indent = m.group(1)
+        rest = text[m.end() :]
+        block = text[m.start() : m.end() + _block_end(rest, indent)]
+        if re.search(rf"name:\s*{re.escape(name)}\s*$", block, re.MULTILINE):
+            return block
+    return ""
+
+block = secret_block(secret)
+if not block:
+    raise SystemExit(1)
+m = re.search(
+    rf"^\s*- name:\s*{re.escape(field)}\s*\n(\s*)value:\s*(.*)$",
+    block,
+    re.MULTILINE,
+)
+if not m:
+    raise SystemExit(1)
+value_indent, raw = m.group(1), m.group(2).rstrip()
+if raw.startswith(("|", ">")):
+    base_width = len(value_indent)
+    after = block[m.end() :]
+    if after.startswith("\n"):
+        after = after[1:]
+    lines = []
+    content_indent = None
+    for line in after.splitlines(keepends=True):
+        if line.strip():
+            width = len(line) - len(line.lstrip(" "))
+            if width <= base_width:
+                break
+            if content_indent is None:
+                content_indent = width
+            lines.append(line[content_indent:] if content_indent <= len(line) else "")
+        else:
+            lines.append("\n" if line.endswith("\n") else "")
+    print("".join(lines).rstrip("\n"))
+    raise SystemExit(0)
+val = raw.strip()
+if val[:1] in "'\"" and val[-1:] == val[:1]:
+    val = val[1:-1]
+else:
+    val = val.split("#", 1)[0].strip().strip("'\"")
+if not val:
+    raise SystemExit(1)
+print(val)
+PY
+}
+
+# Linux edge SSH password: explicit env → Vault cloud-init → VALUES_SECRET.
+# Sets LINUX_SSH_PASSWORD.
+load_linux_ssh_password() {
+  if [[ -n "${LINUX_SSH_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  if [[ -n "${DR_VALIDATION_SSH_PASSWORD:-}" ]]; then
+    LINUX_SSH_PASSWORD="${DR_VALIDATION_SSH_PASSWORD}"
+    return 0
+  fi
+  LINUX_SSH_PASSWORD="$(cloud_init_password_from_vault)"
+  [[ -n "${LINUX_SSH_PASSWORD:-}" ]] && return 0
+  LINUX_SSH_PASSWORD="$(values_secret_field cloud-init password 2>/dev/null || true)"
+  [[ -n "${LINUX_SSH_PASSWORD:-}" ]] && return 0
+  LINUX_SSH_PASSWORD="$(password_from_cloud_init_userdata "$(values_secret_field cloud-init userData 2>/dev/null || true)" || true)"
+  [[ -n "${LINUX_SSH_PASSWORD:-}" ]]
 }
 
 SSH_OPTS=()
@@ -662,105 +830,16 @@ load_mssql_credentials() {
     && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]; then
     return 0
   fi
-  if [[ ! -f "$VALUES_SECRET" ]]; then
-    return 1
-  fi
-  local parsed
-  parsed="$(python3 - "$VALUES_SECRET" <<'PY'
-import re, sys
-
-text = open(sys.argv[1]).read()
-values = {}
-for key, pattern in (
-    ("sa_password", r"sa_password:\s*['\"]?([^'\"#\s]+)"),
-    ("user", r"user:\s*['\"]?([^'\"#\s]+)"),
-    ("password", r"password:\s*['\"]?([^'\"#\s]+)"),
-):
-    m = re.search(
-        rf"mssql-hammerdb:\s*(?:#.*\n)*\s*{pattern}",
-        text,
-        re.MULTILINE,
-    )
-    if m:
-        values[key] = m.group(1)
-if len(values) < 3:
-    def _block_end(rest: str, indent: str) -> int:
-        # The boundary that ends this secret's block is either a *sibling*
-        # list item (a new "- name:"/"- fields:" entry at the SAME
-        # indentation as the entry we anchored on) or ANY line at a LOWER
-        # indentation than that anchor (e.g. a different top-level key, or a
-        # sibling list one level up) -- never one of this secret's own
-        # nested "fields:" list items, which are always indented DEEPER
-        # than their own secret's "- name:" line.
-        #
-        # A same-indentation-only check is not enough: a same-indentation
-        # sibling list elsewhere in the file (reached only via a
-        # lower-indentation line in between) would never be seen, so
-        # scanning could run past the real boundary into an unrelated
-        # secret's nested fields -- e.g. a lower-indentation
-        # "- name: <other-secret>" followed by its own 2-space-deeper
-        # "- name: password" would otherwise be misread as THIS secret's
-        # sibling/field and silently donate its password.
-        indent_width = len(indent)
-        pos = 0
-        for line in rest.splitlines(keepends=True):
-            stripped = line.strip()
-            if stripped:  # ignore blank lines when measuring indentation
-                width = len(line) - len(line.lstrip(" "))
-                if width < indent_width:
-                    return pos
-                if width == indent_width and re.match(
-                    r"- (?:name:|fields:)", stripped
-                ):
-                    return pos
-            pos += len(line)
-        return len(rest)
-
-    def secret_block(secret: str) -> str:
-        m = re.search(
-            rf"^( *)- name:\s*{re.escape(secret)}\s*$",
-            text,
-            re.MULTILINE,
-        )
-        if m:
-            indent = m.group(1)
-            rest = text[m.end() :]
-            end = m.end() + _block_end(rest, indent)
-            return text[m.start() : end]
-        for m in re.finditer(r"^( *)- fields:", text, re.MULTILINE):
-            indent = m.group(1)
-            rest = text[m.end() :]
-            block = text[m.start() : m.end() + _block_end(rest, indent)]
-            if re.search(rf"name:\s*{re.escape(secret)}\s*$", block, re.MULTILINE):
-                return block
-        return ""
-
-    block = secret_block("mssql-hammerdb")
-    if block:
-        values = {}
-        for key in ("sa_password", "user", "password"):
-            m = re.search(
-                rf"^\s*- name:\s*{re.escape(key)}\s*\n\s*value:\s*['\"]?([^'\"#\n]+)",
-                block,
-                re.MULTILINE,
-            )
-            if m:
-                values[key] = m.group(1)
-if len(values) == 3:
-    print(values["sa_password"])
-    print(values["user"])
-    print(values["password"])
-PY
-)" || return 1
-  if [[ -z "$parsed" ]]; then
-    return 1
-  fi
-  DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$(sed -n '1p' <<<"$parsed")}"
-  DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$(sed -n '2p' <<<"$parsed")}"
-  DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$(sed -n '3p' <<<"$parsed")}"
-  [[ -n "${DR_VALIDATION_MSSQL_SA_PASSWORD:-}" \
-    && -n "${DR_VALIDATION_MSSQL_USER:-}" \
-    && -n "${DR_VALIDATION_MSSQL_PASSWORD:-}" ]]
+  local sa user pw
+  sa="$(values_secret_field mssql-hammerdb sa_password 2>/dev/null || true)"
+  user="$(values_secret_field mssql-hammerdb user 2>/dev/null || true)"
+  pw="$(values_secret_field mssql-hammerdb password 2>/dev/null || true)"
+  # Require all three from VALUES_SECRET before assigning (no partial fill).
+  [[ -n "$sa" && -n "$user" && -n "$pw" ]] || return 1
+  DR_VALIDATION_MSSQL_SA_PASSWORD="${DR_VALIDATION_MSSQL_SA_PASSWORD:-$sa}"
+  DR_VALIDATION_MSSQL_USER="${DR_VALIDATION_MSSQL_USER:-$user}"
+  DR_VALIDATION_MSSQL_PASSWORD="${DR_VALIDATION_MSSQL_PASSWORD:-$pw}"
+  return 0
 }
 
 ensure_mssql_credentials() {
@@ -774,6 +853,8 @@ ensure_mssql_credentials() {
   return 1
 }
 
+# Windows Administrator SSH password: explicit env → Vault → VALUES_SECRET.
+# Sets WINDOWS_SSH_PASSWORD.
 load_windows_ssh_password() {
   if [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]]; then
     return 0
@@ -782,56 +863,27 @@ load_windows_ssh_password() {
     WINDOWS_SSH_PASSWORD="${DR_VALIDATION_WINDOWS_SSH_PASSWORD}"
     return 0
   fi
-  if [[ -f "$VALUES_SECRET" ]]; then
-    WINDOWS_SSH_PASSWORD=$(python3 - "$VALUES_SECRET" <<'PY'
-import re, sys
-
-text = open(sys.argv[1]).read()
-m = re.search(
-    r"windows-admin:\s*(?:#.*\n)*\s*password:\s*['\"]?([^'\"#\s]+)",
-    text,
-    re.MULTILINE,
-)
-if m:
-    print(m.group(1))
-    raise SystemExit(0)
-
-def secret_block(secret: str) -> str:
-    m = re.search(
-        rf"^(?:  )?- name:\s*{re.escape(secret)}\s*$",
-        text,
-        re.MULTILINE,
-    )
-    if m:
-        rest = text[m.end() :]
-        n = re.search(r"^(?:  )?- (?:name:|fields:)", rest, re.MULTILINE)
-        end = m.end() + (n.start() if n else len(rest))
-        return text[m.start() : end]
-    for m in re.finditer(r"^- fields:", text, re.MULTILINE):
-        rest = text[m.end() :]
-        n = re.search(r"^- (?:name:|fields:)", rest, re.MULTILINE)
-        block = text[m.start() : m.end() + (n.start() if n else len(rest))]
-        if re.search(rf"name:\s*{re.escape(secret)}\s*$", block, re.MULTILINE):
-            return block
-    return ""
-
-block = secret_block("windows-admin")
-if block:
-    m = re.search(
-        r"^\s*- name:\s*password\s*\n\s*value:\s*['\"]?([^'\"#\n]+)",
-        block,
-        re.MULTILINE,
-    )
-    if m:
-        print(m.group(1))
-        raise SystemExit(0)
-PY
-)
-    [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]] && return 0
-  fi
-  ensure_hub_kubeconfig
-  WINDOWS_SSH_PASSWORD=$(oc exec -n vault vault-0 -- vault kv get -field=password secret/global/windows-admin 2>/dev/null || true)
+  WINDOWS_SSH_PASSWORD="$(windows_admin_password_from_vault)"
+  [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]] && return 0
+  WINDOWS_SSH_PASSWORD="$(values_secret_field windows-admin password 2>/dev/null || true)"
   [[ -n "${WINDOWS_SSH_PASSWORD:-}" ]]
+}
+
+# Load Linux (+ Windows when needed) SSH passwords for HammerDB in-cluster Jobs.
+# Password-only: does not use ssh-privatekey from values-secret or ~/.ssh.
+load_hammerdb_ssh_passwords() {
+  local need_windows="${1:-0}"
+  if ! load_linux_ssh_password; then
+    err "Linux edge SSH password missing. Set DR_VALIDATION_SSH_PASSWORD or ensure Vault secret/global/cloud-init has userData password (hub kubeconfig required)."
+    return 1
+  fi
+  if [[ "$need_windows" == "1" ]] || [[ "${need_windows}" == "true" ]]; then
+    if ! load_windows_ssh_password; then
+      err "Windows Administrator SSH password missing. Set DR_VALIDATION_WINDOWS_SSH_PASSWORD / WINDOWS_SSH_PASSWORD or ensure Vault secret/global/windows-admin password (hub kubeconfig required)."
+      return 1
+    fi
+  fi
+  return 0
 }
 
 get_hammerdb_vm_hosts() {

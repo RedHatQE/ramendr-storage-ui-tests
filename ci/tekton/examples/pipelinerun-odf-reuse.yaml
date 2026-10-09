@@ -1,0 +1,39 @@
+# Reuse an existing AWS env (skip destroy + install); runs pattern then tests.
+# Requires PVC ramendr-ci-data (see pvc-ramendr-ci-data.yaml) and Secret ramendr-ci-secrets.
+# For tests-only, use taskrun-pytest-smoke.yaml / taskrun-pytest-sanity.yaml.
+# Use create (generateName): kubectl create -n ramendr-ci -f ci/tekton/examples/pipelinerun-odf-reuse.yaml
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ramendr-odf-reuse-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  pipelineRef:
+    name: ramendr-odf-e2e
+  timeouts:
+    pipeline: "6h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: EXAMPLE.devcluster.openshift.com
+    - name: hosted-zone-id
+      value: ZXXXXXXXXXXXXX
+    - name: skip-destroy
+      value: "true"
+    - name: skip-install
+      value: "true"
+    - name: git-revision
+      value: main
+    - name: image
+      value: quay.io/epassaro/ramendr-ci:latest
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      secret:
+        secretName: ramendr-ci-secrets
+  taskRunTemplate:
+    serviceAccountName: ramendr-ci-pipeline

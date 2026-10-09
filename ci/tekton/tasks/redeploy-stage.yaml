@@ -1,0 +1,229 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ramendr-redeploy-stage
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  description: >
+    Run one scripts/redeploy.sh stage against a shared data PVC.
+    Stages: --destroy-only, --install-only, --pattern-prepare,
+    --install-byoc, --pattern-finalize, --pattern-only, --dr-bootstrap-only.
+    Prefer --install-byoc with the validated-patterns utility-container image
+    (no nested podman / no privileged SCC). Other stages use the QE CI image.
+  params:
+    - name: stage-arg
+      type: string
+      description: >
+        redeploy.sh flag, e.g. --destroy-only | --install-only |
+        --pattern-prepare | --install-byoc | --pattern-finalize
+    - name: pattern-variant
+      type: string
+      default: odf
+    - name: hub-ocp-version
+      type: string
+      default: "4.22.1"
+    - name: base-domain
+      type: string
+      default: ""
+    - name: hosted-zone-id
+      type: string
+      default: ""
+    - name: git-url
+      type: string
+      default: https://github.com/RedHatQE/ramendr-storage-ui-tests.git
+    - name: git-revision
+      type: string
+      default: main
+    - name: image
+      type: string
+      description: >
+        QE CI image (oc/aws/install/virtctl) or
+        quay.io/validatedpatterns/utility-container for --install-byoc.
+      default: quay.io/epassaro/ramendr-ci:latest
+  workspaces:
+    - name: data
+      description: Persistent workspace for install dirs and .work/
+      mountPath: /workspace/data
+    - name: secrets
+      description: >
+        Read-only secrets. Prefer a single Secret (OpenShift console Start) with
+        flat keys: values-secret.yaml, AWS_*, *-install-config.yaml.bak.
+      mountPath: /workspace/secrets
+      readOnly: true
+  steps:
+    - name: prepare-workspace
+      image: "$(params.image)"
+      workingDir: /workspace
+      env:
+        - name: HOME
+          value: /workspace/data/home
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        mkdir -p /workspace/data/{.work,home,install/hub,install/primary,install/secondary,src,artifacts}
+
+        # Copy install-config backups from the secrets workspace when present.
+        # Flat keys (single Secret / console Start) or nested projected layout.
+        for pair in hub:hub primary:primary secondary:secondary; do
+          name="${pair%%:*}"
+          dest="${pair##*:}"
+          src=""
+          for candidate in \
+            "/workspace/secrets/${name}-install-config.yaml.bak" \
+            "/workspace/secrets/install/${name}/install-config.yaml.bak"; do
+            if [[ -f "$candidate" ]]; then
+              src="$candidate"
+              break
+            fi
+          done
+          if [[ -n "$src" ]]; then
+            cp -f "$src" "/workspace/data/install/${dest}/install-config.yaml.bak"
+            echo "Installed install-config backup for ${dest} from $src"
+          elif [[ -f "/workspace/data/install/${dest}/install-config.yaml.bak" ]]; then
+            echo "Reusing existing install-config backup for ${dest}"
+          else
+            echo "WARNING: missing install-config.yaml.bak for ${dest}" >&2
+          fi
+        done
+
+        if [[ ! -f /workspace/secrets/values-secret.yaml ]]; then
+          echo "ERROR: /workspace/secrets/values-secret.yaml is required" >&2
+          exit 1
+        fi
+
+    - name: clone-repo
+      image: "$(params.image)"
+      workingDir: /workspace/data
+      env:
+        - name: HOME
+          value: /workspace/data/home
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        mkdir -p /workspace/data/home
+        SRC=/workspace/data/src
+        URL="$(params.git-url)"
+        REV="$(params.git-revision)"
+        rm -rf "$SRC"
+        mkdir -p "$SRC"
+        git init "$SRC"
+        git -C "$SRC" remote add origin "$URL"
+        git -C "$SRC" fetch --depth=1 origin "$REV"
+        git -C "$SRC" checkout -f FETCH_HEAD
+        test -f "$SRC/scripts/redeploy.sh"
+        echo "Repo at $(git -C "$SRC" rev-parse --short HEAD) ($REV)"
+        ls -la "$SRC/scripts/redeploy.sh"
+
+    - name: run-stage
+      image: "$(params.image)"
+      # Parent of src always exists on the PVC; do not set workingDir to src
+      # (getcwd fails if that path is missing when the container starts).
+      workingDir: /workspace/data
+      env:
+        - name: HOME
+          value: /workspace/data/home
+        - name: CI
+          value: "1"
+        - name: PATTERN_VARIANT
+          value: "$(params.pattern-variant)"
+        - name: HUB_OCP_VERSION
+          value: "$(params.hub-ocp-version)"
+        - name: BASE_DOMAIN
+          value: "$(params.base-domain)"
+        - name: HOSTED_ZONE_ID
+          value: "$(params.hosted-zone-id)"
+        - name: WORK_DIR
+          value: /workspace/data/.work
+        - name: HUB_INSTALL_DIR
+          value: /workspace/data/install/hub
+        - name: PRIMARY_INSTALL_DIR
+          value: /workspace/data/install/primary
+        - name: SECONDARY_INSTALL_DIR
+          value: /workspace/data/install/secondary
+        - name: VALUES_SECRET
+          value: /workspace/secrets/values-secret.yaml
+        # Prefer BYOC-merged secret from pattern-prepare when present.
+        - name: BYOC_VALUES_SECRET
+          value: /workspace/data/.work/values-secret.yaml
+        # kubernetes.core defaults to the Tekton SA in-cluster; point it at hub.
+        - name: K8S_AUTH_KUBECONFIG
+          value: /workspace/data/install/hub/auth/kubeconfig
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        SRC=/workspace/data/src
+        cd "$SRC"
+        if [[ ! -f scripts/redeploy.sh ]]; then
+          echo "ERROR: $SRC/scripts/redeploy.sh missing (clone-repo failed or empty checkout)" >&2
+          ls -la "$SRC" >&2 || true
+          exit 1
+        fi
+        # AWS credentials: flat keys (single Secret) or secrets/aws/ (projected layout).
+        _first_existing() {
+          local f
+          for f in "$@"; do
+            [[ -f "$f" ]] && { echo "$f"; return 0; }
+          done
+          return 1
+        }
+        if region_file=$(_first_existing /workspace/secrets/AWS_DEFAULT_REGION /workspace/secrets/aws/AWS_DEFAULT_REGION); then
+          export AWS_DEFAULT_REGION
+          AWS_DEFAULT_REGION="$(tr -d '\r\n' < "$region_file")"
+        fi
+        if creds_file=$(_first_existing /workspace/secrets/credentials /workspace/secrets/aws/credentials); then
+          export AWS_SHARED_CREDENTIALS_FILE="$creds_file"
+        fi
+        # STS requires a region even for get-caller-identity (AWS CLI v2).
+        export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-eu-north-1}"
+        export AWS_REGION="${AWS_REGION:-$AWS_DEFAULT_REGION}"
+        export AWS_EC2_METADATA_DISABLED=true
+        if id_file=$(_first_existing /workspace/secrets/AWS_ACCESS_KEY_ID /workspace/secrets/aws/AWS_ACCESS_KEY_ID); then
+          export AWS_ACCESS_KEY_ID
+          AWS_ACCESS_KEY_ID="$(tr -d '\r\n' < "$id_file")"
+        fi
+        if secret_file=$(_first_existing /workspace/secrets/AWS_SECRET_ACCESS_KEY /workspace/secrets/aws/AWS_SECRET_ACCESS_KEY); then
+          export AWS_SECRET_ACCESS_KEY
+          AWS_SECRET_ACCESS_KEY="$(tr -d '\r\n' < "$secret_file")"
+        fi
+        if [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+          aws_creds="$(mktemp)"
+          chmod 600 "$aws_creds"
+          printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' \
+            "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >"$aws_creds"
+          export AWS_SHARED_CREDENTIALS_FILE="$aws_creds"
+          export AWS_PROFILE=default
+        fi
+        echo "AWS: region=${AWS_DEFAULT_REGION} access_key=${AWS_ACCESS_KEY_ID:+present} secret_key=${AWS_SECRET_ACCESS_KEY:+present} aws=$(command -v aws || echo missing)"
+        case "$(params.stage-arg)" in
+          --destroy-only|--install-only)
+            if [[ -z "${AWS_ACCESS_KEY_ID:-}" && -z "${AWS_SHARED_CREDENTIALS_FILE:-}" ]]; then
+              echo "ERROR: AWS credentials not found under /workspace/secrets/" >&2
+              echo "Secret mount files:" >&2
+              ls -1 /workspace/secrets >&2 || true
+              exit 1
+            fi
+            # Probe STS here so the AWS CLI error is in Task logs (redeploy.sh
+            # on git-revision still swallows stderr).
+            if ! aws sts get-caller-identity --query Account --output text >/tmp/aws-acct 2>/tmp/aws-sts.err; then
+              echo "ERROR: aws sts get-caller-identity failed" >&2
+              sed -E 's/AKIA[A-Z0-9]{16}/AKIA****************/g; s/ASIA[A-Z0-9]{16}/ASIA****************/g' /tmp/aws-sts.err >&2 || true
+              exit 1
+            fi
+            echo "AWS account $(tr -d '\r\n' < /tmp/aws-acct)"
+            ;;
+        esac
+        echo "Running $SRC/scripts/redeploy.sh --ci $(params.stage-arg)"
+        mkdir -p /workspace/data/artifacts
+        # Tee pattern-finalize to the PVC so logs survive TaskRun pod deletion
+        # (Tekton Results often has no step log after a timeout).
+        if [[ "$(params.stage-arg)" == "--pattern-finalize" ]]; then
+          log_file="/workspace/data/artifacts/pattern-finalize.log"
+          echo "Streaming stage output to ${log_file}"
+          set +e
+          ./scripts/redeploy.sh --ci "$(params.stage-arg)" 2>&1 | tee "$log_file"
+          rc=${PIPESTATUS[0]}
+          set -e
+          exit "$rc"
+        fi
+        ./scripts/redeploy.sh --ci "$(params.stage-arg)"

@@ -1,0 +1,42 @@
+# Example PipelineRun: ODF destroy → install → pattern → smoke → sanity.
+# Replace BASE_DOMAIN / HOSTED_ZONE_ID / image / git-revision before creating.
+# Prerequisites: PVC (pvc-ramendr-ci-data.yaml) and Secret ramendr-ci-secrets.
+# Use create (generateName): kubectl create -n ramendr-ci -f ci/tekton/examples/pipelinerun-odf.yaml
+# Smoke/sanity-only: see taskrun-pytest-smoke.yaml / taskrun-pytest-sanity.yaml.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ramendr-odf-e2e-
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  pipelineRef:
+    name: ramendr-odf-e2e
+  timeouts:
+    pipeline: "16h"
+  params:
+    - name: pattern-variant
+      value: odf
+    - name: base-domain
+      value: EXAMPLE.devcluster.openshift.com
+    - name: hosted-zone-id
+      value: ZXXXXXXXXXXXXX
+    - name: skip-destroy
+      value: "false"
+    - name: skip-install
+      value: "false"
+    - name: git-revision
+      value: main
+    - name: image
+      value: quay.io/epassaro/ramendr-ci:latest
+    - name: utility-image
+      value: quay.io/validatedpatterns/utility-container:v1.0.5
+  workspaces:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ramendr-ci-data
+    - name: secrets
+      secret:
+        secretName: ramendr-ci-secrets
+  taskRunTemplate:
+    serviceAccountName: ramendr-ci-pipeline

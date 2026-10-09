@@ -139,7 +139,7 @@ class TestInfraSmoke:
 
     @_jira_deployment_smoke
     def test_argocd_apps_synced_healthy(self, hub_kubeconfig):
-        """All ArgoCD Applications in the hub namespace are Synced/Healthy.
+        """All ArgoCD Applications in vp-gitops are Synced/Healthy.
 
         regional-dr may be OutOfSync (known disableExternalSecrets drift) but
         must still be Healthy. Any non-Healthy app is a hard failure.
