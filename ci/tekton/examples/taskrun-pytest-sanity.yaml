@@ -18,7 +18,7 @@ spec:
     - name: base-domain
       value: ecoengverticals-qe.devcluster.openshift.com
     - name: git-revision
-      value: tekton_ci
+      value: main
     - name: image
       value: quay.io/epassaro/ramendr-ci:latest
     - name: pytest-args

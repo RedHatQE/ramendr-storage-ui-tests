@@ -22,9 +22,11 @@ ci/tekton/
     ramendr-odf-deploy.yaml # same deploy stages, no pytest
     ramendr-teardown.yaml   # destroy-only
   examples/
-    pipelinerun-odf.yaml         # PVC + full ODF e2e PipelineRun
+    pvc-ramendr-ci-data.yaml     # shared RWO PVC (apply once)
+    pipelinerun-odf.yaml         # full ODF e2e PipelineRun (create)
     pipelinerun-odf-deploy.yaml  # deploy-only PipelineRun
-    pipelinerun-teardown.yaml
+    pipelinerun-odf-reuse.yaml   # skip destroy/install on existing env
+    pipelinerun-teardown.yaml    # destroy-only PipelineRun
     serviceaccount.yaml
   secrets/
     README.md               # Vault → ESO → Secret → mount contract
@@ -109,15 +111,16 @@ kubectl apply -n "$NS" -f ci/tekton/tasks/
 kubectl apply -n "$NS" -f ci/tekton/pipelines/
 kubectl apply -n "$NS" -f ci/tekton/examples/serviceaccount.yaml
 
+# Shared PVC once, then create PipelineRuns (generateName — do not kubectl apply them).
+kubectl apply -n "$NS" -f ci/tekton/examples/pvc-ramendr-ci-data.yaml
 # One Secret for console Start (see secrets/externalsecrets.example.yaml)
-# then Start from UI (data=PVC ramendr-ci-data, secrets=Secret ramendr-ci-secrets)
-# or:
-kubectl apply -n "$NS" -f ci/tekton/examples/pipelinerun-odf.yaml
-# Edit BASE_DOMAIN / HOSTED_ZONE_ID / image first — or use:
-# kubectl create -n "$NS" -f ci/tekton/examples/pipelinerun-odf.yaml
+# Edit BASE_DOMAIN / HOSTED_ZONE_ID / image in the example, then:
+kubectl create -n "$NS" -f ci/tekton/examples/pipelinerun-odf.yaml
 
 # Deploy only (no smoke/sanity):
 # kubectl create -n "$NS" -f ci/tekton/examples/pipelinerun-odf-deploy.yaml
+# Reuse existing clusters (skip destroy/install):
+# kubectl create -n "$NS" -f ci/tekton/examples/pipelinerun-odf-reuse.yaml
 ```
 
 Teardown (separate). Workspace **data** must be PVC `ramendr-ci-data` (same as e2e;
@@ -155,8 +158,8 @@ params:
     value: drpartner-s4   # example
 ```
 
-See [examples/pipelinerun-teardown.yaml](examples/pipelinerun-teardown.yaml) for a
-reuse-oriented PipelineRun stub.
+See [examples/pipelinerun-odf-reuse.yaml](examples/pipelinerun-odf-reuse.yaml) for a
+reuse-oriented PipelineRun example.
 
 ## Artifacts and secrets
 

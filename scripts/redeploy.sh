@@ -972,7 +972,7 @@ prepare_pattern() {
 # In a Tekton/utility container, pattern.sh detects the container and execs make
 # directly (no nested podman). Locally it still uses podman + the utility image.
 run_install_byoc() {
-  export_hub_kube_auth
+  export_hub_kube_auth "$HUB_INSTALL_DIR/auth/kubeconfig"
 
   if [[ -z "${BYOC_VALUES_SECRET:-}" || ! -f "${BYOC_VALUES_SECRET}" ]]; then
     log "BYOC values-secret not ready — preparing now..."
@@ -998,7 +998,7 @@ run_install_byoc() {
   local bootstrap_pid=$!
   (
     cd "$UPSTREAM_DIR"
-    export_hub_kube_auth
+    export_hub_kube_auth "$HUB_INSTALL_DIR/auth/kubeconfig"
     export VALUES_SECRET="$BYOC_VALUES_SECRET"
     export TARGET_ORIGIN="${TARGET_ORIGIN:-origin}"
     export TARGET_BRANCH="${UPSTREAM_BRANCH}"

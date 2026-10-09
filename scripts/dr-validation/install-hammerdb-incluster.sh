@@ -199,8 +199,8 @@ spec:
               local scp_opts="-P \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PreferredAuthentications=password -o PubkeyAuthentication=no"
               local remote="mkdir -p /tmp/ramendr-dr-validation-install && tar -xzf /tmp/payload.tgz -C /tmp/ramendr-dr-validation-install && REPO_ROOT=/tmp/ramendr-dr-validation-install bash /tmp/ramendr-dr-validation-install/hammerdb/install-on-vm.sh"
-              sshpass -p "\$LINUX_PASS" scp \$scp_opts /payload/payload.tgz "\${ssh_user}@\${host}:/tmp/payload.tgz" && \
-              sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote"
+              SSHPASS="\$LINUX_PASS" sshpass -e scp \$scp_opts /payload/payload.tgz "\${ssh_user}@\${host}:/tmp/payload.tgz" && \
+              SSHPASS="\$LINUX_PASS" sshpass -e ssh -n \$ssh_opts "\${ssh_user}@\${host}" "\$remote"
             }
             install_windows_vm() {
               local name="\$1" host="\$2" port="\$3" ssh_user="\$4"
@@ -229,33 +229,33 @@ spec:
               trap 'rm -f "\$mssql_env_file"' RETURN
               printf 'DR_VALIDATION_MSSQL_SA_PASSWORD=%s\nDR_VALIDATION_MSSQL_USER=%s\nDR_VALIDATION_MSSQL_PASSWORD=%s\nDR_VALIDATION_SQL_INSTALLER=%s\n' \
                 "\$MSSQL_SA" "\$MSSQL_USER" "\$MSSQL_PASSWORD" "\$sql_installer" > "\$mssql_env_file"
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$prep" && \
-              sshpass -p "\$WINDOWS_PASS" scp \$scp_opts /payload/payload.tgz /payload/install-remote-windows.cmd \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts /payload/payload.tgz /payload/install-remote-windows.cmd \
                 "\${ssh_user}@\${host}:C:/Temp/" && \
-              sshpass -p "\$WINDOWS_PASS" scp \$scp_opts "\$mssql_env_file" \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts "\$mssql_env_file" \
                 "\${ssh_user}@\${host}:C:/Temp/mssql-install.env" || return 1
               rm -f "\$mssql_env_file"
               trap - RETURN
               { [[ ! -s "/tmp/windows-staging/\${sql_installer}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${sql_installer}" "\${ssh_user}@\${host}:C:/Temp/\${sql_installer}"; } && \
               { [[ ! -s "/tmp/windows-staging/\${python_installer}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${python_installer}" "\${ssh_user}@\${host}:C:/Temp/\${python_installer}"; } && \
               { [[ ! -s "/tmp/windows-staging/\${odbc_installer}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${odbc_installer}" "\${ssh_user}@\${host}:C:/Temp/\${odbc_installer}"; } && \
               { [[ ! -s "/tmp/windows-staging/\${hammer_zip}" ]] || \
-                sshpass -p "\$WINDOWS_PASS" scp \$scp_opts \
+                SSHPASS="\$WINDOWS_PASS" sshpass -e scp \$scp_opts \
                   "/tmp/windows-staging/\${hammer_zip}" "\${ssh_user}@\${host}:C:/Temp/\${hammer_zip}"; } && \
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote" || return 1
               local poll_tries=0 poll_max=240 poll_sleep=60
               while [[ \$poll_tries -lt \$poll_max ]]; do
-                if sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+                if SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                   -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                   "\${ssh_user}@\${host}" "if exist C:\\ProgramData\\ramendr-dr-validation\\install.done (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 0) else if exist C:\\ProgramData\\ramendr-dr-validation\\install.failed (type C:\\ProgramData\\ramendr-dr-validation\\install.log 2>nul & exit 1) else exit 2" 2>/dev/null; then
                   return 0

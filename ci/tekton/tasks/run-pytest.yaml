@@ -28,7 +28,7 @@ spec:
       default: main
     - name: image
       type: string
-      default: quay.io/example/ramendr-ci:latest
+      default: quay.io/epassaro/ramendr-ci:latest
   workspaces:
     - name: data
       mountPath: /workspace/data

@@ -1,0 +1,16 @@
+# Shared RWO PVC for install dirs, .work/, src clone, and artifacts.
+# Apply once: kubectl apply -n ramendr-ci -f ci/tekton/examples/pvc-ramendr-ci-data.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ramendr-ci-data
+  labels:
+    app.kubernetes.io/part-of: ramendr-storage-ui-tests
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # install dirs + .work upstream clone + artifacts; size to suit your storage class
+      storage: 100Gi
+  # storageClassName: <your-rwo-storageclass>

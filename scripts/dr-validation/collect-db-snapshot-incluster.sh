@@ -89,7 +89,7 @@ spec:
               local host="\$1" port="\$2" ssh_user="\$3"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PreferredAuthentications=password -o PubkeyAuthentication=no"
               local cmd="sudo systemctl restart ramendr-dr-db-audit.service"
-              sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts "\${ssh_user}@\${host}" "\$cmd"
+              SSHPASS="\$LINUX_PASS" sshpass -e ssh -n \$ssh_opts "\${ssh_user}@\${host}" "\$cmd"
             }
             refresh_windows_audit() {
               local host="\$1" port="\$2" ssh_user="\$3"
@@ -98,7 +98,7 @@ spec:
               if [[ -z "\$WINDOWS_PASS" ]]; then
                 return 1
               fi
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$cmd" || return 1
             }
@@ -113,7 +113,7 @@ spec:
                 refresh_linux_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
                 sleep 15
               fi
-              sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$LINUX_PASS" sshpass -e ssh -n \$ssh_opts \
                 "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null
             }
             collect_windows() {
@@ -131,7 +131,7 @@ spec:
                 refresh_windows_audit "\$host" "\$port" "\$ssh_user" || echo "WARN: could not refresh audit on \${name}" >&2
                 sleep 15
               fi
-              sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$remote_cmd" 2>/dev/null || return 1
             }

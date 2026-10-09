@@ -115,7 +115,7 @@ spec:
             ssh_linux() {
               local host="\$1" port="\$2" ssh_user="\$3"
               local ssh_opts="-p \$port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 -o PreferredAuthentications=password -o PubkeyAuthentication=no"
-              timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -p "\$LINUX_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$LINUX_PASS" timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -e ssh -n \$ssh_opts \
                 "\${ssh_user}@\${host}" "\$LINUX_CMD"
             }
             ssh_windows() {
@@ -125,7 +125,7 @@ spec:
                 echo "WARN: skipping windows host \$host (no windows-password)" >&2
                 return 1
               fi
-              timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -p "\$WINDOWS_PASS" ssh -n \$ssh_opts \
+              SSHPASS="\$WINDOWS_PASS" timeout -k 5 "\$SSH_CMD_TIMEOUT" sshpass -e ssh -n \$ssh_opts \
                 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
                 "\${ssh_user}@\${host}" "\$WINDOWS_CMD"
             }
