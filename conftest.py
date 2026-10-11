@@ -5,7 +5,15 @@ from typing import Any, Dict
 
 import pytest
 
-from config.settings import (
+# Load the optional repo-root .env (if present) before any other project
+# module reads os.environ at import time (e.g. config.settings,
+# reporting.jira_config). Real environment variables always take priority
+# over .env values -- see config/env_file.py.
+from config.env_file import load_env_file
+
+load_env_file()
+
+from config.settings import (  # noqa: E402
     HUB_KUBECONFIG,
     IGNORE_HTTPS_ERRORS,
     PRIMARY_KUBECONFIG,
