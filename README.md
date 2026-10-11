@@ -143,6 +143,12 @@ Do not commit secrets to this repository.
   [`dr-validation/examples/values-secret-v2-windows.fragment.yaml`](dr-validation/examples/values-secret-v2-windows.fragment.yaml).
   For HammerDB on Windows SQL Server, also add `mssql-hammerdb` (`sa_password`, `user`,
   `password`) or export `DR_VALIDATION_MSSQL_*` before redeploy.
+- For local Jira Test Result reporting credentials (`JIRA_BASE_URL` / `JIRA_EMAIL` /
+  `JIRA_API_TOKEN`, see [`docs/jira-test-result-reporting.md`](docs/jira-test-result-reporting.md)),
+  copy [`.env.example`](.env.example) to `.env` and fill in real values. `.env` is gitignored
+  and loaded automatically for `pytest` runs only (see `config/env_file.py`); exported
+  environment variables always take priority over `.env`. This file is unrelated to, and not
+  read by, any Cursor MCP server configuration.
 
 ## Customizing the deployment
 
