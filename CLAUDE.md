@@ -21,7 +21,7 @@ The entrypoint is `scripts/redeploy.sh`.
 **Upstream pinning (single fork, all variants):**
 
 - Local checkout and default pin: `elsapassaro/ramendr-starter-kit` branch `ocp-4.22-rhdr-ramen` at
-  `91b7890a15bff26338917f01e3349fd21d57ba7b` (upstream v1.3 + QE odf overrides; VIRTDR-281 RHDR build; MBP-1169 ose-cli image pin). Override with
+  `c659dd132c872bccdc8447ce1ee710396e95eaef` (upstream v1.3 + QE odf overrides; VIRTDR-281 RHDR build). Override with
   `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
 - `redeploy.sh` patches `main.variant` and sets `byoc: true` in the local checkout. Preview RHDR
   (`rhdr-catalog`, `rhdr-multicluster-operator`, GitOps `extraObjects` IDMS) is already committed

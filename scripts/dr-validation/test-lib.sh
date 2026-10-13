@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression tests for scripts/dr-validation/lib.sh's mssql-hammerdb credential
-# parsing (load_mssql_credentials / secret_block).
+# parsing (load_mssql_credentials via values_secret_field / secret_block).
 #
 # Background: values-secret.yaml commonly stores mssql-hammerdb in
 # ExternalSecrets-style nested list form:

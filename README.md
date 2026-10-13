@@ -22,7 +22,7 @@ It contains:
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `91b7890a15bff26338917f01e3349fd21d57ba7b` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `c659dd132c872bccdc8447ce1ee710396e95eaef` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
 4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
@@ -45,7 +45,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `91b7890a15bff26338917f01e3349fd21d57ba7b` (`ocp-4.22-rhdr-ramen`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `c659dd132c872bccdc8447ce1ee710396e95eaef` (`ocp-4.22-rhdr-ramen`) |
 | Hub Argo CD Applications | Remote git on GitHub | Fork branch `ocp-4.22-rhdr-ramen` (`main.variant: odf` on tip). Partner variants need a fork branch/commit with matching `main.variant` for stable GitOps. |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
@@ -66,6 +66,7 @@ The deployment script expects tools similar to the original flow:
 - **GNU bash 4+** — `redeploy.sh`, `stabilize-windows-vms.sh`, and `ensure-windows-openssh.sh` use `mapfile` (the Bash 3.2 shipped with macOS is too old). On macOS: `brew install bash` (those scripts re-exec via `/opt/homebrew/bin/bash` automatically when present)
 - `python3` with **PyYAML** — merges spoke kubeconfig paths into `.work/values-secret.yaml` before `install-byoc` (`redeploy.sh` auto-installs via `pip install --user PyYAML` when missing; also listed in `requirements.txt`)
 - `virtctl` — Windows edge VM SSH verification during redeploy (`brew install virtctl` on macOS when `REQUIRE_WINDOWS_VMS=1`)
+- `sshpass` — Windows Administrator password login via `virtctl ssh` when `windows-admin` is in `VALUES_SECRET` (`brew install sshpass` / CI image via EPEL)
 - `jq` — used by the golden-image Ansible playbook and several redeploy helpers
 - `ansible-playbook` — runs `scripts/ansible/odf_fix_dataimportcrons.yml` during spoke golden-image fix-up (optional; redeploy falls back to `oc` if this step fails)
 

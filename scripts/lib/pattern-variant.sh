@@ -12,7 +12,7 @@ DEFAULT_PATTERN_VARIANT=odf
 PATTERN_VARIANTS="odf drpartner-s4 drpartner-minimal"
 
 : "${UPSTREAM_REPO:=https://github.com/elsapassaro/ramendr-starter-kit}"
-: "${UPSTREAM_REF:=91b7890a15bff26338917f01e3349fd21d57ba7b}"
+: "${UPSTREAM_REF:=c659dd132c872bccdc8447ce1ee710396e95eaef}"
 : "${UPSTREAM_BRANCH:=ocp-4.22-rhdr-ramen}"
 
 _pv_log() {
@@ -64,15 +64,17 @@ pattern_uses_variants_dir() {
   [[ -n "$dir" && -d "$dir/variants" ]]
 }
 
+# Hub Argo Applications live in vp-gitops (parent + children).
 hub_argocd_namespace() {
+  echo "vp-gitops"
+}
+
+# Parent Pattern Application name (not a namespace).
+hub_pattern_app_name() {
   case "${PATTERN_VARIANT:-}" in
     drpartner-minimal) echo "ramendr-starter-kit-minimal" ;;
     *) echo "ramendr-starter-kit-${PATTERN_VARIANT:-$DEFAULT_PATTERN_VARIANT}" ;;
   esac
-}
-
-hub_pattern_app_name() {
-  hub_argocd_namespace
 }
 
 configure_variant_defaults() {
