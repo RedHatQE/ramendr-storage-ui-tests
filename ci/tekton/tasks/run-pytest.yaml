@@ -88,10 +88,25 @@ spec:
           exit 1
         fi
         # UI login password: kubeadmin from install dir (same as local settings.py).
+        # Never print the value — only confirm presence for fail-fast below.
         if [[ -z "${RAMENDR_HUB_PASSWORD:-}" && -f "${HUB_INSTALL_DIR}/auth/kubeadmin-password" ]]; then
           RAMENDR_HUB_PASSWORD="$(tr -d '\r\n' <"${HUB_INSTALL_DIR}/auth/kubeadmin-password")"
           export RAMENDR_HUB_PASSWORD
         fi
+        # Default smoke/sanity UI suites must not go green via pytest.skip when
+        # BASE_URL / password are missing — fail the Task instead.
+        case " $(params.pytest-args) " in
+          *" tests/ui"*|*"tests/ui/"*|*" tests/ui/"*)
+            if [[ -z "${BASE_DOMAIN:-}" && -z "${RAMENDR_BASE_URL:-}" ]]; then
+              echo "ERROR: BASE_DOMAIN or RAMENDR_BASE_URL is required for UI tests (tests/ui)" >&2
+              exit 1
+            fi
+            if [[ -z "${RAMENDR_HUB_PASSWORD:-}" ]]; then
+              echo "ERROR: hub UI password missing — set RAMENDR_HUB_PASSWORD or ensure ${HUB_INSTALL_DIR}/auth/kubeadmin-password exists on the data PVC" >&2
+              exit 1
+            fi
+            ;;
+        esac
         mkdir -p /workspace/data/artifacts
         # Prefer uv/pip project install if present; image may already have deps.
         if [[ -f pyproject.toml ]]; then
@@ -102,6 +117,11 @@ spec:
           playwright install --with-deps chromium 2>/dev/null || true
         fi
         echo "BASE_DOMAIN=${BASE_DOMAIN:-<empty>} PATTERN_VARIANT=${PATTERN_VARIANT}"
+        if [[ -n "${RAMENDR_HUB_PASSWORD:-}" ]]; then
+          echo "RAMENDR_HUB_PASSWORD=<set>"
+        else
+          echo "RAMENDR_HUB_PASSWORD=<empty>"
+        fi
         echo "pytest $(params.pytest-args)"
         # shellcheck disable=SC2086
         python3 -m pytest $(params.pytest-args)

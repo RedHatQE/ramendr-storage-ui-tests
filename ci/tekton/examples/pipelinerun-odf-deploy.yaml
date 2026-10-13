@@ -13,7 +13,8 @@ spec:
   pipelineRef:
     name: ramendr-odf-deploy
   timeouts:
-    pipeline: "12h"
+    # >= sum of per-task ceilings (1+3+0.5+1.5+3.5 = 9.5h); healthy runs finish sooner.
+    pipeline: "10h"
   params:
     - name: pattern-variant
       value: odf

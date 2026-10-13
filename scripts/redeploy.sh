@@ -201,10 +201,16 @@ check_prerequisites() {
     fi
   fi
 
-  if [[ "$need_virtctl" -eq 1 && "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]] \
-    && ! command -v virtctl &>/dev/null; then
-    err "Missing: virtctl (required for Windows VM SSH verification). On macOS: brew install virtctl"
-    missing=1
+  if [[ "$need_virtctl" -eq 1 && "${REQUIRE_WINDOWS_VMS:-1}" == "1" ]]; then
+    if ! command -v virtctl &>/dev/null; then
+      err "Missing: virtctl (required for Windows VM SSH verification). On macOS: brew install virtctl"
+      missing=1
+    fi
+    # Password login check (ensure-windows-openssh.sh) needs sshpass when windows-admin is present.
+    if ! command -v sshpass &>/dev/null; then
+      err "Missing: sshpass (required for Windows password SSH verification). Install sshpass (CI image includes it via EPEL)."
+      missing=1
+    fi
   fi
 
   if [[ "$need_zone" -eq 1 ]]; then
@@ -918,7 +924,16 @@ install_hub() {
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
 
   log "Hub console: https://console-openshift-console.apps.hub.${BASE_DOMAIN}"
-  grep -o 'password: "[^"]*"' "$HUB_INSTALL_DIR/.openshift_install.log" | tail -1 || true
+  # Never print kubeadmin to logs (CI/Tekton are shared). Password is on disk for UI tests:
+  #   $HUB_INSTALL_DIR/auth/kubeadmin-password
+  if [[ "${CI:-0}" != "1" ]]; then
+    local pw_file="$HUB_INSTALL_DIR/auth/kubeadmin-password"
+    if [[ -f "$pw_file" ]]; then
+      log "Hub kubeadmin password: $pw_file (not echoed; use for local console login)"
+    else
+      warn "Hub kubeadmin-password file missing at $pw_file"
+    fi
+  fi
 }
 
 install_spokes() {

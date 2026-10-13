@@ -66,6 +66,7 @@ The deployment script expects tools similar to the original flow:
 - **GNU bash 4+** — `redeploy.sh`, `stabilize-windows-vms.sh`, and `ensure-windows-openssh.sh` use `mapfile` (the Bash 3.2 shipped with macOS is too old). On macOS: `brew install bash` (those scripts re-exec via `/opt/homebrew/bin/bash` automatically when present)
 - `python3` with **PyYAML** — merges spoke kubeconfig paths into `.work/values-secret.yaml` before `install-byoc` (`redeploy.sh` auto-installs via `pip install --user PyYAML` when missing; also listed in `requirements.txt`)
 - `virtctl` — Windows edge VM SSH verification during redeploy (`brew install virtctl` on macOS when `REQUIRE_WINDOWS_VMS=1`)
+- `sshpass` — Windows Administrator password login via `virtctl ssh` when `windows-admin` is in `VALUES_SECRET` (`brew install sshpass` / CI image via EPEL)
 - `jq` — used by the golden-image Ansible playbook and several redeploy helpers
 - `ansible-playbook` — runs `scripts/ansible/odf_fix_dataimportcrons.yml` during spoke golden-image fix-up (optional; redeploy falls back to `oc` if this step fails)
 

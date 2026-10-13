@@ -70,7 +70,8 @@ merges them into `$WORK_DIR/values-secret.yaml` after install.
 2. Prefer **file mounts** for YAML blobs; never pass tokens as Pipeline params.
 3. Do not upload kubeconfigs or `values-secret.yaml` as Tekton Results or public artifacts.
 4. Hub console / `kubeadmin` for Playwright comes from
-   `/workspace/data/install/hub/auth/` on the PVC after `--install-only`, not from Vault.
+   `/workspace/data/install/hub/auth/kubeadmin-password` on the PVC after
+   `--install-only`, not from Vault. Never print that password in Task logs.
 5. Rotate in Vault; ESO refreshes the K8s Secret; new PipelineRuns pick up mounts automatically.
 
 ## Manual bootstrap (without ESO)

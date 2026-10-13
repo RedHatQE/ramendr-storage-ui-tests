@@ -13,7 +13,8 @@ spec:
   pipelineRef:
     name: ramendr-odf-e2e
   timeouts:
-    pipeline: "16h"
+    # >= sum of per-task ceilings (1+3+0.5+1.5+3.5+0.5+4 = 14h); healthy runs finish sooner.
+    pipeline: "14h"
   params:
     - name: pattern-variant
       value: odf

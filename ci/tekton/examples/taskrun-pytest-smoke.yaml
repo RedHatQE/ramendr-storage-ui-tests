@@ -11,7 +11,7 @@ spec:
   taskRef:
     name: ramendr-run-pytest
   serviceAccountName: ramendr-ci-pipeline
-  timeout: "2h"
+  timeout: "30m"
   params:
     - name: pattern-variant
       value: odf

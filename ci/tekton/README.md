@@ -59,6 +59,8 @@ Optional build-args: `OCP_VERSION` (default `4.22.1`), `VIRTCTL_VERSION` (defaul
 `v1.5.0`), `PYTHON_PKG` (default `python3.12`; UBI’s system `python3` is 3.9 and
 cannot install `pytest>=9`), `BASE_IMAGE`. Point PipelineRun `params.image` at the
 pushed tag. If the registry is private, link a pull secret to `ramendr-ci-pipeline`.
+The image also installs **`sshpass`** (via EPEL) for Windows Administrator password
+SSH during `pattern-finalize` (`ensure-windows-openssh.sh`).
 
 ## Redeploy stages used by Tasks
 
@@ -171,7 +173,15 @@ reuse-oriented PipelineRun example.
 
 ## Timeouts
 
-Pipeline defaults in examples: **16h** (e2e with sanity) / **12h** (deploy-only).
-Per-Task timeouts are set on destroy (2h), install (4h), pattern-prepare (1h),
-install-byoc (2h), pattern-finalize (4h — Windows OS-disk + HammerDB; healthy runs
-finish sooner), smoke-tests (1h), sanity-tests (6h).
+Example PipelineRun `timeouts.pipeline` values are set **at or above** the sum of
+per-Task ceilings so a slow-but-valid run is not canceled while Tasks still have
+budget. Healthy runs finish much sooner.
+
+| Example | Pipeline timeout | Task ceiling sum |
+|---|---|---|
+| `pipelinerun-odf.yaml` (e2e) | **14h** | 1+3+0.5+1.5+3.5+0.5+4 = 14h |
+| `pipelinerun-odf-deploy.yaml` | **10h** | 1+3+0.5+1.5+3.5 = 9.5h |
+| `pipelinerun-odf-reuse.yaml` | **10h** | ~0.5+1.5+3.5+0.5+4 = 10h (destroy/install skipped) |
+
+Per-Task timeouts: destroy (1h), install (3h), pattern-prepare (30m), install-byoc (1h30m),
+pattern-finalize (3h30m — Windows OS-disk + HammerDB), smoke-tests (30m), sanity-tests (4h).

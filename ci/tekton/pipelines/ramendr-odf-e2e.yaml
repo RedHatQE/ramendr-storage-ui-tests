@@ -58,7 +58,7 @@ spec:
     - name: destroy
       taskRef:
         name: ramendr-redeploy-stage
-      timeout: "2h"
+      timeout: "1h"
       when:
         - input: "$(params.skip-destroy)"
           operator: in
@@ -91,7 +91,7 @@ spec:
       runAfter: ["destroy"]
       taskRef:
         name: ramendr-redeploy-stage
-      timeout: "4h"
+      timeout: "3h"
       when:
         - input: "$(params.skip-install)"
           operator: in
@@ -123,7 +123,7 @@ spec:
       runAfter: ["install"]
       taskRef:
         name: ramendr-redeploy-stage
-      timeout: "1h"
+      timeout: "30m"
       params:
         - name: stage-arg
           value: "--pattern-prepare"
@@ -151,7 +151,7 @@ spec:
       runAfter: ["pattern-prepare"]
       taskRef:
         name: ramendr-redeploy-stage
-      timeout: "2h"
+      timeout: "1h30m"
       params:
         - name: stage-arg
           value: "--install-byoc"
@@ -180,7 +180,7 @@ spec:
       runAfter: ["install-byoc"]
       taskRef:
         name: ramendr-redeploy-stage
-      timeout: "4h"
+      timeout: "3h30m"
       params:
         - name: stage-arg
           value: "--pattern-finalize"
@@ -208,7 +208,7 @@ spec:
       runAfter: ["pattern-finalize"]
       taskRef:
         name: ramendr-run-pytest
-      timeout: "1h"
+      timeout: "30m"
       params:
         - name: pytest-args
           value: "$(params.pytest-args-smoke)"
@@ -232,7 +232,7 @@ spec:
       runAfter: ["smoke-tests"]
       taskRef:
         name: ramendr-run-pytest
-      timeout: "6h"
+      timeout: "4h"
       params:
         - name: pytest-args
           value: "$(params.pytest-args-sanity)"

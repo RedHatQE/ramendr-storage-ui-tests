@@ -12,7 +12,8 @@ spec:
   pipelineRef:
     name: ramendr-odf-e2e
   timeouts:
-    pipeline: "6h"
+    # destroy+install skipped; remaining ceilings ~0.5+1.5+3.5+0.5+4 = 10h.
+    pipeline: "10h"
   params:
     - name: pattern-variant
       value: odf

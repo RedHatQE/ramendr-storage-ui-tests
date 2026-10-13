@@ -136,6 +136,17 @@ RUN set -eux; \
     chmod +x /usr/local/bin/virtctl; \
     virtctl version --client
 
+# sshpass — Windows Administrator password login via virtctl ssh (ensure-windows-openssh.sh).
+# UBI base repos omit sshpass; pull from EPEL 9.
+RUN set -eux; \
+    dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm; \
+    dnf install -y sshpass; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf; \
+    command -v sshpass; \
+    sshpass -V
+
+
 # Python test deps + Playwright Chromium (browsers under /opt for shared HOME mounts).
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     PIP_NO_CACHE_DIR=1 \
@@ -154,7 +165,7 @@ WORKDIR /workspace
 
 # Sanity: fail the image build if a required binary is missing.
 RUN set -eux; \
-    for cmd in oc openshift-install aws podman git python3 curl jq virtctl; do \
+    for cmd in oc openshift-install aws podman git python3 curl jq virtctl sshpass; do \
       command -v "$cmd"; \
     done; \
     python3 -c "import pytest, playwright"; \
