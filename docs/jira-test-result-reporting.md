@@ -18,6 +18,11 @@ ids are already known and hardcoded in `jira_config.py`.
 credentials.** `JIRA_REPORT_RESULTS` defaults to `false`. Set it (plus real
 credentials) explicitly to report for real, e.g. in CI:
 
+For local development, copy [`.env.example`](../.env.example) to `.env` and
+fill in the reporting values. The root pytest configuration loads that file;
+exported environment variables still take precedence. `.env` is only for this
+repository's pytest/reporting code, not Cursor MCP credentials.
+
 ```bash
 export JIRA_REPORT_RESULTS=true
 export JIRA_BASE_URL="https://redhat.atlassian.net"

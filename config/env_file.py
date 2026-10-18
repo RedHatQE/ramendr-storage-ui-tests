@@ -5,8 +5,10 @@ This is the single, central place local credentials/config for this repo
 ``reporting/jira_client.py``) can live on a developer machine instead of
 being exported by hand before every ``pytest`` invocation.
 
-Mirrors the dotenv-style ``load_env_file`` helper already used by
-``dr-validation/ramendr_dr_validation/db_audit.py`` for DB credentials:
+This intentionally stays local to pytest so it does not import the
+standalone DR-validation helpers in
+``dr-validation/ramendr_dr_validation/db_audit.py`` and
+``db_audit_mssql.py``. Keep their shared dotenv-style behavior aligned:
 plain ``KEY=VALUE`` lines, ``#`` comments, blank lines ignored, no
 dependency on ``python-dotenv``.
 
