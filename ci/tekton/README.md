@@ -55,12 +55,13 @@ podman build -f ci/tekton/Containerfile -t "$IMAGE" .
 podman push "$IMAGE"
 ```
 
-Optional build-args: `OCP_VERSION` (default `4.22.1`), `VIRTCTL_VERSION` (default
-`v1.5.0`), `PYTHON_PKG` (default `python3.12`; UBI’s system `python3` is 3.9 and
-cannot install `pytest>=9`), `BASE_IMAGE`. Point PipelineRun `params.image` at the
-pushed tag. If the registry is private, link a pull secret to `ramendr-ci-pipeline`.
-The image also installs **`sshpass`** (via EPEL) for Windows Administrator password
-SSH during `pattern-finalize` (`ensure-windows-openssh.sh`).
+Optional build-args: `OCP_VERSION` (default `4.22.19`; keep ≥4.22.19 for
+`golang.org/x/crypto` ≥ v0.52.0 in `oc`/`openshift-install`), `VIRTCTL_VERSION`
+(default `v1.5.0`), `PYTHON_PKG` (default `python3.12`; UBI’s system `python3` is
+3.9 and cannot install `pytest>=9`), `BASE_IMAGE`. Point PipelineRun `params.image`
+at the pushed tag. If the registry is private, link a pull secret to
+`ramendr-ci-pipeline`. The image also installs **`sshpass`** (via EPEL) for Windows
+Administrator password SSH during `pattern-finalize` (`ensure-windows-openssh.sh`).
 
 ## Redeploy stages used by Tasks
 
