@@ -15,7 +15,7 @@ spec:
       default: odf
     - name: hub-ocp-version
       type: string
-      default: "4.22.1"
+      default: "4.22.19"
     - name: base-domain
       type: string
     - name: hosted-zone-id

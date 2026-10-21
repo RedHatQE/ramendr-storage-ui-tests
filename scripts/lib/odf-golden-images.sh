@@ -19,7 +19,7 @@
 : "${SPOKE_ODF_STORAGE_WAIT_SLEEP:=30}"
 : "${GITOPS_VMS_NS:=gitops-vms}"
 : "${REPO_ROOT:?REPO_ROOT must be set}"
-: "${HUB_OCP_VERSION:=4.22.1}"
+: "${HUB_OCP_VERSION:=4.22.19}"
 
 _ogi_log() {
   if [[ $(type -t log) == function ]]; then
