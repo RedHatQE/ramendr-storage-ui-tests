@@ -8,24 +8,26 @@
 #     -t quay.io/<org>/ramendr-ci:$(date +%Y-%m-%d) .
 #
 # Override pins at build time:
-#   --build-arg OCP_VERSION=4.22.1
+#   --build-arg OCP_VERSION=4.22.19
 #   --build-arg VIRTCTL_VERSION=v1.5.0
 #   --build-arg PYTHON_PKG=python3.12
-#
-# Runtime: Task steps set privileged=true for nested podman (pattern.sh).
-# On OpenShift, bind SCC privileged to the Pipeline ServiceAccount.
 
 ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi:latest
 FROM ${BASE_IMAGE}
 
 ARG TARGETARCH=amd64
-ARG OCP_VERSION=4.22.1
+# Keep >= 4.22.19: oc/openshift-install embed golang.org/x/crypto >= v0.52.0
+# (fixes Quay CRITICAL GHSA-* on x/crypto ssh agent/channel paths).
+ARG OCP_VERSION=4.22.19
 # KubeVirt virtctl release tag (OpenShift Virtualization–compatible CLI).
 ARG VIRTCTL_VERSION=v1.5.0
 # UBI default python3 is 3.9; pytest>=9 needs >=3.10 (match .github 3.12).
 ARG PYTHON_PKG=python3.12
 
 USER root
+
+# Refresh UBI packages before installs (base image may lag security errata).
+RUN dnf -y update && dnf clean all && rm -rf /var/cache/dnf
 
 # dnf: tooling + nested podman + Chromium/Playwright runtime libs (best-effort on UBI).
 # UBI ships curl-minimal (conflicts with curl); do not install curl.
