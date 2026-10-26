@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 .env
 .env.*
+!.env.example
 jira-token.txt
 playwright-report/
 test-results/
