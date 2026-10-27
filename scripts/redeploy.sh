@@ -126,9 +126,13 @@ export_hub_kube_auth() {
   export KUBECONFIG="$kc"
   export K8S_AUTH_KUBECONFIG="$kc"
   if running_in_container && [[ -f "$kc" ]]; then
+    # HOME often lives on the shared Tekton PVC. Restricted NFS remaps ownership
+    # to anon uid; keep dirs traversable and the kubeconfig other-readable so
+    # later TaskRuns (different uid/fsGroup) can still use them.
     mkdir -p "${HOME:-/tmp}/.kube"
+    chmod 755 "${HOME:-/tmp}" "${HOME:-/tmp}/.kube" 2>/dev/null || true
     cp -f "$kc" "${HOME:-/tmp}/.kube/config"
-    chmod 600 "${HOME:-/tmp}/.kube/config"
+    chmod 644 "${HOME:-/tmp}/.kube/config"
   fi
 }
 
@@ -919,9 +923,13 @@ install_hub() {
   install_one_cluster "hub" "$HUB_INSTALL_DIR"
 
   log "Hub cluster installed. Setting up kubeconfig..."
-  mkdir -p "$HOME/.kube"
-  cp "$HUB_INSTALL_DIR/auth/kubeconfig" "$HOME/.kube/config"
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+  export_hub_kube_auth "$HUB_INSTALL_DIR/auth/kubeconfig"
+  # Local (non-container) path: keep a conventional ~/.kube/config copy.
+  if ! running_in_container; then
+    mkdir -p "$HOME/.kube"
+    cp "$HUB_INSTALL_DIR/auth/kubeconfig" "$HOME/.kube/config"
+    export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+  fi
 
   log "Hub console: https://console-openshift-console.apps.hub.${BASE_DOMAIN}"
   # Never print kubeadmin to logs (CI/Tekton are shared). Password is on disk for UI tests:
@@ -1448,7 +1456,6 @@ case "${1:-}" in
     echo " PRIMARY_INSTALL_DIR=/workspace/data/install/primary"
     echo " SECONDARY_INSTALL_DIR=/workspace/data/install/secondary"
     echo " VALUES_SECRET=/workspace/secrets/values-secret.yaml"
-    echo " See ci/tekton/README.md for OpenShift Pipelines wiring."
     echo ""
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"

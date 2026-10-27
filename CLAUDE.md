@@ -78,7 +78,3 @@ Smoke tests expect the full mixed fleet (4 edge VMs) and validate Windows OS dis
 when `PATTERN_VARIANT=odf`. Partner variants skip those assertions and check S4
 `2m-drpolicy` (`drpartner-s4`) or the lack of S4/DRPolicy (`drpartner-minimal`). HammerDB smoke checks TPC-C **schema**
 only; sanity starts OLTP after DRPC Healthy and stops writers on teardown.
-
-## Future
-
-- CI entrypoints that reuse the same deployment and then run UI tests against the hub console
