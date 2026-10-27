@@ -53,10 +53,16 @@ Customizations are **not** copied from this repo into the upstream checkout. The
 
 ## CI / QE context (OpenShift Pipelines)
 
-- **Implemented path:** OpenShift Pipelines (Tekton) on a shared QE/management cluster.
-  See [`ci/tekton/README.md`](ci/tekton/README.md).
+- **Implemented path:** OpenShift Pipelines (Tekton) + workstation
+  `ci/tekton/bootstrap/apply-config.sh`.
+  Default namespace `ramendr--pipeline`. See [`ci/tekton/README.md`](ci/tekton/README.md).
   - CI image: [`ci/tekton/Containerfile`](ci/tekton/Containerfile) (`oc`, `openshift-install`,
     `aws`, `podman`, pytest/Playwright, `virtctl`).
+  - Config: [`ci/tekton/config/`](ci/tekton/config/) (PVC 20Gi, RoleBinding for SA
+    `pipeline`, ExternalSecret). Do **not** apply `examples/serviceaccount.yaml` on
+    operator-managed clusters.
+  - Bootstrap: `apply-config.sh`, `load-vault.sh`, `backup-workspace.sh`,
+    `restore-workspace.sh` under [`ci/tekton/bootstrap/`](ci/tekton/bootstrap/).
   - ODF Pipeline: **destroy → install → pattern-prepare → install-byoc → pattern-finalize → pytest**
     (`ramendr-odf-e2e`).
   - **`install-byoc`** runs in `quay.io/validatedpatterns/utility-container` (no privileged SCC;
@@ -85,6 +91,7 @@ Customizations are **not** copied from this repo into the upstream checkout. The
 | `CLAUDE.md`                   | Security + deployment contract, mixed fleet          |
 | `scripts/redeploy.sh`         | Full orchestration                                   |
 | `ci/tekton/README.md`         | OpenShift Pipelines ODF e2e + teardown               |
+| `ci/tekton/bootstrap/`        | apply-config / load-vault / PVC install-state backup |
 | `ci/tekton/Containerfile`     | QE CI image for Tekton Tasks                         |
 | `scripts/stabilize-windows-vms.sh` | Windows VM wait, stabilize, OpenSSH ensure      |
 | `install-config-examples/`    | Example `install-config.yaml.bak` templates          |

@@ -49,7 +49,10 @@ prepare_byoc_values_secret() {
   }
 
   mkdir -p "$(dirname "$dest_secret")"
-  install -m 600 "$source_secret" "$dest_secret" || {
+  # Mode 0644 (not 0600): OpenShift restricted NFS remaps file ownership to the
+  # anon uid (nobody/99). Later Tekton TaskRuns run as a different uid/fsGroup and
+  # cannot read a 0600 work copy. The PVC is RWO and namespace-scoped.
+  install -m 644 "$source_secret" "$dest_secret" || {
     _byoc_ks_err "Failed to copy values-secret to $dest_secret"
     return 1
   }
@@ -57,6 +60,7 @@ prepare_byoc_values_secret() {
   _byoc_ks_log "Merging spoke kubeconfig paths into $dest_secret (source: $source_secret)..."
 
   python3 - "$dest_secret" "$primary_kc" "$secondary_kc" <<'PY'
+import os
 import sys
 
 try:
@@ -97,6 +101,8 @@ if "version" not in data:
 
 with open(out_path, "w", encoding="utf-8") as fh:
     yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
+# Preserve cross-TaskRun readability if the umask tightened the mode on write.
+os.chmod(out_path, 0o644)
 PY
 
   BYOC_VALUES_SECRET="$dest_secret"
