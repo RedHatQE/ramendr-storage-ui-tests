@@ -162,8 +162,24 @@ def build_test_result_fields(
 
     Every Ramen automation Test Result includes: project, issuetype,
     parent, labels, Compose Version (when available), summary, and an ADF
-    description.
+    description. The result project must match the parent Test Case's
+    project, preventing a stale ``JIRA_PROJECT_KEY`` override from creating
+    an invalid cross-project payload.
     """
+    parent_project, separator, _ = execution.test_case_key.partition("-")
+    if not separator or not parent_project:
+        raise ValueError(
+            f"test_case_key must include a Jira project prefix: "
+            f"{execution.test_case_key!r}"
+        )
+    if config.project_key.upper() != parent_project.upper():
+        raise ValueError(
+            "JIRA_PROJECT_KEY must match the parent Test Case project: "
+            f"configured {config.project_key!r}, parent "
+            f"{execution.test_case_key!r}. Update JIRA_PROJECT_KEY or unset it "
+            "to use the default."
+        )
+
     fields: dict[str, Any] = {
         "project": {"key": config.project_key},
         "issuetype": {"id": config.test_result_issue_type_id},

@@ -214,13 +214,13 @@ def test_build_test_result_fields_labels_is_a_fresh_list_each_call():
 def test_build_test_result_fields_respects_custom_config_ids():
     config = reporting_config_from_env(
         {
-            "JIRA_PROJECT_KEY": "OTHERPROJ",
+            "JIRA_PROJECT_KEY": "VIRTDR",
             "JIRA_TEST_RESULT_ISSUE_TYPE_ID": "99999",
             "JIRA_COMPOSE_VERSION_FIELD_ID": "customfield_99999",
         }
     )
     fields = build_test_result_fields(_execution(), config=config)
-    assert fields["project"] == {"key": "OTHERPROJ"}
+    assert fields["project"] == {"key": "VIRTDR"}
     assert fields["issuetype"] == {"id": "99999"}
     assert fields["customfield_99999"] == "RHEL-9.8.0"
 
@@ -304,6 +304,22 @@ def test_report_test_result_requires_client_for_a_real_write():
     )
     with pytest.raises(ValueError):
         report_test_result(_execution(), client=None, config=config)
+
+
+def test_project_mismatch_prevents_creating_a_test_result():
+    config = reporting_config_from_env(
+        {
+            "JIRA_REPORT_RESULTS": "true",
+            "JIRA_REPORT_DRY_RUN": "false",
+            "JIRA_PROJECT_KEY": "RHELTEST",
+        }
+    )
+    client = FakeReportingClient()
+
+    with pytest.raises(ValueError, match="JIRA_PROJECT_KEY must match"):
+        report_test_result(_execution(), client=client, config=config)
+
+    assert client.calls == []
 
 
 def test_report_test_result_full_write_flow_creates_then_transitions():

@@ -23,6 +23,11 @@ fill in the reporting values. The root pytest configuration loads that file;
 exported environment variables still take precedence. `.env` is only for this
 repository's pytest/reporting code, not Cursor MCP credentials.
 
+After the VIRTDR migration, update or remove any retained
+`JIRA_PROJECT_KEY=RHELTEST` shell or CI override. The reporter verifies that
+the configured result project matches the mapped parent Test Case project and
+rejects a mismatch before creating a Jira issue.
+
 ```bash
 export JIRA_REPORT_RESULTS=true
 export JIRA_BASE_URL="https://redhat.atlassian.net"
