@@ -36,7 +36,7 @@ def test_dry_run_can_be_explicitly_disabled_for_a_real_write():
 
 def test_defaults_match_phase_a_discovered_production_schema():
     config = reporting_config_from_env({})
-    assert config.project_key == "RHELTEST"
+    assert config.project_key == "VIRTDR"
     assert config.test_result_issue_type_id == "10272"
     assert config.compose_version_field_id == "customfield_11500"
     assert config.pass_transition_id == "3"

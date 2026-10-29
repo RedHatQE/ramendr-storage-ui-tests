@@ -1,7 +1,7 @@
 """Minimal Jira Cloud REST API v3 client: create + transition issues.
 
 Deliberately thin: we already know (from a one-time, now-removed discovery
-pass against the production `RHELTEST` project) the project key, the "Test
+pass against the production `VIRTDR` project) the project key, the "Test
 Result" issue type id, and the PASS/FAIL/BLOCKED transition ids -- see
 ``reporting/jira_config.py``'s defaults and ``reporting/jira_test_cases.py``'s
 static scenario -> Jira Test Case key map. This client has exactly the two

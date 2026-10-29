@@ -10,7 +10,7 @@ TestUiSmoke    — Playwright tests against the ACM hub console UI.
 
 Jira reporting: every test below decorated with ``@_jira_deployment_smoke``
 is one applicable check contributing to the aggregated
-``deployment_smoke_validation`` (RHELTEST-3612) Jira Test Result -- one
+``deployment_smoke_validation`` (VIRTDR-391) Jira Test Result -- one
 Test Result for the *whole* smoke suite per invocation (PASS only if every
 applicable-for-the-active-PATTERN_VARIANT check below passed), not one per
 test. See ``reporting/pytest_jira_plugin.py``'s ``jira_aggregate_test_case``
@@ -106,7 +106,7 @@ _skip_without_minimal = pytest.mark.skipif(
 )
 
 #: Applied to every smoke check that contributes to the aggregated
-#: deployment_smoke_validation (RHELTEST-3612) Jira Test Result -- see the
+#: deployment_smoke_validation (VIRTDR-391) Jira Test Result -- see the
 #: module docstring. Deliberately NOT applied to the four test_drpartner_*
 #: variant-identity checks below.
 _jira_deployment_smoke = pytest.mark.jira_aggregate_test_case(

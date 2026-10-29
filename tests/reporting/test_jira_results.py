@@ -27,7 +27,7 @@ _EXECUTED_AT = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
 
 def _execution(**overrides) -> TestResultExecution:
     defaults = dict(
-        test_case_key="RHELTEST-3600",
+        test_case_key="VIRTDR-392",
         scenario="Failover primary to secondary",
         outcome=TestOutcome.PASS,
         run_id="run-42",
@@ -46,26 +46,26 @@ def _execution(**overrides) -> TestResultExecution:
 
 def test_build_summary_matches_spec_format():
     summary = build_summary(
-        "RHELTEST-3600", "Failover primary to secondary", "RHEL-9.8.0", "run-42"
+        "VIRTDR-392", "Failover primary to secondary", "RHEL-9.8.0", "run-42"
     )
     assert (
         summary
-        == "Ramen DR | RHELTEST-3600 | Failover primary to secondary | RHEL-9.8.0 | run-42"
+        == "Ramen DR | VIRTDR-392 | Failover primary to secondary | RHEL-9.8.0 | run-42"
     )
 
 
 def test_build_summary_omits_compose_and_never_fabricates_a_value():
     """No stale sample value, no TEST-COMPOSE-*-style placeholder -- just a
     clear, unmistakable 'not-supplied' token."""
-    summary = build_summary("RHELTEST-3600", "Failover", None, "run-42")
-    assert summary == "Ramen DR | RHELTEST-3600 | Failover | not-supplied | run-42"
+    summary = build_summary("VIRTDR-392", "Failover", None, "run-42")
+    assert summary == "Ramen DR | VIRTDR-392 | Failover | not-supplied | run-42"
     assert "RHEL-9.8.0" not in summary
     assert "TEST-COMPOSE" not in summary
 
 
 def test_build_summary_falls_back_to_not_supplied_for_empty_string_compose():
-    summary = build_summary("RHELTEST-3600", "Failover", "", "run-42")
-    assert summary == "Ramen DR | RHELTEST-3600 | Failover | not-supplied | run-42"
+    summary = build_summary("VIRTDR-392", "Failover", "", "run-42")
+    assert summary == "Ramen DR | VIRTDR-392 | Failover | not-supplied | run-42"
 
 
 # --------------------------------------------------------------------------
@@ -187,11 +187,11 @@ def test_build_test_result_fields_includes_all_mandatory_fields():
     config = reporting_config_from_env({})
     fields = build_test_result_fields(_execution(), config=config)
 
-    assert fields["project"] == {"key": "RHELTEST"}
+    assert fields["project"] == {"key": "VIRTDR"}
     assert fields["issuetype"] == {"id": "10272"}
-    assert fields["parent"] == {"key": "RHELTEST-3600"}
+    assert fields["parent"] == {"key": "VIRTDR-392"}
     assert fields["labels"] == ["ramen-dr", "automation"]
-    assert fields["summary"].startswith("Ramen DR | RHELTEST-3600 |")
+    assert fields["summary"].startswith("Ramen DR | VIRTDR-392 |")
     assert fields["description"]["type"] == "doc"
     assert fields["customfield_11500"] == "RHEL-9.8.0"
 
@@ -265,7 +265,7 @@ def test_report_test_result_skips_everything_when_reporting_disabled():
     assert result.skipped_reason == "reporting disabled (JIRA_REPORT_RESULTS=false)"
     assert result.issue_key is None
     assert client.calls == []  # zero Jira calls -- reporting is fully off
-    assert result.fields["parent"] == {"key": "RHELTEST-3600"}
+    assert result.fields["parent"] == {"key": "VIRTDR-392"}
 
 
 def test_report_test_result_never_requires_a_client_when_reporting_disabled():

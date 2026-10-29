@@ -1,7 +1,7 @@
 # Jira Test Result reporting
 
 Automated reporting of PASS/FAIL outcomes for a small, fixed set of Ramen DR
-scenarios to Jira (`RHELTEST` project, `Test Result` issue type), from the
+scenarios to Jira (`VIRTDR` project, `Test Result` issue type), from the
 sanity and smoke UI test suites.
 
 The design is deliberately minimal for the current scale (three known
@@ -62,9 +62,9 @@ real-write combination (`report_results=true` **and** `dry_run=false`).
 
   ```python
   RAMENDR_JIRA_TEST_CASES = {
-      "failover_primary_to_secondary": "RHELTEST-3600",
-      "relocate_secondary_to_primary": "RHELTEST-3610",
-      "deployment_smoke_validation": "RHELTEST-3612",
+      "failover_primary_to_secondary": "VIRTDR-392",
+      "relocate_secondary_to_primary": "VIRTDR-389",
+      "deployment_smoke_validation": "VIRTDR-391",
   }
   ```
 
@@ -104,7 +104,7 @@ real-write combination (`report_results=true` **and** `dry_run=false`).
 
 `tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui` reports
 two independent scenarios -- `failover_primary_to_secondary`
-(RHELTEST-3600) and `relocate_secondary_to_primary` (RHELTEST-3610) -- via
+(VIRTDR-392) and `relocate_secondary_to_primary` (VIRTDR-389) -- via
 `jira_test_case_result()`:
 
 ```python
@@ -139,7 +139,7 @@ failure matrix.
 ## Smoke wiring
 
 `tests/ui/smoke/test_smoke.py` reports one aggregated Jira Test Result --
-`deployment_smoke_validation` / **RHELTEST-3612** -- per invocation, via the
+`deployment_smoke_validation` / **VIRTDR-391** -- per invocation, via the
 `@pytest.mark.jira_aggregate_test_case("deployment_smoke_validation", ...)`
 marker on each applicable test:
 
@@ -173,7 +173,7 @@ JIRA_REPORT_DRY_RUN=true    # default when reporting is enabled: no writes
 JIRA_REPORT_STRICT=false    # raise (fail the test) if a PASS result fails to report
 
 JIRA_BASE_URL=
-JIRA_PROJECT_KEY=RHELTEST
+JIRA_PROJECT_KEY=VIRTDR
 JIRA_EMAIL=
 JIRA_API_TOKEN=
 

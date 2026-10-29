@@ -258,7 +258,7 @@ def test_collection_modifyitems_passes_with_default_opt_in_config(monkeypatch):
 # --------------------------------------------------------------------------
 # jira_aggregate_test_case: one Jira Test Result for a whole group,
 # reported once at pytest_sessionfinish (used by the smoke suite ->
-# deployment_smoke_validation / RHELTEST-3612).
+# deployment_smoke_validation / VIRTDR-391).
 # --------------------------------------------------------------------------
 
 
@@ -300,7 +300,7 @@ def test_aggregate_all_passing_reports_exactly_one_pass(monkeypatch):
     _finish_session(shared_config)
 
     assert len(client.created) == 1
-    assert client.created[0]["parent"] == {"key": "RHELTEST-3612"}
+    assert client.created[0]["parent"] == {"key": "VIRTDR-391"}
     assert client.transitioned == [(client.transitioned[0][0], "3")]  # PASS
 
 
