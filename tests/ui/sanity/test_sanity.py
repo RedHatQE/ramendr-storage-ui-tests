@@ -1115,7 +1115,7 @@ def _run_force_full_sanity_dr_flow(
     drpc_page.assert_failover_dialog_contents()
     drpc_page.cancel_failover_dialog()
 
-    # --- RHELTEST-3600 (failover_primary_to_secondary) Jira boundary starts.
+    # --- VIRTDR-392 (failover_primary_to_secondary) Jira boundary starts.
     failover_reporter = jira_test_case_result(
         "failover_primary_to_secondary",
         scenario="Failover primary to secondary",
@@ -1188,9 +1188,9 @@ def _run_force_full_sanity_dr_flow(
         raise
     else:
         failover_reporter.close_success()
-    # --- RHELTEST-3600 Jira boundary ends (PASS committed before relocate starts).
+    # --- VIRTDR-392 Jira boundary ends (PASS committed before relocate starts).
 
-    # --- RHELTEST-3610 (relocate_secondary_to_primary) Jira boundary starts.
+    # --- VIRTDR-389 (relocate_secondary_to_primary) Jira boundary starts.
     relocate_reporter = jira_test_case_result(
         "relocate_secondary_to_primary",
         scenario="Relocate secondary to primary",
@@ -1259,7 +1259,7 @@ def _run_force_full_sanity_dr_flow(
         raise
     else:
         relocate_reporter.close_success()
-    # --- RHELTEST-3610 Jira boundary ends.
+    # --- VIRTDR-389 Jira boundary ends.
 
 
 def _require_ui_credentials():
@@ -1656,7 +1656,7 @@ class TestUiSanity:
                     phase="failover", initiated_utc=failover_initiated_utc
                 )
 
-                # RHELTEST-3600 boundary ends here (PASS committed) -- only
+                # VIRTDR-392 boundary ends here (PASS committed) -- only
                 # when this invocation actually opened it above. A resumed
                 # post_failover run never set failover_initiated and so
                 # never created a reporter; nothing is reported here for it.
@@ -1675,7 +1675,7 @@ class TestUiSanity:
                     f"{state_before_relocate['status']!r}"
                 )
 
-                # RHELTEST-3610 boundary starts here: reaching this point
+                # VIRTDR-389 boundary starts here: reaching this point
                 # inside run_failover_phase always leads to a real relocate
                 # initiation just below, so it's always opened here.
                 relocate_reporter = jira_test_case_result(
@@ -1732,7 +1732,7 @@ class TestUiSanity:
                 phase="relocate", initiated_utc=relocate_initiated_utc
             )
 
-            # RHELTEST-3610 boundary ends here -- only when this invocation
+            # VIRTDR-389 boundary ends here -- only when this invocation
             # actually opened it above (run_failover_phase was True and
             # relocate was genuinely initiated this run).
             if relocate_reporter is not None:

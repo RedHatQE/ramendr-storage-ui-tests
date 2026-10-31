@@ -34,7 +34,7 @@ class TestOutcome(str, Enum):
 class TestResultExecution:
     """Everything needed to report one Ramen DR automation run as a Jira Test Result.
 
-    ``test_case_key`` must be a real Jira Test Case key (e.g. ``RHELTEST-3600``)
+    ``test_case_key`` must be a real Jira Test Case key (e.g. ``VIRTDR-392``)
     -- resolve it from an approved scenario id via
     ``reporting.jira_test_cases.resolve_test_case_key`` before constructing
     this; this class does not validate that the key is approved or that the

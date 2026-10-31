@@ -138,7 +138,7 @@ class _FakeDRPCPage:
 
 
 class FakeSanityJiraClient:
-    """In-memory fake covering both RHELTEST-3600 and RHELTEST-3610 parents,
+    """In-memory fake covering both VIRTDR-392 and VIRTDR-389 parents,
     since one real client instance is shared by both scenario boundaries."""
 
     def __init__(self):
@@ -306,8 +306,8 @@ def test_fresh_run_reports_failover_pass_and_relocate_pass(monkeypatch):
 
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
-    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS
-    assert client.outcome_for_parent("RHELTEST-3610") == "3"  # PASS
+    assert client.outcome_for_parent("VIRTDR-392") == "3"  # PASS
+    assert client.outcome_for_parent("VIRTDR-389") == "3"  # PASS
 
 
 def test_fresh_run_failover_and_relocate_share_one_run_id(monkeypatch):
@@ -322,8 +322,8 @@ def test_fresh_run_failover_and_relocate_share_one_run_id(monkeypatch):
 
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
-    failover_summary = client.summary_for_parent("RHELTEST-3600")
-    relocate_summary = client.summary_for_parent("RHELTEST-3610")
+    failover_summary = client.summary_for_parent("VIRTDR-392")
+    relocate_summary = client.summary_for_parent("VIRTDR-389")
     assert failover_summary.endswith("| shared-run-xyz")
     assert relocate_summary.endswith("| shared-run-xyz")
 
@@ -335,7 +335,7 @@ def test_fresh_run_failover_and_relocate_share_one_run_id(monkeypatch):
 
 def test_resume_after_failover_does_not_report_a_false_failover_pass(monkeypatch):
     """post_failover: only relocate genuinely executes this invocation --
-    RHELTEST-3600 must get NO Jira Test Result, RHELTEST-3610 gets PASS."""
+    VIRTDR-392 must get NO Jira Test Result, VIRTDR-389 gets PASS."""
     client = FakeSanityJiraClient()
     _patch_common(
         monkeypatch,
@@ -347,13 +347,13 @@ def test_resume_after_failover_does_not_report_a_false_failover_pass(monkeypatch
 
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
-    assert client.outcome_for_parent("RHELTEST-3600") is None  # never created
-    assert client.outcome_for_parent("RHELTEST-3610") == "3"  # PASS
+    assert client.outcome_for_parent("VIRTDR-392") is None  # never created
+    assert client.outcome_for_parent("VIRTDR-389") == "3"  # PASS
 
 
 def test_resume_after_relocate_fabricates_no_results(monkeypatch):
     """post_relocate: nothing new is executed this invocation -- neither
-    RHELTEST-3600 nor RHELTEST-3610 should get a Jira Test Result."""
+    VIRTDR-392 nor VIRTDR-389 should get a Jira Test Result."""
     client = FakeSanityJiraClient()
     _patch_common(
         monkeypatch,
@@ -366,8 +366,8 @@ def test_resume_after_relocate_fabricates_no_results(monkeypatch):
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
     assert client.created == []
-    assert client.outcome_for_parent("RHELTEST-3600") is None
-    assert client.outcome_for_parent("RHELTEST-3610") is None
+    assert client.outcome_for_parent("VIRTDR-392") is None
+    assert client.outcome_for_parent("VIRTDR-389") is None
 
 
 # --------------------------------------------------------------------------
@@ -395,13 +395,13 @@ def test_failure_during_failover_reports_only_failover_fail(monkeypatch):
             ),
         )
 
-    assert client.outcome_for_parent("RHELTEST-3600") == "4"  # FAIL
-    assert client.outcome_for_parent("RHELTEST-3610") is None  # never even started
+    assert client.outcome_for_parent("VIRTDR-392") == "4"  # FAIL
+    assert client.outcome_for_parent("VIRTDR-389") is None  # never even started
 
 
 def test_failover_pass_then_relocate_fail_reported_independently(monkeypatch):
     """The example from the spec: failover succeeds, relocate fails ->
-    RHELTEST-3600 PASS, RHELTEST-3610 FAIL (never both FAIL)."""
+    VIRTDR-392 PASS, VIRTDR-389 FAIL (never both FAIL)."""
     client = FakeSanityJiraClient()
     _patch_common(
         monkeypatch,
@@ -421,8 +421,8 @@ def test_failover_pass_then_relocate_fail_reported_independently(monkeypatch):
             ),
         )
 
-    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS
-    assert client.outcome_for_parent("RHELTEST-3610") == "4"  # FAIL
+    assert client.outcome_for_parent("VIRTDR-392") == "3"  # PASS
+    assert client.outcome_for_parent("VIRTDR-389") == "4"  # FAIL
 
 
 # --------------------------------------------------------------------------
@@ -464,15 +464,15 @@ def test_failure_before_failover_initiation_reports_no_jira_result(monkeypatch):
     # initiate_failover_dialog() was never reached -> failover_initiated
     # stayed False -> no Jira Test Result may exist for either scenario.
     assert client.created == []
-    assert client.outcome_for_parent("RHELTEST-3600") is None
-    assert client.outcome_for_parent("RHELTEST-3610") is None
+    assert client.outcome_for_parent("VIRTDR-392") is None
+    assert client.outcome_for_parent("VIRTDR-389") is None
 
 
 def test_failure_before_relocate_initiation_reports_no_jira_result(monkeypatch):
     """Resumes from a completed failover (so relocate_reporter is the one
     under test in isolation): the baseline snapshot for relocate raises
     before initiate_relocate_dialog() runs, so relocate_was_initiated stays
-    False and RHELTEST-3610 must get no Jira Test Result. RHELTEST-3600 also
+    False and VIRTDR-389 must get no Jira Test Result. VIRTDR-392 also
     gets none, since resuming into post_failover never opens that boundary."""
     client = FakeSanityJiraClient()
     _patch_common(
@@ -496,8 +496,8 @@ def test_failure_before_relocate_initiation_reports_no_jira_result(monkeypatch):
         )
 
     assert client.created == []
-    assert client.outcome_for_parent("RHELTEST-3600") is None
-    assert client.outcome_for_parent("RHELTEST-3610") is None
+    assert client.outcome_for_parent("VIRTDR-392") is None
+    assert client.outcome_for_parent("VIRTDR-389") is None
 
 
 # --------------------------------------------------------------------------
@@ -548,7 +548,7 @@ def test_jira_reporting_failure_while_scenario_fails_preserves_original_exceptio
     monkeypatch,
 ):
     client = FakeSanityJiraClient()
-    client.fail_create_for.add("RHELTEST-3600")
+    client.fail_create_for.add("VIRTDR-392")
     _patch_common(
         monkeypatch,
         initial_state=_HEALTHY_PRIMARY_FRESH,
@@ -571,7 +571,7 @@ def test_jira_reporting_failure_while_scenario_fails_preserves_original_exceptio
 
 def test_jira_reporting_failure_after_pass_respects_strict_flag(monkeypatch):
     client = FakeSanityJiraClient()
-    client.fail_create_for.add("RHELTEST-3600")
+    client.fail_create_for.add("VIRTDR-392")
     _patch_common(
         monkeypatch,
         initial_state=_HEALTHY_PRIMARY_FRESH,
@@ -590,7 +590,7 @@ def test_jira_reporting_failure_after_pass_respects_strict_flag(monkeypatch):
 
 def test_jira_reporting_failure_after_pass_is_swallowed_by_default(monkeypatch):
     client = FakeSanityJiraClient()
-    client.fail_create_for.add("RHELTEST-3600")
+    client.fail_create_for.add("VIRTDR-392")
     _patch_common(
         monkeypatch,
         initial_state=_HEALTHY_PRIMARY_FRESH,
@@ -603,7 +603,7 @@ def test_jira_reporting_failure_after_pass_is_swallowed_by_default(monkeypatch):
     # defaults to false, so the Jira write failure is only logged.
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
-    assert client.outcome_for_parent("RHELTEST-3610") == "3"  # relocate still PASS
+    assert client.outcome_for_parent("VIRTDR-389") == "3"  # relocate still PASS
 
 
 # --------------------------------------------------------------------------
@@ -626,8 +626,8 @@ def test_force_full_fresh_run_reports_failover_pass_and_relocate_pass(monkeypatc
 
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
-    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS
-    assert client.outcome_for_parent("RHELTEST-3610") == "3"  # PASS
+    assert client.outcome_for_parent("VIRTDR-392") == "3"  # PASS
+    assert client.outcome_for_parent("VIRTDR-389") == "3"  # PASS
 
 
 def test_force_full_failover_and_relocate_share_one_run_id(monkeypatch):
@@ -643,8 +643,8 @@ def test_force_full_failover_and_relocate_share_one_run_id(monkeypatch):
 
     _run_sanity_test(monkeypatch, run_dr_data_validation=_make_run_dr_data_validation())
 
-    failover_summary = client.summary_for_parent("RHELTEST-3600")
-    relocate_summary = client.summary_for_parent("RHELTEST-3610")
+    failover_summary = client.summary_for_parent("VIRTDR-392")
+    relocate_summary = client.summary_for_parent("VIRTDR-389")
     assert failover_summary.endswith("| shared-run-force-full")
     assert relocate_summary.endswith("| shared-run-force-full")
 
@@ -670,8 +670,8 @@ def test_force_full_failure_during_failover_reports_only_failover_fail(monkeypat
             ),
         )
 
-    assert client.outcome_for_parent("RHELTEST-3600") == "4"  # FAIL
-    assert client.outcome_for_parent("RHELTEST-3610") is None  # never even started
+    assert client.outcome_for_parent("VIRTDR-392") == "4"  # FAIL
+    assert client.outcome_for_parent("VIRTDR-389") is None  # never even started
 
 
 def test_force_full_failover_pass_then_relocate_fail_reported_independently(
@@ -697,8 +697,8 @@ def test_force_full_failover_pass_then_relocate_fail_reported_independently(
             ),
         )
 
-    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS
-    assert client.outcome_for_parent("RHELTEST-3610") == "4"  # FAIL
+    assert client.outcome_for_parent("VIRTDR-392") == "3"  # PASS
+    assert client.outcome_for_parent("VIRTDR-389") == "4"  # FAIL
 
 
 # --------------------------------------------------------------------------
@@ -742,8 +742,8 @@ def test_force_full_failure_before_failover_initiation_reports_no_jira_result(
     # initiate_failover_dialog() was never reached -> failover_initiated
     # stayed False -> no Jira Test Result may exist for either scenario.
     assert client.created == []
-    assert client.outcome_for_parent("RHELTEST-3600") is None
-    assert client.outcome_for_parent("RHELTEST-3610") is None
+    assert client.outcome_for_parent("VIRTDR-392") is None
+    assert client.outcome_for_parent("VIRTDR-389") is None
 
 
 def test_force_full_failure_before_relocate_initiation_reports_no_jira_result(
@@ -751,8 +751,8 @@ def test_force_full_failure_before_relocate_initiation_reports_no_jira_result(
 ):
     """Failover genuinely passes and closes PASS; the baseline snapshot for
     relocate then raises before initiate_relocate_dialog() runs, so
-    relocate_initiated stays False and RHELTEST-3610 must get no Jira Test
-    Result. RHELTEST-3600 keeps its already-committed PASS."""
+    relocate_initiated stays False and VIRTDR-389 must get no Jira Test
+    Result. VIRTDR-392 keeps its already-committed PASS."""
     client = FakeSanityJiraClient()
     _patch_common(
         monkeypatch,
@@ -775,5 +775,5 @@ def test_force_full_failure_before_relocate_initiation_reports_no_jira_result(
             monkeypatch, run_dr_data_validation=_make_run_dr_data_validation()
         )
 
-    assert client.outcome_for_parent("RHELTEST-3600") == "3"  # PASS, unaffected
-    assert client.outcome_for_parent("RHELTEST-3610") is None  # never initiated
+    assert client.outcome_for_parent("VIRTDR-392") == "3"  # PASS, unaffected
+    assert client.outcome_for_parent("VIRTDR-389") is None  # never initiated

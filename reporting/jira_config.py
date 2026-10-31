@@ -22,9 +22,9 @@ from typing import Mapping
 
 from reporting.jira_models import TestOutcome
 
-#: RHELTEST production values. Every value is still overridable via the
+#: VIRTDR production values. Every value is still overridable via the
 #: matching environment variable.
-DEFAULT_PROJECT_KEY = "RHELTEST"
+DEFAULT_PROJECT_KEY = "VIRTDR"
 DEFAULT_TEST_RESULT_ISSUE_TYPE_ID = "10272"
 DEFAULT_COMPOSE_VERSION_FIELD_ID = "customfield_11500"
 DEFAULT_PASS_TRANSITION_ID = "3"

@@ -22,7 +22,7 @@ reads outcomes pytest already computed and calls the same
 
 Used when several pytest tests together represent *one* Jira Test Case
 (e.g. every applicable ``tests/ui/smoke/test_smoke.py`` check together
-represent ``deployment_smoke_validation`` / RHELTEST-3612) -- reporting one
+represent ``deployment_smoke_validation`` / VIRTDR-391) -- reporting one
 Test Result per constituent test would be noisy and would not answer "did
 this Test Case pass" without reading every row. Instead, every test sharing
 one ``scenario_id`` is accumulated (in ``pytest_runtest_makereport``) and
