@@ -33,7 +33,8 @@ VM_NAMESPACE="${VM_NAMESPACE:-gitops-vms}"
 STORAGE_NS="${STORAGE_NAMESPACE:-openshift-storage}"
 LOG_SINCE="${RAMENDR_DR_DEBUG_LOG_SINCE:-2h}"
 # Cap per-pod log size so a noisy NooBaa endpoint cannot blow the PVC.
-LOG_TAIL="${RAMENDR_DR_DEBUG_LOG_TAIL:--1}"
+# Set RAMENDR_DR_DEBUG_LOG_TAIL=-1 to disable the cap.
+LOG_TAIL="${RAMENDR_DR_DEBUG_LOG_TAIL:-20000}"
 
 usage() {
   sed -n '2,28p' "$0" | sed 's/^# \?//'

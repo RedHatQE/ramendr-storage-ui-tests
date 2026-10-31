@@ -174,6 +174,7 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `RAMENDR_DR_DEBUG` | `1` | Sanity hooks call `collect-ramen-debug.sh` before/after failover (and on failure). Set `0` to skip |
 | `RAMENDR_DR_DEBUG_DIR` | Tekton `/workspace/data/artifacts/dr-debug` or `WORK_DIR/artifacts/dr-debug` | Override dump root |
 | `RAMENDR_DR_DEBUG_LOG_SINCE` | `2h` | `oc logs --since` window for ramen + NooBaa/RGW endpoint streams |
+| `RAMENDR_DR_DEBUG_LOG_TAIL` | `20000` | Per-pod `oc logs --tail` cap; set `-1` for uncapped |
 | `STORAGE_NAMESPACE` | `openshift-storage` | Namespace for NooBaa / Ceph RGW dumps |
 | `DR_VALIDATION_INTERVAL` | `10.0` | Seconds between records |
 | `DR_VALIDATION_MAX_RPO_SECONDS` | `120` | Fail check when estimated RPO (`max_seq_gap * interval`) exceeds this threshold |

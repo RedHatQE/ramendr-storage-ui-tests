@@ -649,6 +649,15 @@ def _collect_ramen_debug(tag: str) -> Path | None:
     return out_dir
 
 
+def _collect_ramen_debug_safe(tag: str) -> Path | None:
+    """Like ``_collect_ramen_debug``, but never raises (except-path side effect)."""
+    try:
+        return _collect_ramen_debug(tag)
+    except Exception as debug_exc:  # noqa: BLE001
+        print(f"NOTE: ramen debug collection raised: {debug_exc!r}")
+        return None
+
+
 def _run_dr_data_validation(
     *, phase: str, initiated_utc: datetime | None = None
 ) -> None:
@@ -1158,7 +1167,6 @@ def _run_force_full_sanity_dr_flow(
             expected_cluster="ocp-secondary",
             timeout_ms=900_000,
         )
-        _collect_ramen_debug("after-failover")
         # RTO ends when all VMs are Running with SSH services on the secondary,
         # confirmed by both the Kubernetes API signal and an in-cluster TCP probe.
         failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
@@ -1166,6 +1174,7 @@ def _run_force_full_sanity_dr_flow(
         )
         _probe_ssh_via_pod(SECONDARY_KUBECONFIG, failover_ssh_ips)
         _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
+        _collect_ramen_debug("after-failover")
         _wait_for_drpc_healthy_with_recovery(
             drpc_page,
             drpc_name,
@@ -1176,15 +1185,17 @@ def _run_force_full_sanity_dr_flow(
         _assert_managed_clusters_available()
         _run_dr_data_validation(phase="failover", initiated_utc=failover_initiated_utc)
     except BaseException as exc:
-        # Capture while kubeconfigs and PVC are still available (e.g. stuck
-        # WaitForReadiness / Lost PVC before log rotation).
-        if failover_initiated:
-            _collect_ramen_debug("failover-failure")
         # Only report FAIL for a DR action this invocation actually
         # initiated -- never for a precondition/dialog-validation/baseline
         # failure that preceded initiate_failover_dialog().
         if failover_initiated:
             failover_reporter.close_failure(exc)
+        # Capture while kubeconfigs and PVC are still available (e.g. stuck
+        # WaitForReadiness / Lost PVC before log rotation). Skip interrupts
+        # so KeyboardInterrupt is not blocked by a long dump; contain any
+        # unexpected collection error so it cannot replace ``exc``.
+        if failover_initiated and isinstance(exc, Exception):
+            _collect_ramen_debug_safe("failover-failure")
         raise
     else:
         failover_reporter.close_success()
@@ -1233,12 +1244,12 @@ def _run_force_full_sanity_dr_flow(
             expected_cluster="ocp-primary",
             timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
         )
-        _collect_ramen_debug("after-relocate")
         relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
             PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
         )
         _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_ssh_ips)
         _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
+        _collect_ramen_debug("after-relocate")
         _wait_for_drpc_healthy_with_recovery(
             drpc_page,
             drpc_name,
@@ -1249,13 +1260,13 @@ def _run_force_full_sanity_dr_flow(
         _assert_managed_clusters_available()
         _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
     except BaseException as exc:
-        if relocate_initiated:
-            _collect_ramen_debug("relocate-failure")
         # Only report FAIL for a DR action this invocation actually
         # initiated -- never for a precondition/dialog-validation/baseline
         # failure that preceded initiate_relocate_dialog().
         if relocate_initiated:
             relocate_reporter.close_failure(exc)
+        if relocate_initiated and isinstance(exc, Exception):
+            _collect_ramen_debug_safe("relocate-failure")
         raise
     else:
         relocate_reporter.close_success()
@@ -1632,7 +1643,6 @@ class TestUiSanity:
                     expected_cluster="ocp-secondary",
                     timeout_ms=900_000,
                 )
-                _collect_ramen_debug("after-failover")
                 # RTO ends when all VMs are Running with SSH services on the secondary,
                 # confirmed by both the K8s API signal and an in-cluster TCP probe.
                 failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
@@ -1642,6 +1652,7 @@ class TestUiSanity:
                 _assert_rto_within_standard(
                     phase="failover", started_at=failover_started_at
                 )
+                _collect_ramen_debug("after-failover")
                 _wait_for_drpc_healthy_with_recovery(
                     drpc_page,
                     "gitops-vm-protection",
@@ -1712,7 +1723,6 @@ class TestUiSanity:
                 expected_cluster="ocp-primary",
                 timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
             )
-            _collect_ramen_debug("after-relocate")
             relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
                 PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
             )
@@ -1720,6 +1730,7 @@ class TestUiSanity:
             _assert_rto_within_standard(
                 phase="relocate", started_at=relocate_started_at
             )
+            _collect_ramen_debug("after-relocate")
             _wait_for_drpc_healthy_with_recovery(
                 drpc_page,
                 "gitops-vm-protection",
@@ -1756,12 +1767,13 @@ class TestUiSanity:
             # invocation actually initiated, never for a setup failure
             # that preceded initiation. See docs/jira-test-result-reporting.md,
             # "Resume behavior".
-            if relocate_was_initiated:
-                _collect_ramen_debug("relocate-failure")
-            elif failover_initiated:
-                _collect_ramen_debug("failover-failure")
             if failover_reporter is not None and failover_initiated:
                 failover_reporter.close_failure(exc)
             if relocate_reporter is not None and relocate_was_initiated:
                 relocate_reporter.close_failure(exc)
+            if isinstance(exc, Exception):
+                if relocate_was_initiated:
+                    _collect_ramen_debug_safe("relocate-failure")
+                elif failover_initiated:
+                    _collect_ramen_debug_safe("failover-failure")
             raise
