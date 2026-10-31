@@ -110,6 +110,10 @@ _HAMMERDB_OLTP_SETTLE_POLL_SECONDS = float(
 _HAMMERDB_OLTP_FRESHNESS_MAX_AGE_SECONDS = float(
     os.getenv("RAMENDR_SANITY_HAMMERDB_FRESHNESS_MAX_AGE_SECONDS", "60")
 )
+# Best-effort DRPC/VRG/PV dump for Failover WaitForReadiness / Lost PVC repros.
+# Writes under /workspace/data/artifacts/dr-debug (Tekton PVC) or WORK_DIR/artifacts.
+# Disable with RAMENDR_DR_DEBUG=0.
+_DR_DEBUG_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_DR_DEBUG_TIMEOUT_SECONDS", "600"))
 _hammerdb_oltp_started = False
 
 #: Shown verbatim in every Jira Test Result's "Test function" line reported
@@ -573,6 +577,76 @@ def _save_hammerdb_baseline_snapshot(*, phase: str) -> None:
         f"stdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
+
+
+def _collect_ramen_debug(tag: str) -> Path | None:
+    """Best-effort Ramen/VGR debug dump to the CI PVC (or local WORK_DIR).
+
+    Captures hub DRPC + spoke VRG/PV/PVC/VM inventory and recent ramen logs so
+    Failover WaitForReadiness / Lost PVC issues can be diagnosed after log
+    rotation. Never raises — failures are printed and ignored so DR flow is
+    not blocked. Set ``RAMENDR_DR_DEBUG=0`` to skip.
+    """
+    if os.getenv("RAMENDR_DR_DEBUG", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return None
+
+    script_path = _repo_root() / "scripts" / "dr-validation" / "collect-ramen-debug.sh"
+    if not script_path.is_file():
+        print(f"NOTE: ramen debug script missing: {script_path}")
+        return None
+
+    env = os.environ.copy()
+    env["KUBECONFIG"] = HUB_KUBECONFIG
+    # Ensure spoke paths match what sanity already resolved.
+    if PRIMARY_KUBECONFIG:
+        env.setdefault("RAMENDR_PRIMARY_KUBECONFIG", PRIMARY_KUBECONFIG)
+    if SECONDARY_KUBECONFIG:
+        env.setdefault("RAMENDR_SECONDARY_KUBECONFIG", SECONDARY_KUBECONFIG)
+    if HUB_KUBECONFIG:
+        env.setdefault("RAMENDR_HUB_KUBECONFIG", HUB_KUBECONFIG)
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["bash", str(script_path), "--tag", tag],  # noqa: S607
+            cwd=_repo_root(),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_DR_DEBUG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"NOTE: ramen debug dump timed out for tag={tag!r} "
+            f"(limit={_DR_DEBUG_TIMEOUT_SECONDS:.0f}s).\n"
+            f"stdout:\n{exc.stdout}\nstderr:\n{exc.stderr}"
+        )
+        return None
+    except OSError as exc:
+        print(f"NOTE: ramen debug dump failed to start for tag={tag!r}: {exc}")
+        return None
+
+    out_dir: Path | None = None
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("/") and "dr-debug" in line:
+            out_dir = Path(line)
+    if result.returncode != 0:
+        print(
+            f"NOTE: ramen debug dump exited {result.returncode} for tag={tag!r}.\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+    elif out_dir is not None:
+        print(f"NOTE: ramen debug dump written: {out_dir}")
+    elif result.stderr:
+        # Script logs progress on stderr even on success.
+        print(result.stderr.rstrip())
+    return out_dir
 
 
 def _run_dr_data_validation(
@@ -1055,6 +1129,7 @@ def _run_force_full_sanity_dr_flow(
         drpc_page.open_failover_dialog(drpc_name)
         drpc_page.assert_failover_dialog_contents()
         _save_hammerdb_baseline_snapshot(phase="failover")
+        _collect_ramen_debug("before-failover")
         failover_started_at = time.monotonic()
         failover_initiated_utc = datetime.now(timezone.utc)
         drpc_page.initiate_failover_dialog()
@@ -1083,6 +1158,7 @@ def _run_force_full_sanity_dr_flow(
             expected_cluster="ocp-secondary",
             timeout_ms=900_000,
         )
+        _collect_ramen_debug("after-failover")
         # RTO ends when all VMs are Running with SSH services on the secondary,
         # confirmed by both the Kubernetes API signal and an in-cluster TCP probe.
         failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
@@ -1100,6 +1176,10 @@ def _run_force_full_sanity_dr_flow(
         _assert_managed_clusters_available()
         _run_dr_data_validation(phase="failover", initiated_utc=failover_initiated_utc)
     except BaseException as exc:
+        # Capture while kubeconfigs and PVC are still available (e.g. stuck
+        # WaitForReadiness / Lost PVC before log rotation).
+        if failover_initiated:
+            _collect_ramen_debug("failover-failure")
         # Only report FAIL for a DR action this invocation actually
         # initiated -- never for a precondition/dialog-validation/baseline
         # failure that preceded initiate_failover_dialog().
@@ -1135,6 +1215,7 @@ def _run_force_full_sanity_dr_flow(
         drpc_page.open_relocate_dialog(drpc_name)
         drpc_page.assert_relocate_dialog_contents()
         _save_hammerdb_baseline_snapshot(phase="relocate")
+        _collect_ramen_debug("before-relocate")
         relocate_started_at = time.monotonic()
         relocate_initiated_utc = datetime.now(timezone.utc)
         drpc_page.initiate_relocate_dialog()
@@ -1152,6 +1233,7 @@ def _run_force_full_sanity_dr_flow(
             expected_cluster="ocp-primary",
             timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
         )
+        _collect_ramen_debug("after-relocate")
         relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
             PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
         )
@@ -1167,6 +1249,8 @@ def _run_force_full_sanity_dr_flow(
         _assert_managed_clusters_available()
         _run_dr_data_validation(phase="relocate", initiated_utc=relocate_initiated_utc)
     except BaseException as exc:
+        if relocate_initiated:
+            _collect_ramen_debug("relocate-failure")
         # Only report FAIL for a DR action this invocation actually
         # initiated -- never for a precondition/dialog-validation/baseline
         # failure that preceded initiate_relocate_dialog().
@@ -1494,6 +1578,7 @@ class TestUiSanity:
                 ).start()
 
                 _save_hammerdb_baseline_snapshot(phase="failover")
+                _collect_ramen_debug("before-failover")
                 failover_started_at = time.monotonic()
                 failover_initiated_utc = datetime.now(timezone.utc)
                 drpc_page.initiate_failover_dialog()
@@ -1547,6 +1632,7 @@ class TestUiSanity:
                     expected_cluster="ocp-secondary",
                     timeout_ms=900_000,
                 )
+                _collect_ramen_debug("after-failover")
                 # RTO ends when all VMs are Running with SSH services on the secondary,
                 # confirmed by both the K8s API signal and an in-cluster TCP probe.
                 failover_ssh_ips = _wait_for_vms_running_with_ssh_service(
@@ -1605,6 +1691,7 @@ class TestUiSanity:
                 drpc_page.open_relocate_dialog("gitops-vm-protection")
                 drpc_page.assert_relocate_dialog_contents()
                 _save_hammerdb_baseline_snapshot(phase="relocate")
+                _collect_ramen_debug("before-relocate")
                 relocate_started_at = time.monotonic()
                 relocate_initiated_utc = datetime.now(timezone.utc)
                 drpc_page.initiate_relocate_dialog()
@@ -1625,6 +1712,7 @@ class TestUiSanity:
                 expected_cluster="ocp-primary",
                 timeout_ms=_RELOCATE_COMPLETE_TIMEOUT_MS,
             )
+            _collect_ramen_debug("after-relocate")
             relocate_ssh_ips = _wait_for_vms_running_with_ssh_service(
                 PRIMARY_KUBECONFIG, cluster_name="ocp-primary"
             )
@@ -1668,6 +1756,10 @@ class TestUiSanity:
             # invocation actually initiated, never for a setup failure
             # that preceded initiation. See docs/jira-test-result-reporting.md,
             # "Resume behavior".
+            if relocate_was_initiated:
+                _collect_ramen_debug("relocate-failure")
+            elif failover_initiated:
+                _collect_ramen_debug("failover-failure")
             if failover_reporter is not None and failover_initiated:
                 failover_reporter.close_failure(exc)
             if relocate_reporter is not None and relocate_was_initiated:
