@@ -33,7 +33,7 @@ def test_execution_requires_test_case_key():
 def test_execution_requires_scenario():
     with pytest.raises(ValueError):
         TestResultExecution(
-            test_case_key="RHELTEST-3600",
+            test_case_key="VIRTDR-392",
             scenario="",
             outcome=TestOutcome.PASS,
             run_id="run-1",
@@ -43,7 +43,7 @@ def test_execution_requires_scenario():
 def test_execution_requires_run_id():
     with pytest.raises(ValueError):
         TestResultExecution(
-            test_case_key="RHELTEST-3600",
+            test_case_key="VIRTDR-392",
             scenario="Failover",
             outcome=TestOutcome.PASS,
             run_id="",
@@ -53,7 +53,7 @@ def test_execution_requires_run_id():
 def test_execution_rejects_non_test_outcome():
     with pytest.raises(ValueError):
         TestResultExecution(
-            test_case_key="RHELTEST-3600",
+            test_case_key="VIRTDR-392",
             scenario="Failover",
             outcome="PASS",  # not a TestOutcome instance
             run_id="run-1",
@@ -63,7 +63,7 @@ def test_execution_rejects_non_test_outcome():
 def test_execution_defaults_executed_at_to_now_utc():
     before = datetime.now(timezone.utc)
     execution = TestResultExecution(
-        test_case_key="RHELTEST-3600",
+        test_case_key="VIRTDR-392",
         scenario="Failover",
         outcome=TestOutcome.PASS,
         run_id="run-1",
@@ -74,7 +74,7 @@ def test_execution_defaults_executed_at_to_now_utc():
 
 def test_execution_optional_fields_default_to_none():
     execution = TestResultExecution(
-        test_case_key="RHELTEST-3600",
+        test_case_key="VIRTDR-392",
         scenario="Failover",
         outcome=TestOutcome.PASS,
         run_id="run-1",
@@ -87,7 +87,7 @@ def test_execution_optional_fields_default_to_none():
 
 def test_execution_is_frozen():
     execution = TestResultExecution(
-        test_case_key="RHELTEST-3600",
+        test_case_key="VIRTDR-392",
         scenario="Failover",
         outcome=TestOutcome.PASS,
         run_id="run-1",
