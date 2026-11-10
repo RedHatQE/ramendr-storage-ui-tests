@@ -33,6 +33,7 @@ def _execution(**overrides) -> TestResultExecution:
         run_id="run-42",
         executed_at=_EXECUTED_AT,
         compose_version="RHEL-9.8.0",
+        ocp_version="4.22.19",
         test_function="tests/ui/sanity/test_sanity.py::test_sanity_disaster_recovery_ui",
     )
     defaults.update(overrides)
@@ -98,6 +99,7 @@ def test_adf_description_contains_all_required_facts_for_pass():
     assert "Run ID: run-42" in joined
     assert "Executed at: 2026-09-07T12:00:00Z" in joined
     assert "Outcome: PASS" in joined
+    assert "OCP Version: 4.22.19" in joined
     assert "Failure:" not in joined  # PASS must never carry a Failure line
 
 
@@ -178,6 +180,11 @@ def test_adf_description_compose_not_shown_as_a_placeholder_value():
     assert "TEST-COMPOSE" not in joined
 
 
+def test_adf_description_omits_ocp_version_when_unknown():
+    lines = _adf_lines(build_description_adf(_execution(ocp_version=None)))
+    assert not any(line.startswith("OCP Version:") for line in lines)
+
+
 # --------------------------------------------------------------------------
 # Field payload
 # --------------------------------------------------------------------------
@@ -194,6 +201,21 @@ def test_build_test_result_fields_includes_all_mandatory_fields():
     assert fields["summary"].startswith("Ramen DR | VIRTDR-392 |")
     assert fields["description"]["type"] == "doc"
     assert fields["customfield_11500"] == "RHEL-9.8.0"
+
+
+def test_build_test_result_fields_includes_ocp_version_custom_field_when_configured():
+    config = reporting_config_from_env(
+        {"JIRA_OCP_VERSION_FIELD_ID": "customfield_77777"}
+    )
+    fields = build_test_result_fields(_execution(), config=config)
+    assert fields["customfield_77777"] == "4.22.19"
+
+
+def test_build_test_result_fields_omits_ocp_version_custom_field_without_id():
+    fields = build_test_result_fields(
+        _execution(), config=reporting_config_from_env({})
+    )
+    assert "customfield_77777" not in fields
 
 
 def test_build_test_result_fields_omits_compose_version_field_when_unknown():

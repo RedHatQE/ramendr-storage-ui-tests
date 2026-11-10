@@ -70,12 +70,14 @@ class JiraReportingConfig:
     project_key: str
     test_result_issue_type_id: str
     compose_version_field_id: str
+    ocp_version_field_id: str | None
 
     pass_transition_id: str
     fail_transition_id: str
     blocked_transition_id: str
 
     compose_version: str | None
+    ocp_version: str | None
     run_id: str | None
 
     def transition_id_for(self, outcome: TestOutcome) -> str:
@@ -116,6 +118,10 @@ def reporting_config_from_env(
             source.get("JIRA_COMPOSE_VERSION_FIELD_ID")
             or DEFAULT_COMPOSE_VERSION_FIELD_ID
         ),
+        # Jira custom-field ids are site-specific.  Do not guess one: when
+        # unset, the OCP version remains in the description but is omitted
+        # from the create payload's custom fields.
+        ocp_version_field_id=source.get("JIRA_OCP_VERSION_FIELD_ID") or None,
         pass_transition_id=(
             source.get("JIRA_PASS_TRANSITION_ID") or DEFAULT_PASS_TRANSITION_ID
         ),
@@ -126,5 +132,10 @@ def reporting_config_from_env(
             source.get("JIRA_BLOCKED_TRANSITION_ID") or DEFAULT_BLOCKED_TRANSITION_ID
         ),
         compose_version=source.get("RAMENDR_COMPOSE_VERSION") or None,
+        # RAMENDR_OCP_VERSION is the explicit reporting value.  HUB_OCP_VERSION
+        # is accepted as a compatibility fallback for existing CI invocations.
+        ocp_version=(
+            source.get("RAMENDR_OCP_VERSION") or source.get("HUB_OCP_VERSION") or None
+        ),
         run_id=source.get("JIRA_RUN_ID") or None,
     )

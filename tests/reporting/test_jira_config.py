@@ -39,6 +39,7 @@ def test_defaults_match_phase_a_discovered_production_schema():
     assert config.project_key == "VIRTDR"
     assert config.test_result_issue_type_id == "10272"
     assert config.compose_version_field_id == "customfield_11500"
+    assert config.ocp_version_field_id is None
     assert config.pass_transition_id == "3"
     assert config.fail_transition_id == "4"
     assert config.blocked_transition_id == "5"
@@ -53,10 +54,12 @@ def test_env_overrides_every_flag_and_id():
             "JIRA_PROJECT_KEY": "OTHERPROJ",
             "JIRA_TEST_RESULT_ISSUE_TYPE_ID": "99999",
             "JIRA_COMPOSE_VERSION_FIELD_ID": "customfield_99999",
+            "JIRA_OCP_VERSION_FIELD_ID": "customfield_88888",
             "JIRA_PASS_TRANSITION_ID": "31",
             "JIRA_FAIL_TRANSITION_ID": "41",
             "JIRA_BLOCKED_TRANSITION_ID": "51",
             "RAMENDR_COMPOSE_VERSION": "RHEL-9.9.0",
+            "RAMENDR_OCP_VERSION": "4.22.19",
             "JIRA_RUN_ID": "run-123",
         }
     )
@@ -66,11 +69,25 @@ def test_env_overrides_every_flag_and_id():
     assert config.project_key == "OTHERPROJ"
     assert config.test_result_issue_type_id == "99999"
     assert config.compose_version_field_id == "customfield_99999"
+    assert config.ocp_version_field_id == "customfield_88888"
     assert config.pass_transition_id == "31"
     assert config.fail_transition_id == "41"
     assert config.blocked_transition_id == "51"
     assert config.compose_version == "RHEL-9.9.0"
+    assert config.ocp_version == "4.22.19"
     assert config.run_id == "run-123"
+
+
+def test_hub_ocp_version_is_a_compatibility_fallback():
+    config = reporting_config_from_env({"HUB_OCP_VERSION": "4.22.19"})
+    assert config.ocp_version == "4.22.19"
+
+
+def test_explicit_reporting_ocp_version_wins_over_hub_fallback():
+    config = reporting_config_from_env(
+        {"RAMENDR_OCP_VERSION": "4.22.20", "HUB_OCP_VERSION": "4.22.19"}
+    )
+    assert config.ocp_version == "4.22.20"
 
 
 def test_bool_env_accepts_common_truthy_spellings():
