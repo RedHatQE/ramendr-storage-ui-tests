@@ -215,7 +215,7 @@ without logging their values. It queries the connected hub for the version;
 set `RAMENDR_OCP_VERSION` only when that query cannot be used.
 
 After one reported run, create a saved JQL filter such as
-`project = VIRTDR AND issuetype = "Test Result" AND "OCP Version" = "4.22.19"`.
+`project = VIRTDR AND issuetype = "Test Result" AND "OCP Version" ~ "4.22.19"`.
 Use that saved filter in the dashboard's Filter Results gadget, or expose
 **OCP Version** as a quick filter/badge in the dashboard gadget you use.
 

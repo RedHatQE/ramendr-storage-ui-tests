@@ -107,10 +107,16 @@ spec:
         # the image version or a stale Pipeline parameter. An explicit value
         # remains available for unusual environments where the API is absent.
         if [[ -z "${RAMENDR_OCP_VERSION:-}" ]]; then
-          RAMENDR_OCP_VERSION="$(oc version -o json 2>/dev/null | jq -r '.openshiftVersion // empty')"
+          if ! RAMENDR_OCP_VERSION="$(oc version -o json 2>/dev/null | jq -r '.openshiftVersion // empty' 2>/dev/null)"; then
+            RAMENDR_OCP_VERSION=""
+          fi
           export RAMENDR_OCP_VERSION
         fi
-        echo "RAMENDR_OCP_VERSION=${RAMENDR_OCP_VERSION:-<unavailable>}"
+        if [[ -n "${RAMENDR_OCP_VERSION:-}" ]]; then
+          echo "RAMENDR_OCP_VERSION is available"
+        else
+          echo "RAMENDR_OCP_VERSION is unavailable"
+        fi
         # Default smoke/sanity UI suites must not go green via pytest.skip when
         # BASE_URL / password are missing — fail the Task instead.
         case " $(params.pytest-args) " in
