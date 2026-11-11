@@ -132,10 +132,8 @@ def reporting_config_from_env(
             source.get("JIRA_BLOCKED_TRANSITION_ID") or DEFAULT_BLOCKED_TRANSITION_ID
         ),
         compose_version=source.get("RAMENDR_COMPOSE_VERSION") or None,
-        # RAMENDR_OCP_VERSION is the explicit reporting value.  HUB_OCP_VERSION
-        # is accepted as a compatibility fallback for existing CI invocations.
-        ocp_version=(
-            source.get("RAMENDR_OCP_VERSION") or source.get("HUB_OCP_VERSION") or None
-        ),
+        # Keep the Jira reporting value separate from the installer input:
+        # Tekton obtains this from the running hub via ``oc version``.
+        ocp_version=source.get("RAMENDR_OCP_VERSION") or None,
         run_id=source.get("JIRA_RUN_ID") or None,
     )

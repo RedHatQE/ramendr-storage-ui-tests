@@ -78,16 +78,9 @@ def test_env_overrides_every_flag_and_id():
     assert config.run_id == "run-123"
 
 
-def test_hub_ocp_version_is_a_compatibility_fallback():
+def test_hub_ocp_version_is_not_used_for_jira_reporting():
     config = reporting_config_from_env({"HUB_OCP_VERSION": "4.22.19"})
-    assert config.ocp_version == "4.22.19"
-
-
-def test_explicit_reporting_ocp_version_wins_over_hub_fallback():
-    config = reporting_config_from_env(
-        {"RAMENDR_OCP_VERSION": "4.22.20", "HUB_OCP_VERSION": "4.22.19"}
-    )
-    assert config.ocp_version == "4.22.20"
+    assert config.ocp_version is None
 
 
 def test_bool_env_accepts_common_truthy_spellings():
