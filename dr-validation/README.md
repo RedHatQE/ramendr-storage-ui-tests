@@ -53,6 +53,7 @@ and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
 | `scripts/dr-validation/collect-db-snapshot-incluster.sh` | In-cluster snapshot collect |
 | `scripts/dr-validation/save-db-baseline-snapshot.sh` | Capture pre-DR DB baseline (updates `auto/latest`) |
 | `scripts/dr-validation/check-after-dr-hammerdb.sh` | Post-DR HammerDB validation |
+| `scripts/dr-validation/collect-ramen-debug.sh` | Hub DRPC + spoke VRG/PV/PVC/VM + ramen + NooBaa/RGW endpoint log streams (sanity hooks before/after failover and on failure) |
 
 Windows VMs receive **SQL Server 2022 Express** (via staged `SQLEXPR_x64_ENU.exe` from
 `download.microsoft.com`; override with `DR_VALIDATION_SQL_SSEI_URL`) and **HammerDB**
@@ -170,6 +171,11 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `DR_VALIDATION_INCLUSTER_COLLECT` | `1` | Use in-cluster collect Job (password required on spoke) |
 | `DR_VALIDATION_STATUS_MAX_AGE_SEC` | `300` | Max audit age for `status-hammerdb.sh` freshness check (not used with `--schema-only`) |
 | `DR_VALIDATION_LOG_PATH` | `/var/lib/ramendr-dr-validation/timestamps.log` | Log on VM |
+| `RAMENDR_DR_DEBUG` | `1` | Sanity hooks call `collect-ramen-debug.sh` before/after failover (and on failure). Set `0` to skip |
+| `RAMENDR_DR_DEBUG_DIR` | Tekton `/workspace/data/artifacts/dr-debug` or `WORK_DIR/artifacts/dr-debug` | Override dump root |
+| `RAMENDR_DR_DEBUG_LOG_SINCE` | `2h` | `oc logs --since` window for ramen + NooBaa/RGW endpoint streams |
+| `RAMENDR_DR_DEBUG_LOG_TAIL` | `20000` | Per-pod `oc logs --tail` cap; set `-1` for uncapped |
+| `STORAGE_NAMESPACE` | `openshift-storage` | Namespace for NooBaa / Ceph RGW dumps |
 | `DR_VALIDATION_INTERVAL` | `10.0` | Seconds between records |
 | `DR_VALIDATION_MAX_RPO_SECONDS` | `120` | Fail check when estimated RPO (`max_seq_gap * interval`) exceeds this threshold |
 | `RAMENDR_SANITY_MAX_RTO_SECONDS` | `1200` | UI sanity test: fail when measured failover/relocate RTO exceeds this limit |
