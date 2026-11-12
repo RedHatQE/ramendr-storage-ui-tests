@@ -83,6 +83,16 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
         cd /workspace/data/src
+        # Jira reporting is optional.  When its environment variables are
+        # supplied as keys in the existing read-only secrets workspace, load
+        # them without printing their values. Explicit Task/pod environment
+        # always takes precedence.
+        for jira_var in JIRA_REPORT_RESULTS JIRA_REPORT_DRY_RUN JIRA_REPORT_STRICT JIRA_BASE_URL JIRA_EMAIL JIRA_API_TOKEN JIRA_PROJECT_KEY JIRA_TEST_RESULT_ISSUE_TYPE_ID JIRA_COMPOSE_VERSION_FIELD_ID JIRA_OCP_VERSION_FIELD_ID JIRA_PASS_TRANSITION_ID JIRA_FAIL_TRANSITION_ID JIRA_BLOCKED_TRANSITION_ID RAMENDR_COMPOSE_VERSION RAMENDR_OCP_VERSION JIRA_RUN_ID; do
+          jira_file="/workspace/secrets/${jira_var}"
+          if [[ -f "$jira_file" && -z "${!jira_var:-}" ]]; then
+            export "$jira_var=$(tr -d '\r\n' <"$jira_file")"
+          fi
+        done
         if [[ ! -f "$KUBECONFIG" ]]; then
           echo "ERROR: hub kubeconfig missing at $KUBECONFIG — run install/pattern stages first" >&2
           exit 1
@@ -92,6 +102,20 @@ spec:
         if [[ -z "${RAMENDR_HUB_PASSWORD:-}" && -f "${HUB_INSTALL_DIR}/auth/kubeadmin-password" ]]; then
           RAMENDR_HUB_PASSWORD="$(tr -d '\r\n' <"${HUB_INSTALL_DIR}/auth/kubeadmin-password")"
           export RAMENDR_HUB_PASSWORD
+        fi
+        # Use the cluster's reported version for Jira rather than relying on
+        # the image version or a stale Pipeline parameter. An explicit value
+        # remains available for unusual environments where the API is absent.
+        if [[ -z "${RAMENDR_OCP_VERSION:-}" ]]; then
+          if ! RAMENDR_OCP_VERSION="$(timeout 30s oc version -o json 2>/dev/null | jq -r '.openshiftVersion // empty' 2>/dev/null)"; then
+            RAMENDR_OCP_VERSION=""
+          fi
+          export RAMENDR_OCP_VERSION
+        fi
+        if [[ -n "${RAMENDR_OCP_VERSION:-}" ]]; then
+          echo "RAMENDR_OCP_VERSION is available"
+        else
+          echo "RAMENDR_OCP_VERSION is unavailable"
         fi
         # Default smoke/sanity UI suites must not go green via pytest.skip when
         # BASE_URL / password are missing — fail the Task instead.

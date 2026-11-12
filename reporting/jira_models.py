@@ -64,6 +64,7 @@ class TestResultExecution:
     run_id: str
     executed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     compose_version: str | None = None
+    ocp_version: str | None = None
     duration_seconds: float | None = None
     failure_summary: str | None = None
     test_function: str | None = None
