@@ -139,6 +139,8 @@ def build_description_adf(execution: TestResultExecution) -> dict[str, Any]:
     ]
     if execution.duration_seconds is not None:
         lines.append(f"Duration: {execution.duration_seconds:.1f}s")
+    if execution.ocp_version:
+        lines.append(f"OCP Version: {execution.ocp_version}")
     lines.append(f"Outcome: {execution.outcome.value}")
     if execution.outcome != TestOutcome.PASS and execution.failure_summary:
         lines.append(f"Failure: {_sanitize_failure_summary(execution.failure_summary)}")
@@ -161,8 +163,9 @@ def build_test_result_fields(
     """Build the ``fields`` dict for ``POST /issue`` for one Test Result.
 
     Every Ramen automation Test Result includes: project, issuetype,
-    parent, labels, Compose Version (when available), summary, and an ADF
-    description. The result project must match the parent Test Case's
+    parent, labels, Compose Version (when available), OCP Version (when its
+    Jira custom-field id is configured), summary, and an ADF description. The
+    result project must match the parent Test Case's
     project, preventing a stale ``JIRA_PROJECT_KEY`` override from creating
     an invalid cross-project payload.
     """
@@ -195,6 +198,8 @@ def build_test_result_fields(
     }
     if execution.compose_version:
         fields[config.compose_version_field_id] = execution.compose_version
+    if execution.ocp_version and config.ocp_version_field_id:
+        fields[config.ocp_version_field_id] = execution.ocp_version
     return fields
 
 
@@ -352,6 +357,7 @@ def report_scenario_outcome(
             outcome=outcome,
             run_id=run_id,
             compose_version=config.compose_version,
+            ocp_version=config.ocp_version,
             duration_seconds=duration_seconds,
             failure_summary=failure_summary,
             test_function=test_function,

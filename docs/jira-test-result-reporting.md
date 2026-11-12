@@ -82,7 +82,7 @@ real-write combination (`report_results=true` **and** `dry_run=false`).
     then does it build a client (and require credentials).
   - `build_test_result_fields()` / `build_description_adf()` -- the create
     payload and a short, fact-only description (scenario, test function,
-    run id, executed-at, duration, outcome, failure summary).
+    run id, executed-at, duration, OCP version, outcome, failure summary).
   - `report_test_result(execution, client, config)` -- the three safety
     gates (`report_results`, `dry_run`, then a real `create_issue` ->
     `transition_issue`) for one execution.
@@ -184,17 +184,40 @@ JIRA_API_TOKEN=
 
 JIRA_TEST_RESULT_ISSUE_TYPE_ID=10272
 JIRA_COMPOSE_VERSION_FIELD_ID=customfield_11500
+# Jira site-specific; leave unset until the OCP Version field is created.
+JIRA_OCP_VERSION_FIELD_ID=
 
 JIRA_PASS_TRANSITION_ID=3
 JIRA_FAIL_TRANSITION_ID=4
 JIRA_BLOCKED_TRANSITION_ID=5
 
 RAMENDR_COMPOSE_VERSION=    # optional; omitted from the payload if unset
+RAMENDR_OCP_VERSION=        # optional; the hub cluster version in Tekton
 JIRA_RUN_ID=                # optional; otherwise one id is generated per pytest process
 ```
 
 Compose Version is never fabricated: `customfield_11500` is only sent when
 `RAMENDR_COMPOSE_VERSION` is set.
+
+## OCP Version dashboard filter
+
+Create an **OCP Version** short-text custom field in Jira and add it to the
+`Test Result` create/edit/view screens and its relevant `VIRTDR` context.
+Set `JIRA_OCP_VERSION_FIELD_ID` to its Jira API id (for example,
+`customfield_12345`) in the CI secret/environment. The reporter then writes
+the hub's actual `oc version -o json` `openshiftVersion` to that field on
+every result; it also includes the value in the issue description.
+
+For Tekton, put the optional reporting variables (including
+`JIRA_OCP_VERSION_FIELD_ID` and the existing Jira credentials) as individual
+keys in the mounted `ramendr-ci-secrets` Secret. The pytest task loads them
+without logging their values. It queries the connected hub for the version;
+set `RAMENDR_OCP_VERSION` only when that query cannot be used.
+
+After one reported run, create a saved JQL filter such as
+`project = VIRTDR AND issuetype = "Test Result" AND "OCP Version" ~ "4.22.19"`.
+Use that saved filter in the dashboard's Filter Results gadget, or expose
+**OCP Version** as a quick filter/badge in the dashboard gadget you use.
 
 ## Security
 
