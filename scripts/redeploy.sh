@@ -34,6 +34,8 @@ source "$REPO_ROOT/scripts/lib/spoke-metal.sh"
 source "$REPO_ROOT/scripts/lib/resilient-spokes.sh"
 # shellcheck source=lib/odf-golden-images.sh
 source "$REPO_ROOT/scripts/lib/odf-golden-images.sh"
+# shellcheck source=lib/private-permissions.sh
+source "$REPO_ROOT/scripts/lib/private-permissions.sh"
 # shellcheck source=lib/byoc-kubeconfig-secrets.sh
 source "$REPO_ROOT/scripts/lib/byoc-kubeconfig-secrets.sh"
 # shellcheck source=lib/byoc-import-wait.sh
@@ -126,9 +128,20 @@ export_hub_kube_auth() {
   export KUBECONFIG="$kc"
   export K8S_AUTH_KUBECONFIG="$kc"
   if running_in_container && [[ -f "$kc" ]]; then
-    mkdir -p "${HOME:-/tmp}/.kube"
-    cp -f "$kc" "${HOME:-/tmp}/.kube/config"
-    chmod 600 "${HOME:-/tmp}/.kube/config"
+    local kube_home="${HOME:-/tmp}"
+    local kube_dir="${kube_home}/.kube"
+
+    # Credentials remain owner-only unless the deployment explicitly supplies a
+    # shared GID used by every authorized TaskRun. Never grant access to others.
+    set_private_permissions "$(dirname "$kc")" directory || return 1
+    set_private_permissions "$kc" || return 1
+    mkdir -p "$kube_dir"
+    if [[ "$kube_home" != "/" && "$kube_home" != "/tmp" ]]; then
+      set_private_permissions "$kube_home" directory || return 1
+    fi
+    set_private_permissions "$kube_dir" directory || return 1
+    install -m 600 "$kc" "$kube_dir/config"
+    set_private_permissions "$kube_dir/config" || return 1
   fi
 }
 
@@ -912,6 +925,7 @@ install_one_cluster() {
     err "$name cluster install failed (see $dir/.openshift_install.log)"
     return 1
   fi
+  set_cluster_credentials_permissions "$dir" || return 1
   log "$name cluster installed."
 }
 
@@ -919,9 +933,14 @@ install_hub() {
   install_one_cluster "hub" "$HUB_INSTALL_DIR"
 
   log "Hub cluster installed. Setting up kubeconfig..."
-  mkdir -p "$HOME/.kube"
-  cp "$HUB_INSTALL_DIR/auth/kubeconfig" "$HOME/.kube/config"
-  export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+  export_hub_kube_auth "$HUB_INSTALL_DIR/auth/kubeconfig"
+  # Local (non-container) path: keep a conventional ~/.kube/config copy.
+  if ! running_in_container; then
+    mkdir -p "$HOME/.kube"
+    chmod 700 "$HOME/.kube"
+    install -m 600 "$HUB_INSTALL_DIR/auth/kubeconfig" "$HOME/.kube/config"
+    export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+  fi
 
   log "Hub console: https://console-openshift-console.apps.hub.${BASE_DOMAIN}"
   # Never print kubeadmin to logs (CI/Tekton are shared). Password is on disk for UI tests:
@@ -978,6 +997,9 @@ scale_hub_workers() {
 # Prepare BYOC values-secret + early spoke import secrets (before install-byoc).
 prepare_pattern() {
   export KUBECONFIG="$HUB_INSTALL_DIR/auth/kubeconfig"
+  set_cluster_credentials_permissions "$HUB_INSTALL_DIR" || return 1
+  set_cluster_credentials_permissions "$PRIMARY_INSTALL_DIR" || return 1
+  set_cluster_credentials_permissions "$SECONDARY_INSTALL_DIR" || return 1
   log "Preparing BYOC values-secret and spoke import bootstrap..."
   prepare_byoc_values_secret || exit 1
   bootstrap_byoc_spoke_import || warn "BYOC spoke bootstrap incomplete (will retry after install-byoc)."
@@ -1448,7 +1470,7 @@ case "${1:-}" in
     echo " PRIMARY_INSTALL_DIR=/workspace/data/install/primary"
     echo " SECONDARY_INSTALL_DIR=/workspace/data/install/secondary"
     echo " VALUES_SECRET=/workspace/secrets/values-secret.yaml"
-    echo " See ci/tekton/README.md for OpenShift Pipelines wiring."
+    echo " CI_SHARED_WORKSPACE_GID=<gid>  Credential group; must match the pod fsGroup/supplementalGroups"
     echo ""
     echo "Pinning:"
     echo " UPSTREAM_REPO           Upstream repo URL (default: $(sanitize_upstream_repo_url "${UPSTREAM_REPO}"))"
