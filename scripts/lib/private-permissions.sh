@@ -24,6 +24,26 @@ _private_permissions_gid() {
   fi
 }
 
+_private_permissions_set_mode() {
+  local path="$1"
+  local mode="$2"
+  local actual_mode
+
+  actual_mode="$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")" || {
+    _private_permissions_err "Failed to read the mode for $path"
+    return 1
+  }
+
+  # Another TaskRun UID may read credentials through the shared group without
+  # being allowed to chmod them. Leave an already-correct mode untouched.
+  if [[ "$actual_mode" != "$mode" ]]; then
+    chmod "$mode" "$path" || {
+      _private_permissions_err "Failed to set mode $mode for $path"
+      return 1
+    }
+  fi
+}
+
 set_private_permissions() {
   local path="$1"
   local kind="${2:-file}"
@@ -42,7 +62,7 @@ set_private_permissions() {
   fi
 
   if [[ -z "$shared_gid" ]]; then
-    chmod "$private_mode" "$path"
+    _private_permissions_set_mode "$path" "$private_mode"
     return
   fi
 
@@ -66,7 +86,7 @@ set_private_permissions() {
     fi
   fi
 
-  chmod "$shared_mode" "$path"
+  _private_permissions_set_mode "$path" "$shared_mode"
 }
 
 set_cluster_credentials_permissions() {

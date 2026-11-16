@@ -7,6 +7,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 HELPER = Path(__file__).parents[1] / "scripts/lib/private-permissions.sh"
 
@@ -76,6 +78,95 @@ def test_redundant_chgrp_failure_is_accepted(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert _mode(credential) == 0o640
+
+
+@pytest.mark.parametrize(
+    ("kind", "private_mode", "shared_mode"),
+    [("file", 0o600, 0o640), ("directory", 0o700, 0o750)],
+)
+@pytest.mark.parametrize("shared", [False, True], ids=["private", "shared"])
+def test_correct_mode_skips_chmod(
+    tmp_path: Path, kind: str, private_mode: int, shared_mode: int, shared: bool
+) -> None:
+    path = tmp_path / "credential"
+    if kind == "directory":
+        path.mkdir()
+    else:
+        path.write_text("secret", encoding="utf-8")
+    mode = shared_mode if shared else private_mode
+    path.chmod(mode)
+
+    result = _run_bash(
+        "chgrp() { return 1; }\n"
+        'chmod() { echo "unexpected chmod" >&2; return 1; }\n'
+        f'set_private_permissions "{path}" {kind}',
+        env={"CI_SHARED_WORKSPACE_GID": str(path.stat().st_gid) if shared else ""},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _mode(path) == mode
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_required_chmod_failure_is_fatal(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "credential"
+    if kind == "directory":
+        path.mkdir()
+    else:
+        path.write_text("secret", encoding="utf-8")
+    path.chmod(0o777)
+
+    result = _run_bash(
+        f'chmod() {{ return 1; }}\nset_private_permissions "{path}" {kind}',
+        env={"CI_SHARED_WORKSPACE_GID": str(path.stat().st_gid)},
+    )
+
+    assert result.returncode != 0
+    assert "Failed to set mode" in result.stderr
+    assert _mode(path) == 0o777
+
+
+def test_mode_lookup_failure_is_fatal(tmp_path: Path) -> None:
+    credential = tmp_path / "credential"
+    credential.write_text("secret", encoding="utf-8")
+    credential.chmod(0o640)
+
+    result = _run_bash(
+        "chgrp() { return 0; }\n"
+        "stat() { return 1; }\n"
+        'chmod() { echo "unexpected chmod" >&2; return 1; }\n'
+        f'set_private_permissions "{credential}"',
+        env={"CI_SHARED_WORKSPACE_GID": str(credential.stat().st_gid)},
+    )
+
+    assert result.returncode != 0
+    assert "Failed to read the mode" in result.stderr
+    assert "unexpected chmod" not in result.stderr
+
+
+def test_bsd_stat_mode_fallback(tmp_path: Path) -> None:
+    credential = tmp_path / "credential"
+    credential.write_text("secret", encoding="utf-8")
+    credential.chmod(0o600)
+
+    result = _run_bash(
+        "stat() {\n"
+        '  if [[ "$1" == "-c" ]]; then return 1; fi\n'
+        '  if [[ "$1" == "-f" && "$2" == "%Lp" ]]; then\n'
+        '    echo "BSD stat fallback" >&2\n'
+        '    command stat -c "%a" "$3"\n'
+        "    return\n"
+        "  fi\n"
+        "  return 1\n"
+        "}\n"
+        'chmod() { echo "unexpected chmod" >&2; return 1; }\n'
+        f'set_private_permissions "{credential}"',
+        env={"CI_SHARED_WORKSPACE_GID": ""},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "BSD stat fallback" in result.stderr
+    assert "unexpected chmod" not in result.stderr
 
 
 def test_chgrp_failure_for_wrong_group_is_fatal(tmp_path: Path) -> None:
