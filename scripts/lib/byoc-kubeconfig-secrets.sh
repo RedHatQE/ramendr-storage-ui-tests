@@ -12,6 +12,11 @@ set -euo pipefail
 
 BYOC_VALUES_SECRET="${BYOC_VALUES_SECRET:-}"
 
+if [[ $(type -t set_private_permissions) != function ]]; then
+  # shellcheck source=private-permissions.sh
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/private-permissions.sh"
+fi
+
 _byoc_ks_log() {
   if [[ $(type -t log) == function ]]; then
     log "$@"
@@ -48,7 +53,13 @@ prepare_byoc_values_secret() {
     return 1
   }
 
-  mkdir -p "$(dirname "$dest_secret")"
+  local dest_dir
+  dest_dir="$(dirname "$dest_secret")"
+  mkdir -p "$dest_dir"
+  set_private_permissions "$dest_dir" directory || return 1
+
+  # Start private. Tekton deployments that share this file across TaskRuns must
+  # explicitly provide CI_SHARED_WORKSPACE_GID; only that group receives access.
   install -m 600 "$source_secret" "$dest_secret" || {
     _byoc_ks_err "Failed to copy values-secret to $dest_secret"
     return 1
@@ -98,6 +109,8 @@ if "version" not in data:
 with open(out_path, "w", encoding="utf-8") as fh:
     yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
 PY
+
+  set_private_permissions "$dest_secret" || return 1
 
   BYOC_VALUES_SECRET="$dest_secret"
   export BYOC_VALUES_SECRET

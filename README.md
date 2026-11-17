@@ -18,6 +18,14 @@ It contains:
 - UI and sanity tests using **Playwright + Python** (`tests/`).
 - **RamenDR data validation** — HammerDB PostgreSQL TPC-C by default ([`dr-validation/README.md`](dr-validation/README.md), [`dr-validation/DATABASE-SCHEMA.md`](dr-validation/DATABASE-SCHEMA.md)).
 
+## CI / Tekton
+
+Tekton pipelines, tasks, PipelineRun examples, and CI image build configuration are maintained in
+[ramendr-pipelines](https://gitlab.cee.redhat.com/epassaro/ramendr-pipelines) (internal Red Hat GitLab).
+See that repository's README for setup instructions. For credentials shared across TaskRuns,
+`CI_SHARED_WORKSPACE_GID` must match a group granted to every authorized pod through `fsGroup` or
+`supplementalGroups`. Without this variable, credential files and directories remain owner-only.
+
 ## What this repo does
 
 `scripts/redeploy.sh` will:
