@@ -110,6 +110,10 @@ _HAMMERDB_OLTP_SETTLE_POLL_SECONDS = float(
 _HAMMERDB_OLTP_FRESHNESS_MAX_AGE_SECONDS = float(
     os.getenv("RAMENDR_SANITY_HAMMERDB_FRESHNESS_MAX_AGE_SECONDS", "60")
 )
+# Best-effort DRPC/VRG/PV dump for Failover WaitForReadiness / Lost PVC repros.
+# Writes under /workspace/data/artifacts/dr-debug (Tekton PVC) or WORK_DIR/artifacts.
+# Disable with RAMENDR_DR_DEBUG=0.
+_DR_DEBUG_TIMEOUT_SECONDS = float(os.getenv("RAMENDR_DR_DEBUG_TIMEOUT_SECONDS", "600"))
 _hammerdb_oltp_started = False
 
 #: Shown verbatim in every Jira Test Result's "Test function" line reported
@@ -573,6 +577,85 @@ def _save_hammerdb_baseline_snapshot(*, phase: str) -> None:
         f"stdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
+
+
+def _collect_ramen_debug(tag: str) -> Path | None:
+    """Best-effort Ramen/VGR debug dump to the CI PVC (or local WORK_DIR).
+
+    Captures hub DRPC + spoke VRG/PV/PVC/VM inventory and recent ramen logs so
+    Failover WaitForReadiness / Lost PVC issues can be diagnosed after log
+    rotation. Never raises — failures are printed and ignored so DR flow is
+    not blocked. Set ``RAMENDR_DR_DEBUG=0`` to skip.
+    """
+    if os.getenv("RAMENDR_DR_DEBUG", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return None
+
+    script_path = _repo_root() / "scripts" / "dr-validation" / "collect-ramen-debug.sh"
+    if not script_path.is_file():
+        print(f"NOTE: ramen debug script missing: {script_path}")
+        return None
+
+    env = os.environ.copy()
+    env["KUBECONFIG"] = HUB_KUBECONFIG
+    # Ensure spoke paths match what sanity already resolved.
+    if PRIMARY_KUBECONFIG:
+        env.setdefault("RAMENDR_PRIMARY_KUBECONFIG", PRIMARY_KUBECONFIG)
+    if SECONDARY_KUBECONFIG:
+        env.setdefault("RAMENDR_SECONDARY_KUBECONFIG", SECONDARY_KUBECONFIG)
+    if HUB_KUBECONFIG:
+        env.setdefault("RAMENDR_HUB_KUBECONFIG", HUB_KUBECONFIG)
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["bash", str(script_path), "--tag", tag],  # noqa: S607
+            cwd=_repo_root(),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_DR_DEBUG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"NOTE: ramen debug dump timed out for tag={tag!r} "
+            f"(limit={_DR_DEBUG_TIMEOUT_SECONDS:.0f}s).\n"
+            f"stdout:\n{exc.stdout}\nstderr:\n{exc.stderr}"
+        )
+        return None
+    except OSError as exc:
+        print(f"NOTE: ramen debug dump failed to start for tag={tag!r}: {exc}")
+        return None
+
+    out_dir: Path | None = None
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("/") and "dr-debug" in line:
+            out_dir = Path(line)
+    if result.returncode != 0:
+        print(
+            f"NOTE: ramen debug dump exited {result.returncode} for tag={tag!r}.\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+    elif out_dir is not None:
+        print(f"NOTE: ramen debug dump written: {out_dir}")
+    elif result.stderr:
+        # Script logs progress on stderr even on success.
+        print(result.stderr.rstrip())
+    return out_dir
+
+
+def _collect_ramen_debug_safe(tag: str) -> Path | None:
+    """Like ``_collect_ramen_debug``, but never raises (except-path side effect)."""
+    try:
+        return _collect_ramen_debug(tag)
+    except Exception as debug_exc:  # noqa: BLE001
+        print(f"NOTE: ramen debug collection raised: {debug_exc!r}")
+        return None
 
 
 def _run_dr_data_validation(
@@ -1055,6 +1138,7 @@ def _run_force_full_sanity_dr_flow(
         drpc_page.open_failover_dialog(drpc_name)
         drpc_page.assert_failover_dialog_contents()
         _save_hammerdb_baseline_snapshot(phase="failover")
+        _collect_ramen_debug("before-failover")
         failover_started_at = time.monotonic()
         failover_initiated_utc = datetime.now(timezone.utc)
         drpc_page.initiate_failover_dialog()
@@ -1090,6 +1174,7 @@ def _run_force_full_sanity_dr_flow(
         )
         _probe_ssh_via_pod(SECONDARY_KUBECONFIG, failover_ssh_ips)
         _assert_rto_within_standard(phase="failover", started_at=failover_started_at)
+        _collect_ramen_debug("after-failover")
         _wait_for_drpc_healthy_with_recovery(
             drpc_page,
             drpc_name,
@@ -1105,6 +1190,12 @@ def _run_force_full_sanity_dr_flow(
         # failure that preceded initiate_failover_dialog().
         if failover_initiated:
             failover_reporter.close_failure(exc)
+        # Capture while kubeconfigs and PVC are still available (e.g. stuck
+        # WaitForReadiness / Lost PVC before log rotation). Skip interrupts
+        # so KeyboardInterrupt is not blocked by a long dump; contain any
+        # unexpected collection error so it cannot replace ``exc``.
+        if failover_initiated and isinstance(exc, Exception):
+            _collect_ramen_debug_safe("failover-failure")
         raise
     else:
         failover_reporter.close_success()
@@ -1135,6 +1226,7 @@ def _run_force_full_sanity_dr_flow(
         drpc_page.open_relocate_dialog(drpc_name)
         drpc_page.assert_relocate_dialog_contents()
         _save_hammerdb_baseline_snapshot(phase="relocate")
+        _collect_ramen_debug("before-relocate")
         relocate_started_at = time.monotonic()
         relocate_initiated_utc = datetime.now(timezone.utc)
         drpc_page.initiate_relocate_dialog()
@@ -1157,6 +1249,7 @@ def _run_force_full_sanity_dr_flow(
         )
         _probe_ssh_via_pod(PRIMARY_KUBECONFIG, relocate_ssh_ips)
         _assert_rto_within_standard(phase="relocate", started_at=relocate_started_at)
+        _collect_ramen_debug("after-relocate")
         _wait_for_drpc_healthy_with_recovery(
             drpc_page,
             drpc_name,
@@ -1172,6 +1265,8 @@ def _run_force_full_sanity_dr_flow(
         # failure that preceded initiate_relocate_dialog().
         if relocate_initiated:
             relocate_reporter.close_failure(exc)
+        if relocate_initiated and isinstance(exc, Exception):
+            _collect_ramen_debug_safe("relocate-failure")
         raise
     else:
         relocate_reporter.close_success()
@@ -1494,6 +1589,7 @@ class TestUiSanity:
                 ).start()
 
                 _save_hammerdb_baseline_snapshot(phase="failover")
+                _collect_ramen_debug("before-failover")
                 failover_started_at = time.monotonic()
                 failover_initiated_utc = datetime.now(timezone.utc)
                 drpc_page.initiate_failover_dialog()
@@ -1556,6 +1652,7 @@ class TestUiSanity:
                 _assert_rto_within_standard(
                     phase="failover", started_at=failover_started_at
                 )
+                _collect_ramen_debug("after-failover")
                 _wait_for_drpc_healthy_with_recovery(
                     drpc_page,
                     "gitops-vm-protection",
@@ -1605,6 +1702,7 @@ class TestUiSanity:
                 drpc_page.open_relocate_dialog("gitops-vm-protection")
                 drpc_page.assert_relocate_dialog_contents()
                 _save_hammerdb_baseline_snapshot(phase="relocate")
+                _collect_ramen_debug("before-relocate")
                 relocate_started_at = time.monotonic()
                 relocate_initiated_utc = datetime.now(timezone.utc)
                 drpc_page.initiate_relocate_dialog()
@@ -1632,6 +1730,7 @@ class TestUiSanity:
             _assert_rto_within_standard(
                 phase="relocate", started_at=relocate_started_at
             )
+            _collect_ramen_debug("after-relocate")
             _wait_for_drpc_healthy_with_recovery(
                 drpc_page,
                 "gitops-vm-protection",
@@ -1672,4 +1771,9 @@ class TestUiSanity:
                 failover_reporter.close_failure(exc)
             if relocate_reporter is not None and relocate_was_initiated:
                 relocate_reporter.close_failure(exc)
+            if isinstance(exc, Exception):
+                if relocate_was_initiated:
+                    _collect_ramen_debug_safe("relocate-failure")
+                elif failover_initiated:
+                    _collect_ramen_debug_safe("failover-failure")
             raise
