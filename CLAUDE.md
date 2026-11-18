@@ -20,8 +20,8 @@ The entrypoint is `scripts/redeploy.sh`.
 
 **Upstream pinning (single fork, all variants):**
 
-- Local checkout and default pin: `elsapassaro/ramendr-starter-kit` branch `ocp-4.22-rhdr-ramen` at
-  `254260328e7e7ec661504b6c540cb02d956d534e` (upstream v1.3 + QE odf overrides; VIRTDR-281 RHDR build). Override with
+- Local checkout and default pin: `elsapassaro/ramendr-starter-kit` branch `odf-4.22.8.1` at
+  `5e99c4b140925622c4bd75897d78d01bfba939c4` (upstream v1.3 + QE odf overrides). Override with
   `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
 - `redeploy.sh` patches `main.variant` and sets `byoc: true` in the local checkout. Preview RHDR
   (`rhdr-catalog`, `rhdr-multicluster-operator`, GitOps `extraObjects` IDMS) is already committed
@@ -30,7 +30,7 @@ The entrypoint is `scripts/redeploy.sh`.
   the fork branch commits the matching variant.
 
 Customizations (Windows edge VMs, additionalPvcDisks, byoc cluster names, ODF channel pins,
-cost-optimized values, RHDR Quay IDMS) live in the fork's `ocp-4.22-rhdr-ramen` branch under
+cost-optimized values, RHDR Quay IDMS) live in the fork's `odf-4.22.8.1` branch under
 `overrides/` and values files. Partner BOMs live under `variants/<name>/` in the configured
 fork checkout. Local edits next to the checkout do not affect Argo CD.
 
