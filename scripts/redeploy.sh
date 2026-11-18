@@ -9,8 +9,8 @@ set -euo pipefail
 #
 # This script is based on the deployment flow currently used in the forked
 # starter kit's `redeploy.sh`, but it decouples upstream content by cloning:
-#   https://github.com/validatedpatterns/ramendr-starter-kit
-# at a pinned tag and applying overrides from this repository.
+#   https://github.com/elsapassaro/ramendr-starter-kit.git
+# at a pinned commit on odf-4.22.8.1 and applying overrides from this repository.
 #
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1477,7 +1477,7 @@ case "${1:-}" in
     echo " UPSTREAM_REF            Upstream git ref / commit SHA (default: $UPSTREAM_REF)"
     echo " UPSTREAM_BRANCH         Local branch name to create at UPSTREAM_REF (default: $UPSTREAM_BRANCH)"
     echo " PATTERN_VARIANT         Install variant: odf (default) | drpartner-s4 | drpartner-minimal"
-    echo "                         All variants use elsapassaro fork ocp-4.22-rhdr-ramen @ ${UPSTREAM_REF}"
+    echo "                         All variants use elsapassaro fork ${UPSTREAM_BRANCH} @ ${UPSTREAM_REF}"
     echo "                         Preview RHDR (rhdr-catalog) is committed in the fork; partner BOMs differ in variants/<name>/."
     echo ""
     echo "Environment variables:"
