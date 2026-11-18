@@ -3,7 +3,7 @@
 This repository is a **test harness** for the RamenDR validated pattern.
 
 **Default (`PATTERN_VARIANT=odf`):** deploys from the maintained fork
-[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `ocp-4.22-rhdr-ramen`) —
+[elsapassaro/ramendr-starter-kit](https://github.com/elsapassaro/ramendr-starter-kit) (branch `odf-4.22.8.1`) —
 upstream v1.3 plus QE overrides, preview RHDR (`rhdr-catalog`) on the `odf` variant, mixed 4-VM fleet
 (2 Linux + 2 Windows), HammerDB, ODF.
 **`redeploy.sh` pins a fixed commit SHA** for the local pattern install; **hub Argo CD** reconciles
@@ -30,7 +30,7 @@ See that repository's README for setup instructions. For credentials shared acro
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `254260328e7e7ec661504b6c540cb02d956d534e` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `5e99c4b140925622c4bd75897d78d01bfba939c4` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
 4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
@@ -45,7 +45,7 @@ See that repository's README for setup instructions. For credentials shared acro
 > contain stale paths from a previous deploy — `redeploy.sh` always refreshes them in
 > `.work/values-secret.yaml` (gitignored) before `install-byoc`. Your source file is never modified.
 >
-> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository — local copies placed next to the checkout are invisible to it. Both `redeploy.sh` and hub Applications should track fork branch `ocp-4.22-rhdr-ramen` so GitOps matches the local pin.
+> **Why a fork?** Hub Argo CD fetches values from the remote GitHub repository — local copies placed next to the checkout are invisible to it. Both `redeploy.sh` and hub Applications should track fork branch `odf-4.22.8.1` so GitOps matches the local pin.
 
 ### Upstream pinning
 
@@ -53,8 +53,8 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `254260328e7e7ec661504b6c540cb02d956d534e` (`ocp-4.22-rhdr-ramen`) |
-| Hub Argo CD Applications | Remote git on GitHub | Fork branch `ocp-4.22-rhdr-ramen` (`main.variant: odf` on tip). Partner variants need a fork branch/commit with matching `main.variant` for stable GitOps. |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `5e99c4b140925622c4bd75897d78d01bfba939c4` (`odf-4.22.8.1`) |
+| Hub Argo CD Applications | Remote git on GitHub | Fork branch `odf-4.22.8.1` (`main.variant: odf` on tip). Partner variants need a fork branch/commit with matching `main.variant` for stable GitOps. |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
 `redeploy.sh`. For Argo CD to match that commit, push it to the tracked branch or pin
@@ -132,7 +132,7 @@ Do not commit secrets to this repository.
 
 - Provide `VALUES_SECRET` (default: `~/values-secret.yaml`) locally/through CI secret injection.
 - Keep kubeconfigs and install dirs out of git (see `.gitignore`).
-- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/ocp-4.22-rhdr-ramen/values-secret.yaml.template)
+- Use the upstream template as a reference: [values-secret.yaml.template](https://github.com/elsapassaro/ramendr-starter-kit/blob/odf-4.22.8.1/values-secret.yaml.template)
   (v1.3 / `PATTERN_VARIANT=drpartner-s4` also needs the S4 fragment
   [`dr-validation/examples/values-secret-v2-s4.fragment.yaml`](dr-validation/examples/values-secret-v2-s4.fragment.yaml))
 - For regional-dr cluster private-key ExternalSecrets, ensure `~/values-secret.yaml` includes hub `privatekey` paths (compare with your team's file via private DM), for example:
@@ -162,7 +162,7 @@ Do not commit secrets to this repository.
 ## Customizing the deployment
 
 All environment-specific values (additional VM disks, BYOC cluster names, ODF channel pins,
-cost-optimized instance profiles) live in the fork's `ocp-4.22-rhdr-ramen` branch under `overrides/` and
+cost-optimized instance profiles) live in the fork's `odf-4.22.8.1` branch under `overrides/` and
 `values-hub.yaml`. To adapt the deployment for a different AWS account or region:
 
 1. Fork `elsapassaro/ramendr-starter-kit` (or push a new branch on the existing fork).
@@ -183,7 +183,7 @@ Values live under `variants/<name>/`. See the
 
 | `PATTERN_VARIANT` | Upstream default | Purpose |
 |-------------------|------------------|---------|
-| `odf` *(default)* | QE fork `ocp-4.22-rhdr-ramen` | Preview RHDR (`rhdr-catalog`), mixed 4-VM fleet (2 Linux + 2 Windows), HammerDB, ODF |
+| `odf` *(default)* | QE fork `odf-4.22.8.1` | Preview RHDR (`rhdr-catalog`), mixed 4-VM fleet (2 Linux + 2 Windows), HammerDB, ODF |
 | `drpartner-s4` | Same fork | Partner CSI + S4; preview RHDR from upstream v1.3; DRPolicy `2m-drpolicy`; no VMs |
 | `drpartner-minimal` | Same fork | Partner CSI only; preview RHDR from upstream v1.3; no S4 / DRPolicy / VMs |
 
@@ -204,7 +204,7 @@ and ODF golden-image fix-up (override with `REQUIRE_WINDOWS_VMS` / `SKIP_*`).
 
 **GitOps:** hub Argo CD reads `values-global.yaml` from the **git remote**, not the local patch.
 `redeploy.sh` fails if that git revision still has a different `main.variant`. The fork at
-`91b7890…` has `main.variant: odf` committed. Partner deploys need a fork that **commits**
+`5e99c4b…` has `main.variant: odf` committed. Partner deploys need a fork that **commits**
 `drpartner-s4` or `drpartner-minimal`, then `UPSTREAM_REPO` pointed at that fork.
 
 ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is
