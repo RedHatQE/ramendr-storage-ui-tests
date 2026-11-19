@@ -10,18 +10,16 @@ method directly (bypassing pytest collection/markers, which don't matter
 here) so the resume/PASS/FAIL wiring is verified against the real production
 code path rather than a reimplementation of it.
 
-This file lives next to ``test_sanity.py`` (no ``__init__.py`` in this
-directory) so pytest's own rootdir-based import of that module -- already
-triggered by collecting ``test_sanity.py`` itself -- makes a plain
-``import test_sanity`` resolve to the same module object.
+Import the sanity module by its repository-qualified path so these framework
+tests run independently of UI test collection. Keeping the module behind an
+alias also avoids collecting its UI test class here.
 """
 
 from __future__ import annotations
 
-import test_sanity as sanity
-
 import reporting.jira_results as jira_results
 from reporting.jira_client import JiraWriteError
+from tests.ui.sanity import test_sanity as sanity
 
 _HEALTHY_PRIMARY_FRESH = {
     "policy": "2m-vm",

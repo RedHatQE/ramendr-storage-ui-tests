@@ -138,7 +138,7 @@ with jira_test_case_result(
 
 Resuming into an already-completed phase never fabricates a result for the
 phase it's resuming past -- see
-`tests/ui/sanity/test_sanity_jira_wiring.py` for the full fresh/resume/
+`tests/reporting/test_sanity_jira_wiring.py` for the full fresh/resume/
 failure matrix.
 
 ## Smoke wiring
@@ -229,8 +229,13 @@ Use that saved filter in the dashboard's Filter Results gadget, or expose
 ## Tests
 
 ```bash
-python -m pytest tests/reporting tests/ui/sanity/test_sanity_jira_wiring.py -v
+python -m pytest tests/reporting -v
 ```
+
+The `reporting-tests` GitHub Actions workflow runs this suite on pull requests
+and pushes to `main`, with Jira credentials cleared and reporting disabled.
+It also collects the DR UI sanity suite without running cluster workflows;
+Tekton continues to run the actual UI sanity tests against deployed clusters.
 
 All Jira interaction is mocked (a fake client); no test contacts a real
 Jira instance. Coverage is focused on the contract that actually matters at
@@ -245,7 +250,7 @@ this scale:
   disabled/dry-run, independent two-scenario reporting.
 - `pytest_jira_plugin` (smoke aggregate): skip/setup/teardown accounting,
   one-PASS/one-FAIL-naming-every-failure, missing-credentials fail-fast.
-- `tests/ui/sanity/test_sanity_jira_wiring.py`: the real
+- `tests/reporting/test_sanity_jira_wiring.py`: the real
   `test_sanity_disaster_recovery_ui` method with every DR/Playwright/`oc`
   dependency faked, covering fresh run, resume after failover, resume
   after relocate, independent failure attribution, and -- the one rule
