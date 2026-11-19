@@ -232,6 +232,11 @@ Use that saved filter in the dashboard's Filter Results gadget, or expose
 python -m pytest tests/reporting -v
 ```
 
+The `reporting-tests` GitHub Actions workflow runs this suite on pull requests
+and pushes to `main`, with Jira credentials cleared and reporting disabled.
+It also collects the DR UI sanity suite without running cluster workflows;
+Tekton continues to run the actual UI sanity tests against deployed clusters.
+
 All Jira interaction is mocked (a fake client); no test contacts a real
 Jira instance. Coverage is focused on the contract that actually matters at
 this scale:
