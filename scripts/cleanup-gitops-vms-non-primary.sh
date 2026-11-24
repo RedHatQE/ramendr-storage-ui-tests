@@ -1,25 +1,81 @@
 #!/bin/bash
 set -euo pipefail
 
-# Script to manually cleanup gitops-vms namespace on the non-primary cluster
+# Script to clean up the gitops-vms namespace on the non-primary
+# (failed-over-from) cluster.
 #
-# DR validation note: run ONLY after failover/relocate is complete. This deletes VM
-# resources on the non-primary spoke (orphaned copies). Active VMs and timestamp logs
-# live on the current primary — do not run if primary detection is wrong. For data
-# checks after DR, use: ./scripts/dr-validation/check-after-dr.sh
+# DR validation note: run ONLY after failover/relocate is complete. Active VMs and
+# timestamp logs live on the current primary — do not run if primary detection is
+# wrong. For data checks after DR, use: ./scripts/dr-validation/check-after-dr.sh
 #
-# This script will:
-# 1. Determine the non-primary cluster (discovered from DR policy; override with PRIMARY_CLUSTER/SECONDARY_CLUSTER env if needed)
-# 2. List VM-related resources directly from the non-primary cluster
-# 3. Delete them from the gitops-vms namespace
-# 4. Delete PVCs in gitops-vms:
-#    - Default: all PVCs (including stuck Terminating ones held by Ramen DR finalizers)
-#    - With --skip-pvcs: only standalone leftover PVCs (additionalPvcDisks) that are not
-#      owned by a DataVolume/VirtualMachine and not VGR/Ramen/CDI-protected. Those orphans
-#      block WaitOnUserToCleanUp after failover; DV-backed OS/data disks are preserved so
-#      VolumeGroupReplication demotion/promotion can finish.
-# 5. Remove orphan PVs that were bound to gitops-vms (Retain reclaim policy)
-#    With --skip-pvcs: only PVs for standalone PVCs deleted in step 4
+# Two cleanup modes:
+#
+#   Default (post-DR / teardown): wipe the namespace on the non-primary spoke —
+#   VirtualMachines, VMIs, Services, Routes, ExternalSecrets, DataVolumes, *all*
+#   PVCs (clearing Ramen/CDI finalizers on stuck Terminating claims) and the PVs
+#   those claims were bound to.
+#
+#   --skip-pvcs (in-flight failover/relocate): remove the *workload* but preserve
+#   the *storage*. Only the non-primary spoke is touched. Kubernetes GC cascades
+#   VirtualMachine -> DataVolume -> PVC through ownerReferences, so a plain VM
+#   delete destroys the protected replica. This mode deletes each VM with
+#   --cascade=orphan — GC drops the ownerReferences on the VMI and the
+#   dataVolumeTemplates DataVolumes in the same operation — then deletes the VMI
+#   explicitly so the virt-launcher pod stops and the PVC is released. Patching
+#   ownerReferences beforehand is NOT used: the VM controller re-applies them
+#   from spec.dataVolumeTemplates, which is a race we have lost in practice.
+#   The orphaned DataVolumes stay in place; KubeVirt re-uses them when GitOps
+#   re-creates the VM on this cluster (e.g. on relocate back). Only genuinely
+#   unmanaged leftovers are deleted: additionalPvcDisks PVCs that no DV/VM owns,
+#   no pod mounts, and no VGR/Ramen/CDI finalizer protects (plus the PVs they
+#   were bound to). This covers the ODF known issue "some PVCs remain on the
+#   primary cluster after failover".
+#
+#   --list-stuck-pvcs (read-only): print the claims the stuck classification
+#   would delete, then exit. Used by the sanity test before it escalates to
+#   --cleanup-stuck-pvcs, so the test never duplicates this classification.
+#
+#   --cleanup-stuck-pvcs (optional, combine with --skip-pvcs): additionally delete
+#   PVCs left stuck on the failed-over-from cluster — claims already in
+#   Terminating, or unprotected claims whose VolumeGroupReplication is gone and
+#   that no pod mounts. Claims that are still members of a LIVE
+#   VolumeGroupReplication are never selected: a Terminating claim that Ramen is
+#   still demoting is mid-transition, not stuck. Clears Ramen/CDI finalizers only
+#   for the claims it does delete. Use this for the ODF known issue where PVCs
+#   remain on the old primary and block the next DR action; do NOT use it while a
+#   demotion is still settling.
+#
+# What the DR flow expects (Ramen semantics):
+#   * The user removes the *workload* on the cluster they failed over from; for
+#     KubeVirt that means the VM/VMIs must stop so the PVC is released. That is
+#     what clears "Secondary transition failed as PVC is potentially in use by a
+#     pod" and lets the DRPC leave WaitOnUserToCleanUp.
+#   * PVCs/DataVolumes are protected data, not garbage: Ramen demotes them to
+#     secondary. Delete them only when Ramen reports them stuck (see
+#     --cleanup-stuck-pvcs) or when this script runs in default (post-DR) mode.
+#   * vm-recipe protected apps are auto-cleaned by Ramen itself (VRG
+#     AutoCleanup=True); this script is for the volrep/GitOps path where it is
+#     not supported.
+#   * The script verifies the PlacementDecision before touching the spoke: once
+#     placement has moved, GitOps will not recreate the VMs it just deleted
+#     (which would re-lock the PVCs). --force skips that guard — use with care.
+#
+# Steps:
+# 1. Determine the non-primary cluster from the DRPC PlacementDecision (fallback:
+#    DRPC preferredCluster; override with a positional <cluster-name> argument).
+# 2. List VM-related resources directly from that cluster.
+# 3. Delete the workload (VirtualMachines/VMIs/Services/Routes/ExternalSecrets);
+#    with --skip-pvcs, VMs go with --cascade=orphan and the DVs/PVCs are kept.
+# 4. Delete PVCs: all of them in default mode; only unmanaged leftovers (and
+#    stuck/unreleased ones with --cleanup-stuck-pvcs) with --skip-pvcs.
+# 5. Remove PVs bound to the deleted claim names (Retain reclaim policy).
+#
+# Usage:
+#   ./scripts/cleanup-gitops-vms-non-primary.sh                    # interactive full wipe
+#   ./scripts/cleanup-gitops-vms-non-primary.sh --yes              # non-interactive full wipe
+#   ./scripts/cleanup-gitops-vms-non-primary.sh --yes --skip-pvcs  # in-flight failover/relocate
+#   ./scripts/cleanup-gitops-vms-non-primary.sh --yes --skip-pvcs --cleanup-stuck-pvcs
+#   ./scripts/cleanup-gitops-vms-non-primary.sh --skip-pvcs --list-stuck-pvcs   # read-only
 
 # Configuration
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,12 +94,16 @@ NC='\033[0m' # No Color
 AUTO_CONFIRM="${AUTO_CONFIRM:-no}"
 CLEANUP_FORCE=0
 SKIP_PVCS=0
+CLEANUP_STUCK_PVCS=0
+LIST_STUCK_PVCS=0
 CLUSTER_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes | -y) AUTO_CONFIRM=yes; shift ;;
     --force) CLEANUP_FORCE=1; shift ;;
     --skip-pvcs) SKIP_PVCS=1; shift ;;
+    --cleanup-stuck-pvcs) CLEANUP_STUCK_PVCS=1; shift ;;
+    --list-stuck-pvcs) LIST_STUCK_PVCS=1; shift ;;
     --) shift; break ;;
     -*)
       echo -e "${RED}Unknown option: $1${NC}" >&2
@@ -170,12 +230,14 @@ if ! oc get managedclusters &>/dev/null; then
   exit 1
 fi
 
-echo "Running DRPC safety checks before cleanup..."
-if ! assert_safe_to_cleanup_non_primary "$CLEANUP_FORCE"; then
-  echo -e "${RED}Cleanup blocked. Wait for DR to finish or use --force if you accept the risk.${NC}"
-  exit 1
+if [[ "$LIST_STUCK_PVCS" -eq 0 ]]; then
+  echo "Running DRPC safety checks before cleanup..."
+  if ! assert_safe_to_cleanup_non_primary "$CLEANUP_FORCE"; then
+    echo -e "${RED}Cleanup blocked. Wait for DR to finish or use --force if you accept the risk.${NC}"
+    exit 1
+  fi
+  echo ""
 fi
-echo ""
 
 # Determine primary and non-primary clusters
 if ! determine_primary_cluster; then
@@ -306,9 +368,17 @@ list_cluster_resources() {
   echo " - Services: $SERVICE_COUNT"
   echo " - Routes: $ROUTE_COUNT"
   echo " - ExternalSecrets: $ES_COUNT"
-  echo " - DataVolumes: $DV_COUNT"
+  if [[ "$SKIP_PVCS" -eq 1 ]]; then
+    echo " - DataVolumes: $DV_COUNT (preserved — orphaned by the VM delete, not deleted)"
+  else
+    echo " - DataVolumes: $DV_COUNT"
+  fi
   echo " - DataSources: $DS_COUNT"
-  echo " - PersistentVolumeClaims: $PVC_COUNT"
+  if [[ "$SKIP_PVCS" -eq 1 ]]; then
+    echo " - PersistentVolumeClaims: $PVC_COUNT (preserved unless unmanaged/stuck)"
+  else
+    echo " - PersistentVolumeClaims: $PVC_COUNT"
+  fi
 
   local total=$(( VM_COUNT + VMI_COUNT + SERVICE_COUNT + ROUTE_COUNT + ES_COUNT + DV_COUNT + DS_COUNT + PVC_COUNT ))
   if [[ $total -eq 0 ]]; then
@@ -330,6 +400,19 @@ delete_resources() {
     return 1
   fi
 
+  # --skip-pvcs preserves storage: DataVolumes are never deleted explicitly and
+  # VMs are deleted with --cascade=orphan (see the loop below), so GC cannot
+  # cascade into the protected PVCs.
+  local delete_list="$WORK_DIR/resources-list.txt"
+  if [[ "$SKIP_PVCS" -eq 1 ]]; then
+    delete_list="$WORK_DIR/resources-to-delete.txt"
+    grep -v '^DataVolume|' "$WORK_DIR/resources-list.txt" > "$delete_list" || true
+    if [[ ! -s "$delete_list" ]]; then
+      echo " No workload resources to delete (DataVolumes preserved)"
+      return 0
+    fi
+  fi
+
   local deleted_count=0
   local error_count=0
 
@@ -340,14 +423,38 @@ delete_resources() {
 
     echo " Deleting: $kind/$name in namespace $VM_NAMESPACE"
 
-    if oc --kubeconfig="$KUBECONFIG" delete "$kind" "$name" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null; then
+    local ok=0
+    if [[ "$SKIP_PVCS" -eq 1 && "$kind" == "VirtualMachine" ]]; then
+      # Orphan dependents at delete time (one GC operation) so the
+      # dataVolumeTemplates DataVolumes and their PVCs survive, then stop the
+      # VMI explicitly. Patching ownerReferences before the delete races with
+      # the VM controller, which re-applies them from spec.dataVolumeTemplates.
+      if oc --kubeconfig="$KUBECONFIG" delete "$kind" "$name" -n "$VM_NAMESPACE" \
+        --cascade=orphan --ignore-not-found &>/dev/null; then
+        echo -e " ${GREEN}✅ Deleted (orphaned DV/PVC): $kind/$name${NC}"
+        if oc --kubeconfig="$KUBECONFIG" delete vmi "$name" -n "$VM_NAMESPACE" \
+          --ignore-not-found &>/dev/null; then
+          echo -e " ${GREEN}✅ Stopped VMI: $name${NC}"
+          ok=1
+        else
+          echo -e " ${RED}❌ Failed to stop VMI: $name${NC}"
+        fi
+      else
+        echo -e " ${RED}❌ Failed to delete: $kind/$name${NC}"
+      fi
+    elif oc --kubeconfig="$KUBECONFIG" delete "$kind" "$name" -n "$VM_NAMESPACE" --ignore-not-found &>/dev/null; then
       echo -e " ${GREEN}✅ Deleted: $kind/$name${NC}"
-      deleted_count=$((deleted_count + 1))
+      ok=1
     else
       echo -e " ${RED}❌ Failed to delete: $kind/$name${NC}"
+    fi
+
+    if [[ $ok -eq 1 ]]; then
+      deleted_count=$((deleted_count + 1))
+    else
       error_count=$((error_count + 1))
     fi
-  done < "$WORK_DIR/resources-list.txt"
+  done < "$delete_list"
 
   echo ""
   echo "Deletion summary:"
@@ -407,11 +514,43 @@ cleanup_virt_launcher_pods() {
   fi
 }
 
-# Print PVC names that are safe standalone leftovers (additionalPvcDisks).
-# Skips PVCs owned by DataVolume/VirtualMachine or still protected by VGR/Ramen/CDI.
-list_standalone_orphan_pvcs() {
-  oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" -o json 2>/dev/null \
-    | python3 -c '
+# Print PVC names mounted by any pod in the namespace. Never delete these.
+list_pvc_claims_in_use() {
+  local pods
+  if ! pods=$(oc --kubeconfig="$KUBECONFIG" get pods -n "$VM_NAMESPACE" -o json 2>/dev/null); then
+    echo -e "${RED}❌ Could not list pods in $VM_NAMESPACE; refusing to guess PVC usage${NC}" >&2
+    return 1
+  fi
+
+  printf '%s' "$pods" | python3 -c '
+import json, sys
+
+data = json.load(sys.stdin)
+names = set()
+for pod in data.get("items", []):
+    for vol in (pod.get("spec", {}).get("volumes") or []):
+        claim = (vol or {}).get("persistentVolumeClaim") or {}
+        name = claim.get("claimName")
+        if name:
+            names.add(name)
+for name in sorted(names):
+    print(name)
+'
+}
+
+# Print PVC names that are safe leftovers: mounted by no pod, not owned by a
+# DataVolume/VirtualMachine, and not protected by a VGR/Ramen/CDI finalizer.
+# These are the additionalPvcDisks orphans that can block WaitOnUserToCleanUp
+# after failover once the VMs are gone.
+list_unmanaged_pvcs() {
+  local in_use="$1"
+  local pvcs
+  if ! pvcs=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" -o json 2>/dev/null); then
+    echo -e "${RED}❌ Could not list PVCs in $VM_NAMESPACE${NC}" >&2
+    return 1
+  fi
+
+  printf '%s' "$pvcs" | python3 -c '
 import json, sys
 
 OWNED_KINDS = {"DataVolume", "VirtualMachine"}
@@ -423,11 +562,12 @@ PROTECTED_FINALIZER_MARKERS = (
     "cdi.kubevirt.io",
 )
 
+in_use = {n for n in sys.argv[1].splitlines() if n.strip()}
 data = json.load(sys.stdin)
 for item in data.get("items", []):
     md = item.get("metadata") or {}
     name = md.get("name") or ""
-    if not name:
+    if not name or name in in_use:
         continue
     refs = md.get("ownerReferences") or []
     if any((ref or {}).get("kind") in OWNED_KINDS for ref in refs):
@@ -436,7 +576,98 @@ for item in data.get("items", []):
     if any(any(marker in f for marker in PROTECTED_FINALIZER_MARKERS) for f in finals):
         continue
     print(name)
-' 2>/dev/null || true
+' "$in_use"
+}
+
+# Print PVCs left behind on the failed-over-from cluster (ODF known issue:
+# "some PVCs remain in the primary cluster after failover"):
+#   * claims already deleting that are NOT member of a live VolumeGroupReplication, or
+#   * unprotected, pod-less claims whose VolumeGroupReplication is gone.
+# Never returns claims a pod still mounts, nor live group members (a Terminating
+# claim Ramen is still demoting is mid-transition, not stuck).
+list_stuck_pvcs() {
+  local in_use="$1"
+  local live_vgrs="$2"
+  local pvcs
+  if ! pvcs=$(oc --kubeconfig="$KUBECONFIG" get pvc -n "$VM_NAMESPACE" -o json 2>/dev/null); then
+    echo -e "${RED}❌ Could not list PVCs in $VM_NAMESPACE${NC}" >&2
+    return 1
+  fi
+
+  printf '%s' "$pvcs" | python3 -c '
+import json, sys
+
+OWNED_KINDS = {"DataVolume", "VirtualMachine"}
+PROTECTED_FINALIZER_MARKERS = (
+    "volumereplication",
+    "vgr-protection",
+    "ramendr",
+    "cdi.kubevirt.io",
+)
+
+in_use = {n for n in sys.argv[1].splitlines() if n.strip()}
+live_vgrs = {n for n in sys.argv[2].splitlines() if n.strip()}
+data = json.load(sys.stdin)
+for item in data.get("items", []):
+    md = item.get("metadata") or {}
+    name = md.get("name") or ""
+    if not name or name in in_use:
+        continue
+    labels = md.get("labels") or {}
+    vgr_owner = labels.get("volumegroupreplication-owner", "")
+    if md.get("deletionTimestamp"):
+        # A Terminating claim that is still a member of a live VGR is being
+        # demoted by Ramen; deleting it would destroy the replica mid-flight.
+        if vgr_owner and vgr_owner in live_vgrs:
+            continue
+        print(name)
+        continue
+    if not labels.get("ramendr.openshift.io/consistency-group"):
+        continue
+    refs = md.get("ownerReferences") or []
+    if any((ref or {}).get("kind") in OWNED_KINDS for ref in refs):
+        continue
+    if vgr_owner in live_vgrs:
+        continue
+    finals = md.get("finalizers") or []
+    if any(any(marker in f for marker in PROTECTED_FINALIZER_MARKERS) for f in finals):
+        continue
+    print(name)
+' "$in_use" "$live_vgrs"
+}
+
+# Read-only: print the claims the --cleanup-stuck-pvcs classification would
+# delete, one "STUCK_PVC=<name>" line each. Never deletes anything.
+report_stuck_pvcs() {
+  echo ""
+  echo "Stuck leftover PVCs in namespace $VM_NAMESPACE on cluster $NON_PRIMARY_CLUSTER:"
+
+  local in_use live_vgrs pvcs count=0
+  if ! in_use=$(list_pvc_claims_in_use); then
+    return 1
+  fi
+  if ! live_vgrs=$(list_live_vgrs); then
+    return 1
+  fi
+  if ! pvcs=$(list_stuck_pvcs "$in_use" "$live_vgrs"); then
+    return 1
+  fi
+
+  while IFS= read -r pvc; do
+    [[ -z "$pvc" ]] && continue
+    echo "STUCK_PVC=$pvc"
+    count=$((count + 1))
+  done <<< "$pvcs"
+  echo " Stuck PVC count: $count"
+}
+
+# Print the VolumeGroupReplication names that still exist in the namespace.
+list_live_vgrs() {
+  if ! oc --kubeconfig="$KUBECONFIG" get volumegroupreplication -n "$VM_NAMESPACE" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null; then
+    echo -e "${RED}❌ Could not list VolumeGroupReplications in $VM_NAMESPACE${NC}" >&2
+    return 1
+  fi
 }
 
 # Delete a specific set of PVC names; clear finalizers when stuck Terminating.
@@ -535,27 +766,47 @@ cleanup_pvcs() {
   delete_named_pvcs "all" <<< "$pvcs"
 }
 
-# Delete only standalone additionalPvcDisks leftovers (not owned by VM/DV, not VGR-protected).
-# Used with --skip-pvcs so failover cleanup unblocks WaitOnUserToCleanUp without breaking
-# RBD mirror demotion on DV-backed disks.
-cleanup_standalone_pvcs() {
+# Delete unmanaged leftover PVCs. Used with --skip-pvcs so failover cleanup can
+# clear WaitOnUserToCleanUp without touching DV/VM-owned or VGR-protected disks.
+# Args: PVC names (one per line).
+cleanup_unmanaged_pvcs() {
+  local pvcs="$1"
   echo ""
-  echo "Step 4: Deleting standalone (non-VM/DV-owned) leftover PVCs in $VM_NAMESPACE..."
+  echo "Step 4: Deleting unmanaged (pod-less, non-VM/DV-owned) leftover PVCs in $VM_NAMESPACE..."
   echo " (preserves DataVolume/VirtualMachine-owned and VGR/Ramen/CDI-protected PVCs)"
 
-  local pvcs
-  pvcs=$(list_standalone_orphan_pvcs)
   if [[ -z "${pvcs//[$'\n']/}" ]]; then
-    echo " No standalone leftover PVCs found"
+    echo " No unmanaged leftover PVCs found"
     return 0
   fi
-  echo " Standalone orphan PVC(s):"
+  echo " Unmanaged leftover PVC(s):"
   while IFS= read -r pvc; do
     [[ -z "$pvc" ]] && continue
     echo "  - $pvc"
   done <<< "$pvcs"
 
-  delete_named_pvcs "standalone" <<< "$pvcs"
+  delete_named_pvcs "unmanaged" <<< "$pvcs"
+}
+
+# Delete PVCs left stuck on the failed-over-from cluster (ODF known issue).
+# Args: PVC names (one per line).
+cleanup_stuck_leftover_pvcs() {
+  local pvcs="$1"
+  echo ""
+  echo "Step 4b: Deleting PVCs left stuck on the failed-over-from cluster..."
+  echo " (claims in Terminating, or unprotected claims whose VGR is gone)"
+
+  if [[ -z "${pvcs//[$'\n']/}" ]]; then
+    echo " No stuck leftover PVCs found"
+    return 0
+  fi
+  echo " Stuck leftover PVC(s):"
+  while IFS= read -r pvc; do
+    [[ -z "$pvc" ]] && continue
+    echo "  - $pvc"
+  done <<< "$pvcs"
+
+  delete_named_pvcs "stuck leftover" <<< "$pvcs"
 }
 
 # Remove PVs that were bound to specific PVC claim names in gitops-vms.
@@ -713,6 +964,15 @@ main() {
     exit 0
   fi
 
+  # Read-only mode: report what --cleanup-stuck-pvcs would delete and exit.
+  if [[ "$LIST_STUCK_PVCS" -eq 1 ]]; then
+    if ! report_stuck_pvcs; then
+      echo -e "${RED}Error: could not classify stuck PVCs on $NON_PRIMARY_CLUSTER${NC}" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+
   # List resources directly from the target cluster (including orphaned PVCs)
   if ! list_cluster_resources; then
     exit 0
@@ -723,6 +983,14 @@ main() {
   echo "=========================================="
   echo -e "${YELLOW}WARNING: This will delete resources from namespace $VM_NAMESPACE on cluster $NON_PRIMARY_CLUSTER${NC}"
   echo "=========================================="
+  if [[ "$SKIP_PVCS" -eq 1 ]]; then
+    echo " Mode: --skip-pvcs — workload only; DataVolumes/PVCs are preserved"
+    if [[ "$CLEANUP_STUCK_PVCS" -eq 1 ]]; then
+      echo "       plus --cleanup-stuck-pvcs (stuck/unreleased PVCs)"
+    fi
+  else
+    echo " Mode: full wipe — workload + DataVolumes + all PVCs + orphan PVs"
+  fi
   echo ""
   if [[ "$AUTO_CONFIRM" == "yes" ]]; then
     echo "AUTO_CONFIRM=yes — proceeding with deletion (non-interactive)."
@@ -751,17 +1019,43 @@ main() {
 
   # Remove PVCs and gitops-vms PVs on the non-primary spoke.
   # --skip-pvcs: preserve DV/VM-owned and VGR-protected PVCs (needed for relocate /
-  # demotion), but still delete standalone additionalPvcDisks leftovers that block
-  # WaitOnUserToCleanUp after failover.
+  # demotion), but still delete unmanaged additionalPvcDisks leftovers that block
+  # WaitOnUserToCleanUp after failover. Optionally also delete stuck/unreleased
+  # PVCs left behind by a completed failover (ODF known issue).
   if [[ "$SKIP_PVCS" -eq 1 ]]; then
-    local standalone_pvcs
-    standalone_pvcs=$(list_standalone_orphan_pvcs)
-    if ! cleanup_standalone_pvcs; then
-      echo -e "${RED}Error: standalone PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
+    local in_use unmanaged_pvcs stuck_pvcs live_vgrs
+    if ! in_use=$(list_pvc_claims_in_use); then
+      echo -e "${RED}Error: cannot determine which PVCs are in use on $NON_PRIMARY_CLUSTER${NC}"
+      echo " Refusing to delete any PVC without that information."
       exit 1
     fi
-    cleanup_pvs_for_claims "$standalone_pvcs" || \
-      echo -e "${YELLOW}Warning: Some orphan PVs for standalone claims may remain${NC}"
+    if ! unmanaged_pvcs=$(list_unmanaged_pvcs "$in_use"); then
+      echo -e "${RED}Error: could not list PVCs on $NON_PRIMARY_CLUSTER${NC}"
+      exit 1
+    fi
+    if ! cleanup_unmanaged_pvcs "$unmanaged_pvcs"; then
+      echo -e "${RED}Error: unmanaged PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
+      exit 1
+    fi
+    cleanup_pvs_for_claims "$unmanaged_pvcs" || \
+      echo -e "${YELLOW}Warning: Some orphan PVs for unmanaged claims may remain${NC}"
+
+    if [[ "$CLEANUP_STUCK_PVCS" -eq 1 ]]; then
+      if ! in_use=$(list_pvc_claims_in_use) || ! live_vgrs=$(list_live_vgrs); then
+        echo -e "${RED}Error: could not inspect PVC usage/VolumeGroupReplications on $NON_PRIMARY_CLUSTER${NC}"
+        exit 1
+      fi
+      if ! stuck_pvcs=$(list_stuck_pvcs "$in_use" "$live_vgrs"); then
+        echo -e "${RED}Error: could not list PVCs on $NON_PRIMARY_CLUSTER${NC}"
+        exit 1
+      fi
+      if ! cleanup_stuck_leftover_pvcs "$stuck_pvcs"; then
+        echo -e "${RED}Error: stuck PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
+        exit 1
+      fi
+      cleanup_pvs_for_claims "$stuck_pvcs" || \
+        echo -e "${YELLOW}Warning: Some orphan PVs for stuck claims may remain${NC}"
+    fi
   else
     if ! cleanup_pvcs; then
       echo -e "${RED}Error: PVC cleanup incomplete on $NON_PRIMARY_CLUSTER${NC}"
@@ -781,10 +1075,14 @@ main() {
   echo " - Cluster: $NON_PRIMARY_CLUSTER"
   echo " - Namespace: $VM_NAMESPACE"
   if [[ "$SKIP_PVCS" -eq 1 ]]; then
-    echo " (VMs/VMIs/Services/ExternalSecrets/DataVolumes + standalone leftover PVCs;"
-    echo "  DV/VM-owned and VGR-protected PVCs preserved)"
+    echo " (VMs deleted with --cascade=orphan, VMIs stopped; DataVolumes/PVCs preserved"
+    echo "  so VGR demotion/promotion can complete; unmanaged leftover PVCs and their"
+    echo "  PVs removed)"
+    if [[ "$CLEANUP_STUCK_PVCS" -eq 1 ]]; then
+      echo " (stuck/unreleased PVCs left on the failed-over-from cluster also removed)"
+    fi
   else
-    echo " (includes all PVCs and gitops-vms-bound PVs)"
+    echo " (includes all DataVolumes, PVCs and gitops-vms-bound PVs)"
   fi
 }
 

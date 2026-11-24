@@ -257,6 +257,9 @@ def _patch_common(
     monkeypatch.setattr(
         sanity, "_wait_for_relocate_secondary_cleared", lambda *a, **kw: None
     )
+    monkeypatch.setattr(
+        sanity, "_wait_for_failover_cleanup_release", lambda *a, **kw: None
+    )
     monkeypatch.setattr(sanity, "_relocate_best_effort_progress", lambda *a, **kw: None)
     # _jira_reporting_setup() now builds its client via
     # reporting.jira_results.build_jira_client() rather than instantiating

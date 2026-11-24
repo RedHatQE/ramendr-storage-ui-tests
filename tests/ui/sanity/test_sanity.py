@@ -14,6 +14,21 @@ After each DR phase (failover to secondary, relocate back to primary), the test
 runs ./scripts/dr-validation/check-after-dr.sh (HammerDB PostgreSQL by default, or
 legacy timestamp logs when DR_VALIDATION_MODE=timestamp).
 Set RAMENDR_SANITY_SKIP_DR_VALIDATION=1 or SKIP_DR_VALIDATION=1 to skip that step.
+The failover wait is DRPC-aware: once the UI reads FailedOver, the test keeps polling
+the DRPC progression and runs the non-primary cleanup once as soon as Ramen reports
+WaitOnUserToCleanUp (the source workload must be released before the target VMs can
+start). If Ramen is still there RAMENDR_SANITY_STUCK_PVC_NO_PROGRESS_SECONDS (default
+300) later, the test checks for stuck PVCs once and deletes them with
+--cleanup-stuck-pvcs. It gives up after
+RAMENDR_SANITY_FAILOVER_CLEANUP_TIMEOUT_SECONDS (default 900) with the progression and
+source-VM list in the failure message.
+
+After a failover/relocate stalls with the workload already gone, the recovery wait
+escalates once to cleanup-gitops-vms-non-primary.sh --skip-pvcs --cleanup-stuck-pvcs
+when the non-primary spoke has no VMs/virt-launcher pods, the DRPC has shown no
+progress for RAMENDR_SANITY_STUCK_PVC_NO_PROGRESS_SECONDS (default 300), and the
+cleanup script classifies at least one PVC as stuck. Disable with
+RAMENDR_SANITY_STUCK_PVC_FALLBACK=0.
 Default RTO hard limit is 1200s (20 min); override with RAMENDR_SANITY_MAX_RTO_SECONDS.
 Warn when RTO exceeds 900s (RAMENDR_SANITY_RTO_WARN_SECONDS); fail only above the 20 min limit.
 DR validation subprocess timeout defaults to 900s (RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS).
@@ -84,6 +99,17 @@ _CLEANUP_TIMEOUT_SECONDS = float(
         os.getenv("RAMENDR_SANITY_DR_VALIDATION_TIMEOUT_SECONDS", "600"),
     )
 )
+# One-shot escalation for PVCs left stuck on the failed-over-from spoke. Fires only
+# when the workload is gone, the DRPC shows no progress for the configured window,
+# and the cleanup script classifies a claim as stuck (see _StuckPvcFallback).
+_STUCK_PVC_FALLBACK_ENABLED = os.getenv(
+    "RAMENDR_SANITY_STUCK_PVC_FALLBACK", "1"
+).lower() not in {"0", "false", "no"}
+_STUCK_PVC_NO_PROGRESS_SECONDS = float(
+    os.getenv("RAMENDR_SANITY_STUCK_PVC_NO_PROGRESS_SECONDS", "300")
+)
+# Minimum spacing between stuck-PVC classifications (each one runs the script).
+_STUCK_PVC_EVAL_INTERVAL_SECONDS = 120.0
 # How many edge VMs the test expects (2 Linux + 2 Windows; SSH on port 22).
 _EXPECTED_VMS = int(os.getenv("RAMENDR_EXPECTED_VMS", str(EXPECTED_EDGE_VM_COUNT)))
 # Hard timeout for the SSH-reachability polling that ends the RTO clock (default 30 min).
@@ -638,23 +664,35 @@ def _run_dr_data_validation(
     )
 
 
-def _run_cleanup_non_primary_cluster(*, skip_pvcs: bool = False):
+def _run_cleanup_non_primary_cluster(
+    *, skip_pvcs: bool = False, cleanup_stuck_pvcs: bool = False
+):
     """Run non-primary cleanup script (auto-confirm) after DR action-needed.
 
     Pass skip_pvcs=True during failover and relocate cleanup. The non-primary
-    spoke still holds VolumeGroupReplication state Ramen needs to demote/promote;
-    deleting DV/VM-owned PVCs there while replication is settling breaks
+    spoke still holds the VolumeGroupReplication replicas Ramen demotes after
+    failover, and Kubernetes GC cascades VM -> DataVolume -> PVC through
+    ownerReferences; deleting those PVCs while replication is settling breaks
     lastGroupSyncTime and leaves DRPC Protected=False (former primary after
-    failover, secondary during relocate).
+    failover, secondary during relocate). The script therefore deletes each VM
+    with --cascade=orphan and then stops its VMI, keeping DV + PVC in place.
 
-    With --skip-pvcs the cleanup script still removes standalone
-    additionalPvcDisks leftovers (PVCs not owned by a DataVolume/VirtualMachine
-    and not VGR/Ramen/CDI-protected). Those orphans block WaitOnUserToCleanUp
-    after failover once VMs are gone.
+    With --skip-pvcs the script still removes unmanaged leftovers: PVCs not
+    owned by a DataVolume/VirtualMachine, not mounted by a pod and not
+    VGR/Ramen/CDI-protected. Those orphans block WaitOnUserToCleanUp after
+    failover once the VMs are gone.
+
+    cleanup_stuck_pvcs additionally passes --cleanup-stuck-pvcs (ODF known issue:
+    PVCs left on the failed-over-from cluster). It is only used by the one-shot
+    _StuckPvcFallback escalation, never by the periodic cleanup loops, because
+    deleting still-demoting replicas breaks lastGroupSyncTime.
     """
     repo_root = _repo_root()
     script_path = repo_root / "scripts" / "cleanup-gitops-vms-non-primary.sh"
     assert script_path.exists(), f"Cleanup script not found: {script_path}"
+
+    if cleanup_stuck_pvcs and not skip_pvcs:
+        raise ValueError("cleanup_stuck_pvcs requires skip_pvcs=True")
 
     # --force bypasses the drpc-guard PlacementDecision check, which can block
     # during an in-flight relocate triggered by the test itself (the decision
@@ -662,6 +700,8 @@ def _run_cleanup_non_primary_cluster(*, skip_pvcs: bool = False):
     flags = "--force"
     if skip_pvcs:
         flags += " --skip-pvcs"
+    if cleanup_stuck_pvcs:
+        flags += " --cleanup-stuck-pvcs"
     cmd = f"printf 'yes\\n' | {script_path} {flags}"
     env = os.environ.copy()
     env["KUBECONFIG"] = HUB_KUBECONFIG
@@ -694,6 +734,18 @@ def _run_cleanup_non_primary_cluster(*, skip_pvcs: bool = False):
         f"stdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
+
+    # The script's output is the only record of what it orphaned/stopped/deleted
+    # (and of a detach that silently matched nothing). Keep the tail in the
+    # pytest log even on success; failures print the full output above.
+    tail = (result.stdout or "").strip().splitlines()[-40:]
+    if tail:
+        print(
+            f"--- cleanup-gitops-vms-non-primary.sh output "
+            f"({flags}; last {len(tail)} lines) ---"
+        )
+        for line in tail:
+            print(line)
 
 
 def _assert_managed_clusters_available():
@@ -783,9 +835,29 @@ def _get_drpc_protected_condition() -> dict[str, str]:
     }
 
 
+# Substrings of the DRPC Protected message that mean the blocker is kube-object
+# protection on the target, not source volumes. Deleting source PVCs cannot help
+# in that state, and doing it destroys replicas needlessly.
+_KUBE_OBJECT_BLOCKER_MARKERS = (
+    "kube object",
+    "kubeobjects",
+    "clusterdataprotected",
+)
+
+
+def _drpc_blocker_is_kube_objects(backend: dict[str, str]) -> bool:
+    """True when the DRPC is blocked on kube-object protection, not volumes."""
+    message = (backend.get("protected_message") or "").lower()
+    return any(marker in message for marker in _KUBE_OBJECT_BLOCKER_MARKERS)
+
+
 _GITOPS_VMS_NAMESPACE = "gitops-vms"
 _RELOCATE_COMPLETE_TIMEOUT_MS = int(
     float(os.getenv("RAMENDR_SANITY_RELOCATE_COMPLETE_TIMEOUT_SECONDS", "1800")) * 1000
+)
+# How long the failover wait keeps driving WaitOnUserToCleanUp before giving up.
+_FAILOVER_CLEANUP_TIMEOUT_MS = int(
+    float(os.getenv("RAMENDR_SANITY_FAILOVER_CLEANUP_TIMEOUT_SECONDS", "900")) * 1000
 )
 
 
@@ -930,12 +1002,290 @@ def _wait_for_relocate_secondary_cleared(
     )
 
 
+def _non_primary_kubeconfig_for(expected_cluster: str) -> str:
+    """Kubeconfig of the spoke being failed over from."""
+    if expected_cluster == "ocp-secondary":
+        return PRIMARY_KUBECONFIG
+    if expected_cluster == "ocp-primary":
+        return SECONDARY_KUBECONFIG
+    raise ValueError(f"Unexpected DRPC cluster {expected_cluster!r}")
+
+
+def _count_virt_launcher_pods(kubeconfig: str) -> int | None:
+    """Number of virt-launcher pods left in gitops-vms, or None if unknown."""
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    try:
+        result = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "oc",
+                "get",
+                "pods",
+                "-n",
+                _GITOPS_VMS_NAMESPACE,
+                "-l",
+                "kubevirt.io=virt-launcher",
+                "-o",
+                "name",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def _gitops_workload_gone(kubeconfig: str) -> bool:
+    """True when that spoke has no VirtualMachines and no virt-launcher pods."""
+    vms = _list_gitops_vm_names(kubeconfig)
+    if vms is None or vms:
+        return False
+    return _count_virt_launcher_pods(kubeconfig) == 0
+
+
+def _list_stuck_pvcs_on_non_primary() -> list[str] | None:
+    """Ask the cleanup script which claims it classifies as stuck (read-only).
+
+    Runs ``cleanup-gitops-vms-non-primary.sh --force --skip-pvcs
+    --list-stuck-pvcs``, which deletes nothing. The classification lives in one
+    place (claims in Terminating, or unprotected group members whose
+    VolumeGroupReplication is gone — never a pod-mounted claim), so the test
+    cannot drift from the destructive path. Returns None when the
+    classification could not be produced, so callers never act on unknown
+    state.
+    """
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "cleanup-gitops-vms-non-primary.sh"
+    if not script_path.exists():
+        print(f"  Stuck-PVC fallback skipped: {script_path} not found")
+        return None
+
+    env = os.environ.copy()
+    env["KUBECONFIG"] = HUB_KUBECONFIG
+    try:
+        result = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "bash",
+                str(script_path),
+                "--force",
+                "--skip-pvcs",
+                "--list-stuck-pvcs",
+            ],
+            cwd=repo_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f"  Stuck-PVC classification failed: {exc}")
+        return None
+    if result.returncode != 0:
+        print(
+            "  Stuck-PVC classification failed "
+            f"(exit={result.returncode}): {(result.stderr or '').strip()[:400]}"
+        )
+        return None
+    return [
+        line.split("=", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("STUCK_PVC=") and line.split("=", 1)[1].strip()
+    ]
+
+
+class _StuckPvcFallback:
+    """One-shot escalation for PVCs stuck on the failed-over-from spoke.
+
+    Fires only when every condition holds:
+      1. no VirtualMachines and no virt-launcher pods remain on that spoke;
+      2. the DRPC (status, cluster, phase, Protected condition) has been
+         unchanged for ``no_progress_seconds``;
+      3. the cleanup script classifies at least one claim as stuck.
+
+    On success it runs ``--skip-pvcs --cleanup-stuck-pvcs`` exactly once per
+    wait loop, logging the PVC names first. ``attempted`` records that so a
+    later poll never repeats it.
+    """
+
+    def __init__(
+        self,
+        *,
+        non_primary_kubeconfig: str,
+        non_primary_cluster: str,
+        no_progress_seconds: float,
+    ):
+        self.non_primary_kubeconfig = non_primary_kubeconfig
+        self.non_primary_cluster = non_primary_cluster
+        self.no_progress_seconds = no_progress_seconds
+        self.attempted = False
+        self._signature: tuple[str, ...] | None = None
+        self._stable_since = time.monotonic()
+        # The classification shells out to the cleanup script; re-check at most
+        # once every _EVAL_INTERVAL_SECONDS while waiting.
+        self._last_eval_at = float("-inf")
+
+    def note(self, signature: tuple[str, ...]) -> float:
+        """Record the current DR signature; return seconds it has been unchanged."""
+        now = time.monotonic()
+        if signature != self._signature:
+            self._signature = signature
+            self._stable_since = now
+            return 0.0
+        return now - self._stable_since
+
+    def evaluate(self, *, stable_for: float) -> list[str] | None:
+        """Return the stuck PVC names when every condition holds, else None."""
+        if self.attempted or stable_for < self.no_progress_seconds:
+            return None
+        now = time.monotonic()
+        if now - self._last_eval_at < _STUCK_PVC_EVAL_INTERVAL_SECONDS:
+            return None
+        self._last_eval_at = now
+        if not _gitops_workload_gone(self.non_primary_kubeconfig):
+            return None
+        stuck = _list_stuck_pvcs_on_non_primary()
+        if not stuck:
+            return None
+        return stuck
+
+
+def _wait_for_failover_cleanup_release(
+    drpc_page: DRPCPage,
+    drpc_name: str,
+    *,
+    non_primary_kubeconfig: str,
+    timeout_ms: int = _FAILOVER_CLEANUP_TIMEOUT_MS,
+    poll_interval_ms: int = 30_000,
+) -> None:
+    """Drive the failover out of WaitOnUserToCleanUp before waiting for target VMs.
+
+    ``wait_for_failover_complete_state()`` passes as soon as the UI reads
+    ``FailedOver``, but Ramen can still be parked in ``WaitOnUserToCleanUp``
+    until the workload on the failed-over-from spoke is gone ("Secondary
+    transition failed as PVC is potentially in use by a pod"). Without this loop
+    the test blocks in the 30-minute target-VM wait and never runs cleanup
+    again -- the failover deadlock.
+
+    Runs the non-primary cleanup exactly once, the first time the DRPC reports
+    the cleanup state, then returns as soon as the progression leaves that
+    state. No new volumes are created during a failover, so re-running on a
+    timer gains nothing; the one thing that can still be left behind is a PVC
+    Ramen never released. If the DRPC is still in the cleanup state
+    ``_STUCK_PVC_NO_PROGRESS_SECONDS`` (default 300) after that run, the test
+    checks the script's stuck-PVC classification once and, when it returns
+    claims, runs the cleanup again with ``--cleanup-stuck-pvcs`` (also once).
+
+    Both runs are storage-preserving (``--skip-pvcs``); the second one only
+    touches claims the script classifies as stuck (Terminating, or unprotected
+    group members with no live VolumeGroupReplication, never a pod-mounted one).
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    first_cleanup_at: float | None = None
+    escalated = False
+    released = {"failedover", "relocated", "completed", "deployed"}
+    cleanup_states = {"waitonusertocleanup", "cleaningup", "waitforusertocleanup"}
+
+    while time.monotonic() < deadline:
+        backend = _get_drpc_protected_condition()
+        progression = (backend.get("progression") or backend.get("phase") or "").strip()
+        progression_lower = progression.lower()
+        state = drpc_page.get_drpc_state(drpc_name)
+        status = state["status"].strip()
+        status_lower = status.lower()
+        source_vms = _list_gitops_vm_names(non_primary_kubeconfig)
+        remaining = max(0, int(deadline - time.monotonic()))
+        vm_display = "(unknown)" if source_vms is None else (source_vms or "(none)")
+        print(
+            f"  [failover-wait] progression={progression or '(empty)'} "
+            f"dr_status={status!r} source_vms={vm_display} remaining={remaining}s"
+        )
+
+        if progression_lower in released:
+            print(f"  Failover released by Ramen (progression={progression!r}).")
+            return
+
+        needs_cleanup = (
+            progression_lower in cleanup_states
+            or status_lower
+            in {"waitonusertocleanup", "action needed", "protection error"}
+            or drpc_page.is_protection_error_status(status)
+        )
+        if needs_cleanup and first_cleanup_at is None:
+            print(
+                "  Ramen is waiting for source cleanup "
+                f"(progression={progression!r}, status={status!r}) "
+                "— running non-primary cleanup (once)"
+            )
+            _run_cleanup_non_primary_cluster(skip_pvcs=True)
+            first_cleanup_at = time.monotonic()
+        elif (
+            first_cleanup_at is not None
+            and not escalated
+            and (time.monotonic() - first_cleanup_at) >= _STUCK_PVC_NO_PROGRESS_SECONDS
+        ):
+            elapsed = time.monotonic() - first_cleanup_at
+            if _drpc_blocker_is_kube_objects(backend):
+                print(
+                    f"  Still {progression!r} after {elapsed:.0f}s — the blocker is "
+                    "kube-object protection on the target, not source PVCs; "
+                    "not escalating"
+                )
+                escalated = True
+            else:
+                stuck_pvcs = _list_stuck_pvcs_on_non_primary()
+                if stuck_pvcs is None:
+                    # Classification unavailable: retry on the next poll rather
+                    # than burning the single escalation attempt.
+                    print(
+                        f"  Still {progression!r} after {elapsed:.0f}s; could not "
+                        "classify stuck PVCs — retrying"
+                    )
+                elif not stuck_pvcs:
+                    print(
+                        f"  Still {progression!r} after {elapsed:.0f}s with no stuck "
+                        "PVCs (workload already released; waiting for Ramen)"
+                    )
+                    escalated = True
+                else:
+                    print(
+                        f"  Still {progression!r} after {elapsed:.0f}s — deleting "
+                        f"stuck PVC(s): {', '.join(stuck_pvcs)}"
+                    )
+                    _run_cleanup_non_primary_cluster(
+                        skip_pvcs=True, cleanup_stuck_pvcs=True
+                    )
+                    escalated = True
+
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            break
+        drpc_page.page.wait_for_timeout(min(poll_interval_ms, remaining_ms))
+
+    backend = _get_drpc_protected_condition()
+    state = drpc_page.get_drpc_state(drpc_name)
+    pytest.fail(
+        "Failover did not leave WaitOnUserToCleanUp within "
+        f"{timeout_ms // 1000}s. progression={backend.get('progression')!r} "
+        f"dr_status={state['status']!r} cluster={state['cluster']!r} "
+        f"source_vms={_list_gitops_vm_names(non_primary_kubeconfig)}. "
+        "Check the DRPC Protected message and the non-primary cleanup output."
+    )
+
+
 def _wait_for_drpc_healthy_with_recovery(
     drpc_page: DRPCPage,
     drpc_name: str,
     *,
     expected_cluster: str,
     cleanup_skip_pvcs: bool = False,
+    allow_stuck_pvc_cleanup: bool = False,
     timeout_ms: int = 1_800_000,
 ):
     """Wait for Healthy DR status, running cleanup when protection/action-needed appears.
@@ -945,13 +1295,28 @@ def _wait_for_drpc_healthy_with_recovery(
     cleaned and reconciliation completes.
 
     cleanup_skip_pvcs: when True, DV/VM-owned and VGR-protected PVC/PV deletion is
-    skipped during recovery cleanup, but standalone additionalPvcDisks leftovers are
-    still removed. Must be True after failover (former primary) and during relocate
-    (secondary) so Ramen can finish VGR demotion/promotion.
+    skipped during recovery cleanup, but unmanaged leftovers are still removed.
+    Must be True after failover (former primary) and during relocate (secondary)
+    so Ramen can finish VGR demotion/promotion.
+
+    allow_stuck_pvc_cleanup: enable the one-shot _StuckPvcFallback for claims the
+    cleanup script classifies as stuck. Only the post-failover/relocate waits
+    enable it; the periodic cleanup itself never deletes still-demoting replicas.
     """
     poll_interval_ms = 30_000
     deadline = time.monotonic() + (timeout_ms / 1000)
     last_cleanup_at = 0.0
+    stuck_fallback = None
+    if allow_stuck_pvc_cleanup and _STUCK_PVC_FALLBACK_ENABLED:
+        stuck_fallback = _StuckPvcFallback(
+            non_primary_kubeconfig=_non_primary_kubeconfig_for(expected_cluster),
+            non_primary_cluster=(
+                "ocp-primary"
+                if expected_cluster == "ocp-secondary"
+                else "ocp-secondary"
+            ),
+            no_progress_seconds=_STUCK_PVC_NO_PROGRESS_SECONDS,
+        )
 
     while time.monotonic() < deadline:
         state = drpc_page.get_drpc_state(drpc_name)
@@ -997,6 +1362,39 @@ def _wait_for_drpc_healthy_with_recovery(
             print(f"DR status {status!r} on {cluster!r} — running non-primary cleanup")
             _run_cleanup_non_primary_cluster(skip_pvcs=cleanup_skip_pvcs)
             last_cleanup_at = time.monotonic()
+
+        if stuck_fallback is not None:
+            backend = _get_drpc_protected_condition()
+            stable_for = stuck_fallback.note(
+                (
+                    status_lower,
+                    cluster,
+                    backend.get("phase", ""),
+                    backend.get("protected", ""),
+                    backend.get("protected_reason", ""),
+                )
+            )
+            action_needed = needs_cleanup or backend.get("protected") == "False"
+            if action_needed and _drpc_blocker_is_kube_objects(backend):
+                print(
+                    "  DRPC is blocked on kube-object protection; not escalating "
+                    "to --cleanup-stuck-pvcs."
+                )
+                action_needed = False
+            if action_needed:
+                stuck_pvcs = stuck_fallback.evaluate(stable_for=stable_for)
+                if stuck_pvcs:
+                    print(
+                        f"DRPC '{drpc_name}' unchanged for {stable_for:.0f}s with no "
+                        f"workload left on {stuck_fallback.non_primary_cluster} — "
+                        "running one-shot --cleanup-stuck-pvcs for: "
+                        + ", ".join(stuck_pvcs)
+                    )
+                    _run_cleanup_non_primary_cluster(
+                        skip_pvcs=True, cleanup_stuck_pvcs=True
+                    )
+                    stuck_fallback.attempted = True
+                    last_cleanup_at = time.monotonic()
 
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
@@ -1069,19 +1467,15 @@ def _run_force_full_sanity_dr_flow(
         except AssertionError:
             pass
 
-        post_progress_state = drpc_page.get_drpc_state(drpc_name)
-        post_progress_status = post_progress_state["status"].strip().lower()
-        if post_progress_status in {
-            "waitonusertocleanup",
-            "action needed",
-            "protection error",
-        }:
-            _run_cleanup_non_primary_cluster(skip_pvcs=True)
-
         drpc_page.wait_for_failover_complete_state(
             drpc_name,
             expected_cluster="ocp-secondary",
             timeout_ms=900_000,
+        )
+        _wait_for_failover_cleanup_release(
+            drpc_page,
+            drpc_name,
+            non_primary_kubeconfig=PRIMARY_KUBECONFIG,
         )
         # RTO ends when all VMs are Running with SSH services on the secondary,
         # confirmed by both the Kubernetes API signal and an in-cluster TCP probe.
@@ -1095,6 +1489,7 @@ def _run_force_full_sanity_dr_flow(
             drpc_name,
             expected_cluster="ocp-secondary",
             cleanup_skip_pvcs=True,
+            allow_stuck_pvc_cleanup=True,
             timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
         )
         _assert_managed_clusters_available()
@@ -1162,6 +1557,7 @@ def _run_force_full_sanity_dr_flow(
             drpc_name,
             expected_cluster="ocp-primary",
             cleanup_skip_pvcs=True,
+            allow_stuck_pvc_cleanup=True,
             timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
         )
         _assert_managed_clusters_available()
@@ -1530,22 +1926,17 @@ class TestUiSanity:
                 except AssertionError:
                     pass
 
-                # If failover is stuck in action-needed/progress states, run cleanup.
-                post_progress_state = drpc_page.get_drpc_state("gitops-vm-protection")
-                post_progress_status = post_progress_state["status"].strip().lower()
-                if post_progress_status in {
-                    "waitonusertocleanup",
-                    "action needed",
-                    "protection error",
-                }:
-                    _run_cleanup_non_primary_cluster(skip_pvcs=True)
-
             if run_failover_phase:
                 # --- Wait for failover completion + healthy (up to 15 minutes) ---
                 drpc_page.wait_for_failover_complete_state(
                     "gitops-vm-protection",
                     expected_cluster="ocp-secondary",
                     timeout_ms=900_000,
+                )
+                _wait_for_failover_cleanup_release(
+                    drpc_page,
+                    "gitops-vm-protection",
+                    non_primary_kubeconfig=PRIMARY_KUBECONFIG,
                 )
                 # RTO ends when all VMs are Running with SSH services on the secondary,
                 # confirmed by both the K8s API signal and an in-cluster TCP probe.
@@ -1561,6 +1952,7 @@ class TestUiSanity:
                     "gitops-vm-protection",
                     expected_cluster="ocp-secondary",
                     cleanup_skip_pvcs=True,
+                    allow_stuck_pvc_cleanup=True,
                     timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
                 )
 
@@ -1637,6 +2029,7 @@ class TestUiSanity:
                 "gitops-vm-protection",
                 expected_cluster="ocp-primary",
                 cleanup_skip_pvcs=True,
+                allow_stuck_pvc_cleanup=True,
                 timeout_ms=_DRPC_HEALTHY_TIMEOUT_MS,
             )
             _assert_managed_clusters_available()
