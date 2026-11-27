@@ -534,7 +534,7 @@ retire_previous_clustergroup_apps() {
 }
 
 # QE fork + v1.3 odf / S4 BOM names. Never delete unlisted DR objects.
-_STARTER_KIT_DRPOLICY_NAMES="2m-vm 2m-novm 2m-drpolicy"
+_STARTER_KIT_DRPOLICY_NAMES="${RAMENDR_VM_DRPOLICY:-5m-vm} ${RAMENDR_NOVM_DRPOLICY:-5m-novm}"
 _STARTER_KIT_DRPC_NAMES="gitops-vm-protection"
 
 _name_in_list() {
@@ -616,10 +616,6 @@ cleanup_variant_leftovers() {
       # shellcheck disable=SC2086
       _delete_starter_kit_cluster_crs drcluster ${SPOKE_CLUSTERS:-ocp-primary ocp-secondary}
       oc delete namespace vp-s4-storage --wait=false &>/dev/null || true
-      ;;
-    odf)
-      log "Removing leftover DRPolicy 2m-drpolicy (odf uses 2m-vm / 2m-novm)..."
-      oc delete drpolicy 2m-drpolicy --wait=false &>/dev/null || true
       ;;
     *)
       return 0

@@ -36,7 +36,8 @@ row-count drops as data loss, and live TPC-C needs FK-consistent rows.
 
 A **PASS** means audit sequence continuity, no TPC-C row-count regression vs baseline
 on any supported platform (PostgreSQL or SQL Server),
-and RPO within `DR_VALIDATION_MAX_RPO_SECONDS` (default `120` s).
+and RPO within the DRPolicy `schedulingInterval` (5 minutes for `5m-vm`;
+override with `DR_VALIDATION_MAX_RPO_SECONDS`).
 
 | Path | Purpose |
 |------|---------|
@@ -142,8 +143,9 @@ replicated with the protected KubeVirt workload.
 
 A **PASS** means no missing sequence numbers, no parse errors, and no RPO threshold breach.
 Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bound as
-`gap * interval` seconds and fails when that estimate is greater than `DR_VALIDATION_MAX_RPO_SECONDS`
-(default `120` seconds / 2 minutes, aligned with the `2m-vm` DRPolicy).
+`gap * interval` seconds and fails when that estimate is greater than the DRPolicy
+`schedulingInterval` (read from `5m-vm`; default `300` seconds / 5 minutes).
+Set `DR_VALIDATION_MAX_RPO_SECONDS` only to override the policy-derived threshold.
 
 ## Components
 
@@ -171,7 +173,7 @@ Sequence gaps imply lost writes (RPO breach); the checker estimates an upper bou
 | `DR_VALIDATION_STATUS_MAX_AGE_SEC` | `300` | Max audit age for `status-hammerdb.sh` freshness check (not used with `--schema-only`) |
 | `DR_VALIDATION_LOG_PATH` | `/var/lib/ramendr-dr-validation/timestamps.log` | Log on VM |
 | `DR_VALIDATION_INTERVAL` | `10.0` | Seconds between records |
-| `DR_VALIDATION_MAX_RPO_SECONDS` | `120` | Fail check when estimated RPO (`max_seq_gap * interval`) exceeds this threshold |
+| `DR_VALIDATION_MAX_RPO_SECONDS` | DRPolicy `schedulingInterval` (`300` for `5m-vm`) | Fail check when estimated RPO (`max_seq_gap * interval`) exceeds this threshold |
 | `RAMENDR_SANITY_MAX_RTO_SECONDS` | `1200` | UI sanity test: fail when measured failover/relocate RTO exceeds this limit |
 | `RAMENDR_SANITY_RTO_WARN_SECONDS` | `900` | UI sanity test: log a warning when RTO exceeds this threshold (still below hard limit) |
 | `DR_VALIDATION_SNAPSHOT_KEEP` | `1` | Auto-snapshot dirs to retain (latest only; `latest` symlink always points at current baseline) |

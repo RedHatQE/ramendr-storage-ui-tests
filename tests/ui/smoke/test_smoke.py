@@ -49,6 +49,8 @@ from tests.utils.pattern_variant import (
     is_minimal_variant,
     is_partner_variant,
     is_qe_mixed_fleet,
+    novm_drpolicy_name,
+    vm_drpolicy_name,
 )
 from tests.utils.vrg import (
     active_cluster_from_drpc,
@@ -94,7 +96,10 @@ _skip_without_qe_fleet = pytest.mark.skipif(
 )
 _skip_without_vm_drpc = pytest.mark.skipif(
     not has_vm_drpc(),
-    reason="Partner variants do not deploy 2m-vm / gitops-vm-protection",
+    reason=(
+        "Partner variants do not deploy the VM DRPolicy "
+        f"({vm_drpolicy_name()}) / gitops-vm-protection"
+    ),
 )
 _skip_without_s4 = pytest.mark.skipif(
     not has_s4_storage(),
@@ -729,15 +734,16 @@ class TestInfraSmoke:
     @_skip_without_vm_drpc
     @_jira_deployment_smoke
     def test_drpolicy_validated(self, hub_kubeconfig):
-        """Both DRPolicies (2m-novm, 2m-vm) have Validated=True."""
-        expected = {"2m-novm", "2m-vm"}
+        """Both DRPolicies (non-VM and VM) have Validated=True."""
+        expected = {novm_drpolicy_name(), vm_drpolicy_name()}
         raw = run_oc(
             ["get", "drpolicies", "--output=json"],
             hub_kubeconfig,
         )
+        items = json.loads(raw)["items"]
         policies = {
             item["metadata"]["name"]: item
-            for item in json.loads(raw)["items"]
+            for item in items
             if item["metadata"]["name"] in expected
         }
 
@@ -813,23 +819,24 @@ class TestInfraSmoke:
 
     @_skip_without_s4
     def test_drpartner_s4_drpolicy(self, hub_kubeconfig):
-        """drpartner-s4 creates 2m-drpolicy (no flattening; no 2m-vm / 2m-novm / VMs)."""
+        """drpartner-s4 creates only the non-VM DRPolicy (no 5m-vm / VMs)."""
+        vm_policy = vm_drpolicy_name()
+        novm_policy = novm_drpolicy_name()
         raw = run_oc(["get", "drpolicies", "--output=json"], hub_kubeconfig)
         policies = {item["metadata"]["name"]: item for item in json.loads(raw)["items"]}
-        assert "2m-drpolicy" in policies, (
-            f"DRPolicy 2m-drpolicy not found: {sorted(policies)}"
+        assert novm_policy in policies, (
+            f"DRPolicy {novm_policy} not found: {sorted(policies)}"
         )
-        unexpected = {"2m-vm", "2m-novm"} & policies.keys()
+        unexpected = {vm_policy} & policies.keys()
         assert not unexpected, (
-            "drpartner-s4 must not deploy ODF vm/novm policy names; "
-            f"found: {sorted(policies)}"
+            f"drpartner-s4 must not deploy the VM policy; found: {sorted(policies)}"
         )
         conditions = {
             c["type"]: c["status"]
-            for c in policies["2m-drpolicy"].get("status", {}).get("conditions", [])
+            for c in policies[novm_policy].get("status", {}).get("conditions", [])
         }
         validated = conditions.get("Validated", "False")
-        assert validated == "True", f"2m-drpolicy Validated={validated}"
+        assert validated == "True", f"{novm_policy} Validated={validated}"
 
     @_skip_without_minimal
     def test_drpartner_minimal_has_no_s4_storage(self, hub_kubeconfig):
@@ -946,12 +953,14 @@ class TestUiSmoke:
           2. Dismiss the welcome modal if present.
           3. Switch to Fleet Management perspective and open Data Services →
              Disaster recovery via the left nav.
-          4. Policies tab: assert 2m-vm is Validated with 1 Application.
+          4. Policies tab: assert the VM DRPolicy (5m-vm by default) is
+             Validated with 1 Application.
           5. Protected applications tab: wait until gitops-vm-protection is
              Healthy (cluster-data upload can take a while after deploy),
-             using policy 2m-vm, placed on cluster ocp-primary.
+             using that policy, placed on cluster ocp-primary.
         """
         _require_ui_credentials()
+        vm_policy = vm_drpolicy_name()
         wait_for_drpc_protected(hub_kubeconfig)
 
         login_page = LoginPage(page)
@@ -969,7 +978,7 @@ class TestUiSmoke:
         # --- Policies tab ---
         drpc_page.navigate_policies_tab()
         drpc_page.assert_drpolicy(
-            "2m-vm",
+            vm_policy,
             expected_status="Validated",
             expected_applications="1 Application",
         )
@@ -983,6 +992,6 @@ class TestUiSmoke:
         )
         drpc_page.assert_drpc(
             "gitops-vm-protection",
-            expected_policy="2m-vm",
+            expected_policy=vm_policy,
             expected_cluster="ocp-primary",
         )

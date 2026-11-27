@@ -17,6 +17,11 @@ PATTERN_VARIANT = (
 PARTNER_VARIANTS = frozenset({"drpartner-s4", "drpartner-minimal"})
 ALL_VARIANTS = frozenset({"odf", "drpartner-s4", "drpartner-minimal"})
 
+# DRPolicy names on the pinned fork branch (regional-dr chart). The VM policy
+# backs the gitops-vm-protection DRPC; override for a fork with other RPO names.
+VM_DRPOLICY = os.getenv("RAMENDR_VM_DRPOLICY", "5m-vm").strip() or "5m-vm"
+NOVM_DRPOLICY = os.getenv("RAMENDR_NOVM_DRPOLICY", "5m-novm").strip() or "5m-novm"
+
 
 def is_qe_mixed_fleet() -> bool:
     """True when tests should expect the QE 4-VM Windows+Linux gitops-vms fleet."""
@@ -51,8 +56,18 @@ def has_edge_vms() -> bool:
 
 
 def has_vm_drpc() -> bool:
-    """2m-vm DRPolicy + gitops-vm-protection DRPC exist on the odf variant."""
+    """The VM DRPolicy + gitops-vm-protection DRPC exist on the odf variant."""
     return PATTERN_VARIANT == "odf"
+
+
+def vm_drpolicy_name() -> str:
+    """DRPolicy with vmSupport, referenced by gitops-vm-protection."""
+    return VM_DRPOLICY
+
+
+def novm_drpolicy_name() -> str:
+    """DRPolicy without vmSupport (odf secondary; drpartner-s4 only policy)."""
+    return NOVM_DRPOLICY
 
 
 def hub_argocd_namespace() -> str:

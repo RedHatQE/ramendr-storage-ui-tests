@@ -16,9 +16,9 @@ fi
 
 export PYTHONPATH="${DR_VALIDATION_DIR}:${PYTHONPATH:-}"
 INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
-# Default aligns with the 2m-vm DRPolicy: ≤120 s data loss is acceptable.
+# RPO threshold follows the DRPolicy schedulingInterval (5m-vm -> 300 s).
 # Override with DR_VALIDATION_MAX_RPO_SECONDS if the policy schedule changes.
-MAX_RPO_SECONDS="${DR_VALIDATION_MAX_RPO_SECONDS:-120}"
+MAX_RPO_SECONDS=""
 # UTC datetime of the "Initiate" UI click (ISO-8601).  Set by test_sanity.py via
 # DR_VALIDATION_CUTOFF_UTC.  When empty the cutoff-based RPO check is skipped.
 CUTOFF_UTC="${DR_VALIDATION_CUTOFF_UTC:-}"
@@ -39,6 +39,7 @@ echo "=============================================="
 echo ""
 
 ensure_hub_kubeconfig
+MAX_RPO_SECONDS="$(dr_validation_max_rpo_seconds)"
 PRIMARY="$(determine_primary_cluster)"
 [[ -z "$PRIMARY" ]] && PRIMARY="(unknown)"
 echo "Current primary cluster: ${PRIMARY}"

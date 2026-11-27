@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -46,6 +47,56 @@ def hub_env(kubeconfig: str) -> dict[str, str]:
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
     return env
+
+
+_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
+
+
+def parse_duration_seconds(raw: str) -> float | None:
+    """Parse a Kubernetes duration string (``5m``, ``120s``, ``1h30m``).
+
+    Returns ``None`` when *raw* is empty or not a valid duration.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return float(raw)
+    units = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+    parts = _DURATION_RE.findall(raw)
+    if not parts or "".join(num + unit for num, unit in parts) != raw:
+        return None
+    return sum(float(num) * units[unit] for num, unit in parts)
+
+
+def drpolicy_interval_seconds(
+    *, kubeconfig: str, policy_name: str, timeout: float = 20.0
+) -> float | None:
+    """Read ``spec.schedulingInterval`` from *policy_name* on the hub.
+
+    The DRPolicy is the source of truth for the expected RPO (``5m`` -> 300 s).
+    Returns ``None`` when the policy cannot be read or has no parsable interval.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "oc",
+                "get",
+                "drpolicy",
+                policy_name,
+                "--output=jsonpath={.spec.schedulingInterval}",
+            ],
+            env=hub_env(kubeconfig),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_duration_seconds(result.stdout)
 
 
 def _parse_utc(ts: str) -> datetime:

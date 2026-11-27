@@ -20,19 +20,21 @@ from __future__ import annotations
 import reporting.jira_results as jira_results
 from reporting.jira_client import JiraWriteError
 from tests.ui.sanity import test_sanity as sanity
+from tests.utils.pattern_variant import vm_drpolicy_name
 
+_VM_DRPOLICY = vm_drpolicy_name()
 _HEALTHY_PRIMARY_FRESH = {
-    "policy": "2m-vm",
+    "policy": _VM_DRPOLICY,
     "cluster": "ocp-primary",
     "status": "Healthy",
 }
 _HEALTHY_SECONDARY_POST_FAILOVER = {
-    "policy": "2m-vm",
+    "policy": _VM_DRPOLICY,
     "cluster": "ocp-secondary",
     "status": "Healthy",
 }
 _HEALTHY_PRIMARY_POST_RELOCATE = {
-    "policy": "2m-vm",
+    "policy": _VM_DRPOLICY,
     "cluster": "ocp-primary",
     "status": "Healthy",
 }

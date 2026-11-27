@@ -10,7 +10,8 @@ source "$SCRIPT_DIR/lib.sh"
 
 export PYTHONPATH="${DR_VALIDATION_DIR}:${PYTHONPATH:-}"
 INTERVAL="${DR_VALIDATION_INTERVAL:-10.0}"
-MAX_RPO_SECONDS="${DR_VALIDATION_MAX_RPO_SECONDS:-120}"
+# Empty here: dr_validation_max_rpo_seconds() reads the DRPolicy interval below.
+MAX_RPO_SECONDS=""
 CUTOFF_UTC="${DR_VALIDATION_CUTOFF_UTC:-}"
 CHECK_ROOT="${REPO_ROOT}/.work/dr-validation-db/checks"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -27,6 +28,7 @@ echo "======================================================"
 echo ""
 
 ensure_hub_kubeconfig
+MAX_RPO_SECONDS="$(dr_validation_max_rpo_seconds)"
 PRIMARY="$(determine_primary_cluster)"
 [[ -z "$PRIMARY" ]] && PRIMARY="(unknown)"
 echo "Current primary cluster: ${PRIMARY}"

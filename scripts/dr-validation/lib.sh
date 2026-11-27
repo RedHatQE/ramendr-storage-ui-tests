@@ -70,6 +70,61 @@ require_cmd() {
   done
 }
 
+# Convert a Kubernetes duration ("5m", "120s", "1h30m", "500ms") to whole seconds.
+dr_validation_duration_to_seconds() {
+  local raw="${1:-}"
+  [[ -n "$raw" ]] || return 1
+  python3 - "$raw" <<'PY'
+import re
+import sys
+
+raw = sys.argv[1].strip()
+if not raw:
+    sys.exit(1)
+if raw.isdigit():
+    print(int(raw))
+    raise SystemExit(0)
+units = {"h": 3600, "m": 60, "s": 1, "ms": 0.001}
+parts = re.findall(r"(\d+(?:\.\d+)?)(ms|h|m|s)", raw)
+if not parts or "".join(num + unit for num, unit in parts) != raw:
+    sys.exit(1)
+print(int(sum(float(num) * units[unit] for num, unit in parts)))
+PY
+}
+
+# Print the schedulingInterval of the DRPolicy behind the VM-protection DRPC.
+# The policy is the source of truth for the post-DR RPO threshold (5m -> 300s);
+# DR_VALIDATION_MAX_RPO_SECONDS remains an explicit operator override.
+# shellcheck disable=SC2120  # optional policy name; callers may pass one
+dr_policy_interval_seconds() {
+  local policy="${1:-}" raw seconds
+  if [[ -z "$policy" ]]; then
+    policy="$(oc get drplacementcontrol "$DRPC_NAME" -n "$DRPC_NAMESPACE" \
+      -o jsonpath='{.spec.drPolicyRef.name}' 2>/dev/null || true)"
+  fi
+  [[ -n "$policy" ]] || policy="${RAMENDR_VM_DRPOLICY:-5m-vm}"
+  raw="$(oc get drpolicy "$policy" \
+    -o jsonpath='{.spec.schedulingInterval}' 2>/dev/null || true)"
+  [[ -n "$raw" ]] || return 1
+  seconds="$(dr_validation_duration_to_seconds "$raw" 2>/dev/null || true)"
+  [[ -n "$seconds" ]] || return 1
+  echo "$seconds"
+}
+
+# Max allowed data loss after DR: explicit override, else the DRPolicy interval.
+dr_validation_max_rpo_seconds() {
+  if [[ -n "${DR_VALIDATION_MAX_RPO_SECONDS:-}" ]]; then
+    echo "$DR_VALIDATION_MAX_RPO_SECONDS"
+    return 0
+  fi
+  local seconds
+  if seconds="$(dr_policy_interval_seconds)"; then
+    echo "$seconds"
+    return 0
+  fi
+  echo "${DR_VALIDATION_MAX_RPO_FALLBACK_SECONDS:-300}"
+}
+
 determine_primary_cluster() {
   local placement_cluster
   placement_cluster=$(oc get placementdecision -n "$DRPC_NAMESPACE" \

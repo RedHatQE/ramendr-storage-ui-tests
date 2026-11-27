@@ -21,7 +21,7 @@ The entrypoint is `scripts/redeploy.sh`.
 **Upstream pinning (single fork, all variants):**
 
 - Local checkout and default pin: `elsapassaro/ramendr-starter-kit` branch `odf-4.22.8.1` at
-  `5e99c4b140925622c4bd75897d78d01bfba939c4` (upstream v1.3 + QE odf overrides). Override with
+  `81ec4e5c6bbbf95613900d70a236a7f91f5ef744` (upstream v1.3 + QE odf overrides). Override with
   `UPSTREAM_REPO` / `UPSTREAM_REF` / `UPSTREAM_BRANCH`.
 - `redeploy.sh` patches `main.variant` and sets `byoc: true` in the local checkout. Preview RHDR
   (`rhdr-catalog`, `rhdr-multicluster-operator`, GitOps `extraObjects` IDMS) is already committed
@@ -76,5 +76,5 @@ Currently implemented in `tests/ui/`:
 
 Smoke tests expect the full mixed fleet (4 edge VMs) and validate Windows OS disk size (45 Gi)
 when `PATTERN_VARIANT=odf`. Partner variants skip those assertions and check S4
-`2m-drpolicy` (`drpartner-s4`) or the lack of S4/DRPolicy (`drpartner-minimal`). HammerDB smoke checks TPC-C **schema**
+`5m-novm` (`drpartner-s4`) or the lack of S4/DRPolicy (`drpartner-minimal`). HammerDB smoke checks TPC-C **schema**
 only; sanity starts OLTP after DRPC Healthy and stops writers on teardown.

@@ -56,6 +56,16 @@ assert_success() {
   fi
 }
 
+assert_eq() {
+  local label="$1" expected="$2" actual="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    echo "  OK   $label: ${actual}"
+  else
+    echo "  FAIL $label: expected '${expected}', got '${actual}'"
+    TOTAL_FAIL=$((TOTAL_FAIL + 1))
+  fi
+}
+
 main() {
   echo "=== dr-validation/lib.sh mssql-hammerdb credential parsing tests ==="
   echo ""
@@ -242,6 +252,51 @@ EOF
   else
     echo "  OK   Scenario 6: correctly failed without combining fields across the lower-indentation boundary"
   fi
+  echo ""
+
+
+  echo "--- Scenario 7: RPO threshold follows DRPolicy schedulingInterval ---"
+  local bin="$tmpdir/bin"
+  mkdir -p "$bin"
+  cat >"$bin/oc" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *drplacementcontrol* ]]; then
+  echo "5m-vm"
+elif [[ "$*" == *drpolicy* ]]; then
+  echo "5m"
+else
+  exit 1
+fi
+EOF
+  chmod +x "$bin/oc"
+
+  assert_eq "duration 5m" "300" \
+    "$(dr_validation_duration_to_seconds 5m)"
+  assert_eq "duration 2m" "120" \
+    "$(dr_validation_duration_to_seconds 2m)"
+  assert_eq "duration 1h30m" "5400" \
+    "$(dr_validation_duration_to_seconds 1h30m)"
+  assert_eq "DRPolicy interval (via DRPC ref)" "300" \
+    "$(PATH="$bin:$PATH" dr_policy_interval_seconds)"
+  assert_eq "DRPolicy interval (explicit name)" "300" \
+    "$(PATH="$bin:$PATH" dr_policy_interval_seconds 5m-novm)"
+  unset DR_VALIDATION_MAX_RPO_SECONDS
+  assert_eq "max RPO from DRPolicy" "300" \
+    "$(PATH="$bin:$PATH" dr_validation_max_rpo_seconds)"
+  assert_eq "explicit RPO override wins" "120" \
+    "$(PATH="$bin:$PATH" DR_VALIDATION_MAX_RPO_SECONDS=120 dr_validation_max_rpo_seconds)"
+
+  # --- Scenario 8: unreadable DRPolicy falls back to a safe default (never
+  #     silently keeps a stale 2-minute threshold). ---
+  echo "--- Scenario 8: unreadable DRPolicy uses the configured fallback ---"
+  cat >"$bin/oc" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$bin/oc"
+  unset DR_VALIDATION_MAX_RPO_SECONDS
+  assert_eq "fallback RPO" "777" \
+    "$(PATH="$bin:$PATH" DR_VALIDATION_MAX_RPO_FALLBACK_SECONDS=777 dr_validation_max_rpo_seconds)"
   echo ""
 
   if [[ $TOTAL_FAIL -gt 0 ]]; then

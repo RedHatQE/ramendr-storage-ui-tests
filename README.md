@@ -30,7 +30,7 @@ See that repository's README for setup instructions. For credentials shared acro
 
 `scripts/redeploy.sh` will:
 
-1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `5e99c4b140925622c4bd75897d78d01bfba939c4` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
+1. Clone the fork `elsapassaro/ramendr-starter-kit` at the pinned commit SHA `81ec4e5c6bbbf95613900d70a236a7f91f5ef744` into `.work/upstream/ramendr-starter-kit` and set `main.variant` to `PATTERN_VARIANT` (`odf` by default).
 2. Patch upstream `pattern.sh` to run `podman` without a TTY (required for CI — upstream uses `podman run -it` which fails when stdin/stdout are not a terminal). No local file injection into ArgoCD's sync path is needed: all customizations live in the fork.
 3. Provision hub + two spokes on AWS (BYOC spokes).
 4. Copy your `VALUES_SECRET` into `.work/values-secret.yaml`, merge fresh spoke kubeconfig
@@ -53,7 +53,7 @@ Two different upstream references are in play:
 
 | Consumer | Source | Default |
 |----------|--------|---------|
-| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `5e99c4b140925622c4bd75897d78d01bfba939c4` (`odf-4.22.8.1`) |
+| `redeploy.sh` local checkout | `UPSTREAM_REF` commit SHA checked out into `.work/upstream/` | All variants: fork `81ec4e5c6bbbf95613900d70a236a7f91f5ef744` (`odf-4.22.8.1`) |
 | Hub Argo CD Applications | Remote git on GitHub | Fork branch `odf-4.22.8.1` (`main.variant: odf` on tip). Partner variants need a fork branch/commit with matching `main.variant` for stable GitOps. |
 
 To test a different fork commit locally, set `UPSTREAM_REPO` and `UPSTREAM_REF` before running
@@ -184,7 +184,7 @@ Values live under `variants/<name>/`. See the
 | `PATTERN_VARIANT` | Upstream default | Purpose |
 |-------------------|------------------|---------|
 | `odf` *(default)* | QE fork `odf-4.22.8.1` | Preview RHDR (`rhdr-catalog`), mixed 4-VM fleet (2 Linux + 2 Windows), HammerDB, ODF |
-| `drpartner-s4` | Same fork | Partner CSI + S4; preview RHDR from upstream v1.3; DRPolicy `2m-drpolicy`; no VMs |
+| `drpartner-s4` | Same fork | Partner CSI + S4; preview RHDR from upstream v1.3; DRPolicy `5m-novm`; no VMs |
 | `drpartner-minimal` | Same fork | Partner CSI only; preview RHDR from upstream v1.3; no S4 / DRPolicy / VMs |
 
 ```bash
@@ -204,14 +204,14 @@ and ODF golden-image fix-up (override with `REQUIRE_WINDOWS_VMS` / `SKIP_*`).
 
 **GitOps:** hub Argo CD reads `values-global.yaml` from the **git remote**, not the local patch.
 `redeploy.sh` fails if that git revision still has a different `main.variant`. The fork at
-`5e99c4b…` has `main.variant: odf` committed. Partner deploys need a fork that **commits**
+`81ec4e5…` has `main.variant: odf` committed. Partner deploys need a fork that **commits**
 `drpartner-s4` or `drpartner-minimal`, then `UPSTREAM_REPO` pointed at that fork.
 
 ACM spoke placement still uses ManagedCluster label `clusterGroup=resilient`. That label is
 independent of `main.variant`.
 
 Smoke tests skip VM / ODF / MirrorPeer assertions on partner variants and instead check
-`vp-s4-storage` plus `2m-drpolicy` (`drpartner-s4`) or their absence (`drpartner-minimal`). Export the same
+`vp-s4-storage` plus `5m-novm` (`drpartner-s4`) or their absence (`drpartner-minimal`). Export the same
 `PATTERN_VARIANT` when you run pytest. Partner CSI itself is not something the pattern
 or these tests can verify.
 
@@ -313,8 +313,9 @@ After DR in the UI, run:
 ./scripts/dr-validation/post-dr-automation.sh
 ```
 
-Defaults enforce a **2-minute RPO** and **20-minute RTO** (warn at 15 minutes):
-`DR_VALIDATION_MAX_RPO_SECONDS=120`, `RAMENDR_SANITY_MAX_RTO_SECONDS=1200`, and
+Defaults enforce an RPO equal to the DRPolicy `schedulingInterval` (5 minutes for
+`5m-vm`) and a **20-minute RTO** (warn at 15 minutes): override with
+`DR_VALIDATION_MAX_RPO_SECONDS`, `RAMENDR_SANITY_MAX_RTO_SECONDS=1200`, and
 `RAMENDR_SANITY_RTO_WARN_SECONDS=900`.
 
 See [`dr-validation/DATABASE-SCHEMA.md`](dr-validation/DATABASE-SCHEMA.md) for table details.

@@ -11,8 +11,14 @@
 DEFAULT_PATTERN_VARIANT=odf
 PATTERN_VARIANTS="odf drpartner-s4 drpartner-minimal"
 
+# DRPolicy names produced by the fork's regional-dr chart. The VM policy
+# must match the DRPC spec.drPolicyRef; both are overridable for a fork that
+# pins different RPO names.
+: "${RAMENDR_VM_DRPOLICY:=5m-vm}"
+: "${RAMENDR_NOVM_DRPOLICY:=5m-novm}"
+
 : "${UPSTREAM_REPO:=https://github.com/elsapassaro/ramendr-starter-kit.git}"
-: "${UPSTREAM_REF:=5e99c4b140925622c4bd75897d78d01bfba939c4}"
+: "${UPSTREAM_REF:=81ec4e5c6bbbf95613900d70a236a7f91f5ef744}"
 : "${UPSTREAM_BRANCH:=odf-4.22.8.1}"
 
 _pv_log() {
@@ -50,6 +56,7 @@ resolve_pattern_variant() {
       ;;
   esac
   export PATTERN_VARIANT UPSTREAM_REPO UPSTREAM_REF UPSTREAM_BRANCH
+  export RAMENDR_VM_DRPOLICY RAMENDR_NOVM_DRPOLICY
 }
 
 pattern_variant_is_partner() {

@@ -58,7 +58,7 @@ from config.settings import (
     PRIMARY_KUBECONFIG,
     SECONDARY_KUBECONFIG,
 )
-from tests.utils.pattern_variant import has_vm_drpc
+from tests.utils.pattern_variant import has_vm_drpc, vm_drpolicy_name
 from pages.dashboard_page import DashboardPage
 from pages.drpc_page import DRPCPage
 from pages.login_page import LoginPage
@@ -72,6 +72,7 @@ from reporting.jira_results import (
 from tests.utils.dr_validation import (
     assert_all_hammerdb_snapshots_ready,
     collect_db_snapshot,
+    drpolicy_interval_seconds,
     hammerdb_mode_active,
     start_hammerdb_load,
     stop_hammerdb_load,
@@ -87,6 +88,12 @@ _SKIP_DR_TIMESTAMP_VALIDATION = (
     os.getenv("RAMENDR_SANITY_SKIP_DR_VALIDATION", "0").lower() in {"1", "true", "yes"}
     or os.getenv("SKIP_DR_VALIDATION", "0") == "1"
 )
+
+# DRPolicy that backs the gitops-vm-protection DRPC; its schedulingInterval is
+# the expected RPO and is read from the cluster instead of being hardcoded.
+_VM_DRPOLICY = vm_drpolicy_name()
+_DRPOLICY_INTERVAL_SECONDS: float | None = None
+_DRPOLICY_INTERVAL_FETCHED = False
 
 _MAX_RTO_SECONDS = float(os.getenv("RAMENDR_SANITY_MAX_RTO_SECONDS", "1200"))
 _RTO_WARN_SECONDS = float(os.getenv("RAMENDR_SANITY_RTO_WARN_SECONDS", "900"))
@@ -171,6 +178,26 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _vm_drpolicy_interval_seconds() -> float | None:
+    """Resolve the DRPolicy schedulingInterval once for RTO messaging."""
+    global _DRPOLICY_INTERVAL_SECONDS, _DRPOLICY_INTERVAL_FETCHED
+    if not _DRPOLICY_INTERVAL_FETCHED:
+        _DRPOLICY_INTERVAL_SECONDS = drpolicy_interval_seconds(
+            kubeconfig=HUB_KUBECONFIG, policy_name=_VM_DRPOLICY
+        )
+        _DRPOLICY_INTERVAL_FETCHED = True
+    return _DRPOLICY_INTERVAL_SECONDS
+
+
+def _drpolicy_target_label(interval_seconds: float | None) -> str:
+    """Human-readable DRPolicy RPO target (``5m`` -> ``~5m (5m-vm)``)."""
+    if not interval_seconds:
+        return f"the {_VM_DRPOLICY} DRPolicy interval (could not read it)"
+    if interval_seconds % 60 == 0:
+        return f"~{interval_seconds / 60:.0f}m ({_VM_DRPOLICY})"
+    return f"~{interval_seconds:.0f}s ({_VM_DRPOLICY})"
+
+
 def _assert_rto_within_standard(*, phase: str, started_at: float | None) -> None:
     """Assert measured failover/relocate duration is within the configured RTO."""
     if started_at is None:
@@ -182,7 +209,8 @@ def _assert_rto_within_standard(*, phase: str, started_at: float | None) -> None
     if elapsed > _RTO_WARN_SECONDS:
         print(
             f"WARNING: {phase} RTO exceeded {_RTO_WARN_SECONDS:.0f}s "
-            f"(elapsed={elapsed:.1f}s; DRPolicy target is ~2m). "
+            f"(elapsed={elapsed:.1f}s; DRPolicy target is "
+            f"{_drpolicy_target_label(_vm_drpolicy_interval_seconds())}). "
             f"Still within {_MAX_RTO_SECONDS:.0f}s hard limit."
         )
     assert elapsed <= _MAX_RTO_SECONDS, (
@@ -1430,7 +1458,7 @@ def _run_force_full_sanity_dr_flow(
 
     drpc_page.assert_drpc(
         drpc_name,
-        expected_policy="2m-vm",
+        expected_policy=_VM_DRPOLICY,
         expected_cluster="ocp-primary",
     )
     drpc_page.assert_drpc_actions_menu(drpc_name)
@@ -1704,7 +1732,10 @@ def stop_hammerdb_load_after_sanity():
 @pytest.mark.requires_stage
 @pytest.mark.skipif(
     not has_vm_drpc(),
-    reason="Partner variants do not deploy 2m-vm / gitops-vm-protection",
+    reason=(
+        "Partner variants do not deploy the VM DRPolicy "
+        f"({_VM_DRPOLICY}) / gitops-vm-protection"
+    ),
 )
 @pytest.mark.usefixtures("stop_hammerdb_load_after_sanity")
 class TestUiSanity:
@@ -1776,7 +1807,7 @@ class TestUiSanity:
         # --- Policies tab ---
         drpc_page.navigate_policies_tab()
         drpc_page.assert_drpolicy(
-            "2m-vm",
+            _VM_DRPOLICY,
             expected_status="Validated",
             expected_applications="1 Application",
         )
@@ -1784,8 +1815,9 @@ class TestUiSanity:
         # --- Protected applications tab ---
         drpc_page.navigate_protected_applications_tab()
         state = drpc_page.get_drpc_state("gitops-vm-protection")
-        assert state["policy"] == "2m-vm", (
-            f"DRPC 'gitops-vm-protection' policy mismatch: {state['policy']!r}"
+        assert state["policy"] == _VM_DRPOLICY, (
+            f"DRPC 'gitops-vm-protection' policy mismatch: {state['policy']!r} "
+            f"(expected {_VM_DRPOLICY!r})"
         )
 
         drpc_backend = _get_drpc_protected_condition()
@@ -1862,7 +1894,7 @@ class TestUiSanity:
             if ready_for_failover:
                 drpc_page.assert_drpc(
                     "gitops-vm-protection",
-                    expected_policy="2m-vm",
+                    expected_policy=_VM_DRPOLICY,
                     expected_cluster="ocp-primary",
                 )
                 drpc_page.assert_drpc_actions_menu("gitops-vm-protection")
